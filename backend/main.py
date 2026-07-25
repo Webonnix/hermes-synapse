@@ -423,10 +423,20 @@ os.makedirs(generated_images_dir, exist_ok=True)
 app.mount("/api/generated-images", StaticFiles(directory=generated_images_dir), name="generated_images")
 
 
-# Enable CORS for frontend dashboard
+# Enable CORS for frontend dashboard. Origins come from HERMES_ALLOWED_ORIGINS
+# (comma-separated); the default covers local dev and the known deployments.
+_DEFAULT_ALLOWED_ORIGINS = (
+    "http://localhost:9119,http://127.0.0.1:9119,"
+    "http://192.168.0.200:9119,https://hermes.webonnix.net"
+)
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("HERMES_ALLOWED_ORIGINS", _DEFAULT_ALLOWED_ORIGINS).split(",")
+    if origin.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Adjust in production
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
