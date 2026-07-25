@@ -389,7 +389,8 @@ def _parse_tool_arguments(raw_args: Any) -> Dict[str, Any]:
         parsed = json.loads(raw_args)
         return parsed if isinstance(parsed, dict) else {}
     except Exception:
-        logger.warning("Could not parse tool arguments as JSON: %r", raw_args[:500])
+        from backend.redaction import safe_log_preview
+        logger.warning("Could not parse tool arguments as JSON (%s)", safe_log_preview(raw_args))
         return {}
 
 
@@ -1070,7 +1071,11 @@ class JarvisAgent:
             )
         except Exception as exc:
             logger.debug("Could not publish LLM runtime settings: %s", exc)
-        logger.info("Runtime config updated: %s", self.get_runtime_config())
+        # Do not log the full config: system_prompt is a full prompt and must stay
+        # out of operational logs.
+        safe_config = {k: v for k, v in self.get_runtime_config().items() if k != "system_prompt"}
+        logger.info("Runtime config updated: %s (system_prompt len=%d)",
+                    safe_config, len(self.system_prompt or ""))
 
     def get_history(self, session_id: str) -> List[Dict[str, str]]:
         from backend import database as db
@@ -1291,7 +1296,8 @@ class JarvisAgent:
 
         # ── Complexity routing (Fugu-style) ───────────────────────────────────────
         complexity = await classify_complexity(user_message, self.api_key, self.api_base, self.provider)
-        logger.info(f"Complexity routing decision: '{complexity}' for query: '{user_message[:60]}'")
+        from backend.redaction import safe_log_preview
+        logger.info(f"Complexity routing decision: '{complexity}' for query ({safe_log_preview(user_message, 60)})")
         log_activity(
             activity_type="active",
             source="Router",

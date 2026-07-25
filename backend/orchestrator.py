@@ -175,7 +175,8 @@ Rules:
     planner_model = get_agent_model("planner", model)
     
     # 1. PLAN NODE
-    state.add_trace("Orchestrator", "Start", f"Received query for '{orch_id}': '{query}'")
+    from backend.redaction import safe_log_preview
+    state.add_trace("Orchestrator", "Start", f"Received query for '{orch_id}' ({safe_log_preview(query)})")
     state.add_trace("Orchestrator", "Models", f"🤖 Models: Planner={planner_model} | Synth={model}")
     allowed_agent_ids = {a["id"] for a in children} | {a["id"] for a in all_subagents}
     
@@ -252,7 +253,10 @@ Rules:
                 break
             except Exception as e:
                 parse_err = str(e)
-                logger.error(f"Failed to parse or validate planner JSON (attempt {attempt}/{max_retries}): {parse_err}. Response was: {plan_response}")
+                logger.error(
+                    f"Failed to parse or validate planner JSON (attempt {attempt}/{max_retries}): {parse_err}. "
+                    f"Response {safe_log_preview(plan_response)}"
+                )
                 
         if parse_err is not None:
             state.steps = []

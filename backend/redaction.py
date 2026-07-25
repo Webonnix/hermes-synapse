@@ -123,6 +123,20 @@ async def detect_and_redact(text: str) -> Tuple[str, Dict[str, str]]:
     return redacted, mapping
 
 
+def safe_log_preview(text: Any, limit: int = 80) -> str:
+    """Safe representation of user text / prompts / tool args for operational logs:
+    regex-redacted first `limit` chars plus length and a short hash — never the
+    full payload."""
+    import hashlib
+
+    raw = text if isinstance(text, str) else str(text)
+    digest = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:10]
+    redacted, _ = _regex_redact(raw[: limit * 2])
+    preview = redacted[:limit].replace("\n", " ")
+    suffix = "…" if len(raw) > limit else ""
+    return f"len={len(raw)} sha={digest} preview='{preview}{suffix}'"
+
+
 def store_mapping(request_id: str, mapping: Dict[str, str]) -> None:
     if not mapping:
         return
