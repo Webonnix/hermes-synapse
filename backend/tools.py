@@ -5,7 +5,7 @@ import asyncio
 import uuid
 import httpx
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger("hermes.tools")
 
@@ -1129,7 +1129,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "execute_command",
-            "description": "Аварийный запуск команды оболочки класса R4. Используйте только когда зарегистрированные инструменты неприменимы; требует двух подтверждений владельца.",
+            "description": "DEPRECATED: аварийный запуск команды оболочки класса R4 на хосте бэкенда. Для работы с кодом используйте инструменты dev_* (песочница dev-runner). Применяйте только когда зарегистрированные инструменты неприменимы; требует двух подтверждений владельца.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1175,6 +1175,96 @@ TOOLS_SCHEMA = [
             "name": "git_push",
             "description": "Отправляет закоммиченные изменения в git-репозиторий для разработки на удалённый Gitea-сервер.",
             "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "dev_read_file",
+            "description": "Читает файл из dev-репозитория (backend/data/dev-repo) через контейнер-песочницу dev-runner.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Путь к файлу относительно корня dev-repo, например 'src/app.py'."}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "dev_write_file",
+            "description": "Записывает файл в dev-репозиторий через песочницу dev-runner (создаёт директории при необходимости).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Путь к файлу относительно корня dev-repo."},
+                    "content": {"type": "string", "description": "Полное новое содержимое файла."}
+                },
+                "required": ["path", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "dev_patch",
+            "description": "Применяет unified diff к dev-репозиторию через песочницу dev-runner (git apply).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Основной затрагиваемый файл (для журнала и валидации пути)."},
+                    "unified_diff": {"type": "string", "description": "Патч в формате unified diff."}
+                },
+                "required": ["path", "unified_diff"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "dev_list_dir",
+            "description": "Показывает содержимое директории dev-репозитория через песочницу dev-runner.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Путь директории относительно корня dev-repo; '.' — корень."}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "dev_exec",
+            "description": "Выполняет команду (argv-массив, без shell) внутри песочницы dev-runner в корне dev-repo. Вывод обрезается до 64КБ.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "argv": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Команда и аргументы, например ['python3', '-m', 'pytest', '-q']."
+                    },
+                    "timeout_s": {"type": "integer", "description": "Таймаут в секундах (1–600, по умолчанию 120)."}
+                },
+                "required": ["argv"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "dev_run_tests",
+            "description": "Запускает тесты dev-репозитория в песочнице dev-runner (runner: auto|pytest|npm).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "runner": {"type": "string", "enum": ["auto", "pytest", "npm"], "description": "Какой раннер использовать; auto определяет по структуре репозитория."}
+                }
+            }
         }
     },
     {
@@ -1876,6 +1966,72 @@ def git_push() -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# DEV-RUNNER SANDBOX — thin httpx proxies to the dev-runner container, which
+# exposes read/write/patch/list/exec/test over the mounted dev-repo only. All
+# path validation and output capping happens inside the runner; these wrappers
+# just move JSON and normalize errors. Classified R1 (reads) / R2 (writes+exec)
+# in control_plane.py — every call still goes through execute_governed_tool.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+DEV_RUNNER_URL = os.getenv("DEV_RUNNER_URL", "http://dev-runner:8600")
+
+
+def _dev_runner_request(endpoint: str, payload: Dict[str, Any], timeout: float = 30.0) -> str:
+    token = os.getenv("DEV_RUNNER_TOKEN", "")
+    if not token:
+        return json.dumps({"error": "DEV_RUNNER_TOKEN is not configured on the backend."}, ensure_ascii=False)
+    try:
+        response = httpx.post(
+            f"{DEV_RUNNER_URL}{endpoint}",
+            json=payload,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=timeout,
+        )
+    except httpx.HTTPError as exc:
+        return json.dumps({
+            "error": f"Dev-runner is unreachable ({type(exc).__name__}). "
+                     "Check that the dev-runner container is up and on the dev-net network."
+        }, ensure_ascii=False)
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("detail", "")
+        except Exception:
+            detail = response.text[:300]
+        return json.dumps({"error": f"Dev-runner rejected the request ({response.status_code}): {detail}"},
+                          ensure_ascii=False)
+    return json.dumps(response.json(), ensure_ascii=False)
+
+
+def dev_read_file(path: str) -> str:
+    return _dev_runner_request("/fs/read", {"path": path})
+
+
+def dev_write_file(path: str, content: str) -> str:
+    return _dev_runner_request("/fs/write", {"path": path, "content": content})
+
+
+def dev_patch(path: str, unified_diff: str) -> str:
+    return _dev_runner_request("/fs/patch", {"path": path, "unified_diff": unified_diff}, timeout=90.0)
+
+
+def dev_list_dir(path: str) -> str:
+    return _dev_runner_request("/fs/list", {"path": path})
+
+
+def dev_exec(argv: List[str], timeout_s: int = 120) -> str:
+    if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
+        return json.dumps({"error": "argv must be a non-empty list of strings."}, ensure_ascii=False)
+    timeout_s = max(1, min(int(timeout_s or 120), 600))
+    return _dev_runner_request("/exec", {"argv": argv, "timeout_s": timeout_s}, timeout=timeout_s + 30.0)
+
+
+def dev_run_tests(runner: str = "auto") -> str:
+    if runner not in ("auto", "pytest", "npm"):
+        return json.dumps({"error": "runner must be auto, pytest or npm."}, ensure_ascii=False)
+    return _dev_runner_request("/test", {"runner": runner}, timeout=630.0)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # TOOL ROUTER
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -2090,6 +2246,24 @@ def execute_tool(name: str, arguments: Dict[str, Any], chat_id: str = "default")
 
     elif name == "git_push":
         return git_push()
+
+    elif name == "dev_read_file":
+        return dev_read_file(arguments.get("path", ""))
+
+    elif name == "dev_write_file":
+        return dev_write_file(arguments.get("path", ""), arguments.get("content", ""))
+
+    elif name == "dev_patch":
+        return dev_patch(arguments.get("path", ""), arguments.get("unified_diff", ""))
+
+    elif name == "dev_list_dir":
+        return dev_list_dir(arguments.get("path", "."))
+
+    elif name == "dev_exec":
+        return dev_exec(arguments.get("argv", []), arguments.get("timeout_s", 120))
+
+    elif name == "dev_run_tests":
+        return dev_run_tests(arguments.get("runner", "auto"))
 
     else:
         # Check if it is an MCP tool

@@ -48,7 +48,18 @@ TOOL_RISKS = {
     "create_obsidian_note": "R3",
     "sync_obsidian_vault": "R3",
     "delete_todoist_task": "R4",
+    # DEPRECATED escape hatch: raw shell on the backend host. Use the dev_* sandbox
+    # tools instead; kept R4 (two approvals) for the rare case nothing else fits.
     "execute_command": "R4",
+    # Dev-runner sandbox tools: all effects are confined to the dev-repo volume
+    # inside the egress-less dev-runner container. Reads match web_search's R1;
+    # writes/exec match git_commit's R2 — reversible via git, no host access.
+    "dev_read_file": "R1",
+    "dev_list_dir": "R1",
+    "dev_write_file": "R2",
+    "dev_patch": "R2",
+    "dev_exec": "R2",
+    "dev_run_tests": "R2",
     # Narrow, reversible operations scoped to backend/data/dev-repo (a dedicated
     # Gitea-backed clone) rather than the raw shell — read-only ops match
     # get_system_stats/web_search's R0/R1 tier; the two that actually write
