@@ -226,6 +226,97 @@ def _plan_context(plan_id: Optional[str]) -> str:
     return "\n".join(lines)
 
 
+# ── Verification gate before push ────────────────────────────────────────────
+
+MAX_VERIFY_ATTEMPTS = 3
+_OVERRIDE_MARK = "OVERRIDE-TASK:"
+
+
+def _verify_attempts(run_id: str) -> int:
+    return sum(1 for step in get_steps(run_id)
+               if step["phase"] == "verify" and step["status"] == "failed")
+
+
+def _override_task_id(run_id: str) -> Optional[str]:
+    for step in reversed(get_steps(run_id)):
+        if step["phase"] == "verify" and _OVERRIDE_MARK in step["summary"]:
+            return step["summary"].split(_OVERRIDE_MARK, 1)[1].strip().split()[0]
+    return None
+
+
+def _remember_verification(run: Dict[str, Any], verdict: str, detail: str) -> None:
+    """Future runs learn from past verification outcomes via project memory."""
+    try:
+        from backend.autonomy import remember_project_entry
+        remember_project_entry(
+            "verification",
+            f"Dev-run {run['id']}: {verdict}",
+            f"Goal: {run['goal'][:300]}\nVerdict: {verdict}\n{detail[:800]}",
+            source="dev_runs",
+        )
+    except Exception as exc:
+        logger.warning("Could not persist verification memory for %s: %s", run["id"], exc)
+
+
+async def _gate_push(run: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
+    """Mandatory dev_run_tests before any git_push. Returns (allowed, run).
+
+    A failed verification blocks the push and feeds the test output back into
+    the run context (as a failed verify step). After MAX_VERIFY_ATTEMPTS
+    failures the run escalates to awaiting_approval with an R3 override task;
+    once the owner approves that task, the next push attempt is allowed through.
+    """
+    override_id = _override_task_id(run["id"])
+    if override_id:
+        from backend.control_plane import get_task
+        task = get_task(override_id)
+        if task and task["status"] == "approved":
+            add_step(run["id"], "verify", "dev_run_tests",
+                     f"Owner override approved ({override_id}); push permitted despite failing tests.")
+            _remember_verification(run, "owner-override",
+                                   f"Push allowed by approved Control Plane task {override_id}. "
+                                   "Residual risk: tests were still failing at override time.")
+            return True, run
+
+    result_raw = await asyncio.to_thread(
+        execute_governed_tool, "dev_run_tests", {"runner": "auto"}, f"dev-run:{run['id']}"
+    )
+    try:
+        result = json.loads(result_raw)
+    except (TypeError, ValueError):
+        result = {"error": str(result_raw)[:300]}
+    failed = bool(result.get("error")) or result.get("exit_code") not in (0, None) or result.get("timed_out")
+    if not failed:
+        add_step(run["id"], "verify", "dev_run_tests", "Verification passed; push permitted.")
+        _remember_verification(run, "passed", f"Test runner: {result.get('runner', 'auto')}.")
+        return True, run
+
+    detail = (result.get("error") or result.get("stderr") or result.get("stdout") or "unknown failure")
+    attempts = _verify_attempts(run["id"]) + 1
+    add_step(run["id"], "verify", "dev_run_tests",
+             f"Verification failed (attempt {attempts}/{MAX_VERIFY_ATTEMPTS}): {detail}"[:1000],
+             "failed")
+    if attempts >= MAX_VERIFY_ATTEMPTS:
+        from backend.control_plane import create_review_task
+        review = create_review_task(
+            goal=f"Dev-run {run['id']}: tests still failing after {attempts} fix attempts — owner override required for push",
+            arguments={"run_id": run["id"], "goal": run["goal"][:300], "last_failure": str(detail)[:500]},
+            risk_class="R3",
+            acceptance=["Owner reviewed the failing tests and explicitly accepts pushing anyway"],
+            rollback="Reject this task and let the run keep fixing tests, or cancel the run.",
+            requester=f"dev-run:{run['id']}",
+        )
+        add_step(run["id"], "verify", "dev_run_tests",
+                 f"Escalated to Control Plane. {_OVERRIDE_MARK} {review['id']}", "escalated")
+        _remember_verification(run, "escalated",
+                              f"3 verification attempts failed; override task {review['id']} created. "
+                              f"Last failure: {str(detail)[:300]}")
+        run = update_run(run["id"], status="awaiting_approval",
+                         status_reason=f"Verification failed {attempts}x; owner override task {review['id']}")
+        return False, run
+    return False, get_run(run["id"])  # type: ignore[return-value]
+
+
 # ── Executor loop ────────────────────────────────────────────────────────────
 
 def _tool_schemas() -> List[Dict[str, Any]]:
@@ -326,6 +417,10 @@ async def _iterate(run: Dict[str, Any]) -> Dict[str, Any]:
         if tool_name not in DEV_RUN_TOOLS:
             add_step(run["id"], "act", tool_name, "Rejected: tool not allowed in dev-runs", "failed")
             return get_run(run["id"])  # type: ignore[return-value]
+        if tool_name == "git_push":
+            allowed, run = await _gate_push(run)
+            if not allowed:
+                return run
         result_raw = await asyncio.to_thread(
             execute_governed_tool, tool_name, arguments, f"dev-run:{run['id']}"
         )
