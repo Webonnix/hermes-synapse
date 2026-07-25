@@ -338,6 +338,39 @@ def _init_sqlite_schema():
         except sqlite3.OperationalError:
             pass
 
+    # Sports-betting methodology moved out of the orchestrator planner prompt
+    # (it was hardcoded there for every query) into the sports specialist's own
+    # system prompt. NOTE rule of three prompt sources: an owner-customized
+    # prompt stored in this table intentionally wins over this code default —
+    # the upsert below only replaces known old default texts.
+    FOOTBALL_ANALYST_PROMPT = (
+        "You are a Football Analyst Agent. You have deep knowledge of football (soccer): "
+        "tactics, player performance, match statistics, league standings, and transfer news. "
+        "Use web_search to fetch the latest match results, lineups, and news. Provide detailed "
+        "tactical breakdowns, score predictions, and injury updates. Support all major leagues: "
+        "Premier League, La Liga, Serie A, Bundesliga, Champions League, and others.\n\n"
+        "Betting-analysis methodology (when asked about odds or value bets):\n"
+        "- Search only for raw information: match schedules, playing pairs, start times and "
+        "numerical bookmaker odds. Never search for ready-made predictions, tips or articles "
+        "recommending bets ('bets of the day', 'value bets by ...').\n"
+        "- Compute expected value mathematically: EV = P * Odds - 1 for each outcome, and only "
+        "call something a value bet when EV > 0. Delegate the computation to a code-capable "
+        "agent when one is available.\n"
+        "- If exact bookmaker odds are not found, do not give up: model win/draw/loss "
+        "probabilities (e.g. a Poisson model over average goals scored/conceded in the "
+        "league/season, or recent head-to-head statistics) and run the calculation with a "
+        "standard odds range (e.g. 1.8-2.5).\n"
+        "- Never invent demo, fictitious or test matches. Every calculation and conclusion "
+        "must rely solely on real matches and real teams found in search results."
+    )
+    _OLD_FOOTBALL_PROMPT = (
+        "You are a Football Analyst Agent. You have deep knowledge of football (soccer): tactics, "
+        "player performance, match statistics, league standings, and transfer news. Use web_search "
+        "to fetch the latest match results, lineups, and news. Provide detailed tactical breakdowns, "
+        "score predictions, and injury updates. Support all major leagues: Premier League, La Liga, "
+        "Serie A, Bundesliga, Champions League, and others."
+    )
+
     # Pre-populate default subagents if table is empty
     cursor.execute("SELECT COUNT(*) FROM subagents")
     if cursor.fetchone()[0] == 0:
@@ -386,7 +419,7 @@ def _init_sqlite_schema():
             ),
             (
                 "football", "Football Analyst",
-                "You are a Football Analyst Agent. You have deep knowledge of football (soccer): tactics, player performance, match statistics, league standings, and transfer news. Use web_search to fetch the latest match results, lineups, and news. Provide detailed tactical breakdowns, score predictions, and injury updates. Support all major leagues: Premier League, La Liga, Serie A, Bundesliga, Champions League, and others.",
+                FOOTBALL_ANALYST_PROMPT,
                 default_model, "agent", "jarvis", "web_search", 450, 940
             ),
             (
@@ -429,7 +462,7 @@ def _init_sqlite_schema():
              "You are a Sys Ops Agent. Monitor system health (CPU, RAM, disk) and execute shell commands when needed. Always report system status clearly and warn about critical thresholds.",
              "agent", "jarvis", "shell_execution", 450, 820),
             ("football", "Football Analyst",
-             "You are a Football Analyst Agent. You have deep knowledge of football (soccer): tactics, player performance, match statistics, league standings, and transfer news. Use web_search to fetch the latest match results, lineups, and news. Provide detailed tactical breakdowns, score predictions, and injury updates. Support all major leagues: Premier League, La Liga, Serie A, Bundesliga, Champions League, and others.",
+             FOOTBALL_ANALYST_PROMPT,
              "agent", "jarvis", "web_search", 450, 940),
             ("web_dev", "Senior Web Developer",
              SENIOR_WEB_DEV_PROMPT,
@@ -455,9 +488,11 @@ def _init_sqlite_schema():
                     'Вы — Код-Инженер. Пишите и выполняйте Python скрипты.',
                     'You are a Code Engineer. Write and execute Python scripts.',
                     'Вы — Аналитик-Визуализатор. Создавайте графики.',
-                    'You are an Analyst-Visualizer. Create charts.'
+                    'You are an Analyst-Visualizer. Create charts.',
+                    ?
                 )
-            """, (agent_id, name, prompt, default_model, agent_type, parent_id, skills, x, y, 0.7))
+            """, (agent_id, name, prompt, default_model, agent_type, parent_id, skills, x, y, 0.7,
+                  _OLD_FOOTBALL_PROMPT))
 
         logger.info("Checked and migrated default subagents.")
 
