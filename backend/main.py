@@ -222,7 +222,13 @@ async def lifespan(app: FastAPI):
     # Start price alert monitor background task
     from backend.price_monitor import price_monitor
     price_monitor.start()
-    
+
+    # Durable dev-runs worker: resumes unfinished runs after restart.
+    dev_runs_worker_task = None
+    if os.getenv("DEV_RUNS_WORKER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
+        from backend import dev_runs
+        dev_runs_worker_task = asyncio.create_task(dev_runs.worker_loop())
+
     bot_app = await init_bot()
 
     from backend import agent_bot
@@ -263,6 +269,14 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_bcm_session_scheduler_task())
 
     yield
+    # Shutdown: stop the dev-runs worker first so no new tool calls start.
+    if dev_runs_worker_task is not None:
+        dev_runs_worker_task.cancel()
+        try:
+            await dev_runs_worker_task
+        except asyncio.CancelledError:
+            pass
+
     # Shutdown: Stop Telegram bots
     from backend import agent_bot
     await agent_bot.manager.stop_all()
@@ -1006,6 +1020,67 @@ async def create_autonomy_plan_api(request: AutonomyPlanRequest):
 async def list_autonomy_plans_api(limit: int = 30):
     from backend.autonomy import list_plans
     return await asyncio.to_thread(list_plans, limit)
+
+# ── Durable autonomous dev-runs ───────────────────────────────────────────────
+
+class DevRunCreateRequest(BaseModel):
+    goal: str
+    iter_budget: int | None = None
+    cost_budget: float | None = None
+    wall_minutes: int | None = None
+
+@app.post("/api/dev-runs")
+async def create_dev_run_api(request: DevRunCreateRequest):
+    from backend import dev_runs
+    if not request.goal.strip():
+        raise HTTPException(status_code=400, detail="Goal is required")
+    kwargs = {}
+    if request.iter_budget is not None:
+        kwargs["iter_budget"] = request.iter_budget
+    if request.cost_budget is not None:
+        kwargs["cost_budget"] = request.cost_budget
+    if request.wall_minutes is not None:
+        kwargs["wall_minutes"] = request.wall_minutes
+    return await asyncio.to_thread(dev_runs.create_run, request.goal, **kwargs)
+
+@app.get("/api/dev-runs")
+async def list_dev_runs_api(limit: int = 50):
+    from backend import dev_runs
+    return await asyncio.to_thread(dev_runs.list_runs, limit)
+
+@app.get("/api/dev-runs/{run_id}")
+async def get_dev_run_api(run_id: str):
+    from backend import dev_runs
+    run = await asyncio.to_thread(dev_runs.get_run, run_id, True)
+    if not run:
+        raise HTTPException(status_code=404, detail="Dev-run not found")
+    return run
+
+@app.post("/api/dev-runs/{run_id}/pause")
+async def pause_dev_run_api(run_id: str):
+    from backend import dev_runs
+    try:
+        return await asyncio.to_thread(dev_runs.pause_run, run_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Dev-run not found")
+
+@app.post("/api/dev-runs/{run_id}/resume")
+async def resume_dev_run_api(run_id: str):
+    from backend import dev_runs
+    try:
+        return await asyncio.to_thread(dev_runs.resume_run, run_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Dev-run not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+@app.post("/api/dev-runs/{run_id}/cancel")
+async def cancel_dev_run_api(run_id: str):
+    from backend import dev_runs
+    try:
+        return await asyncio.to_thread(dev_runs.cancel_run, run_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Dev-run not found")
 
 @app.get("/api/control-plane/summary")
 async def get_control_plane_summary_api(limit: int = 100):

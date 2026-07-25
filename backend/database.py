@@ -626,7 +626,48 @@ def _init_sqlite_schema():
             (id, kill_switch, reason, updated_by, updated_at)
         VALUES (1, 0, '', 'system', CURRENT_TIMESTAMP)
     """)
-    
+
+    # Durable autonomous dev-runs (additive tables, see backend/dev_runs.py).
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS dev_runs (
+            id TEXT PRIMARY KEY,
+            goal TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'planned',
+            plan_id TEXT,
+            trace_id TEXT,
+            iter_used INTEGER NOT NULL DEFAULT 0,
+            iter_budget INTEGER NOT NULL DEFAULT 200,
+            cost_used REAL NOT NULL DEFAULT 0,
+            cost_budget REAL,
+            wall_deadline TEXT,
+            checkpoint_step TEXT,
+            status_reason TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_dev_runs_status
+        ON dev_runs (status, created_at)
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS dev_run_steps (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            phase TEXT NOT NULL,
+            tool TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'done',
+            created_at TEXT NOT NULL,
+            UNIQUE (run_id, seq)
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_dev_run_steps_run
+        ON dev_run_steps (run_id, seq)
+    """)
+
     conn.commit()
     conn.close()
     logger.info("SQLite Database initialized successfully.")
