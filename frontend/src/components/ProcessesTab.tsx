@@ -16,6 +16,7 @@ import {
   X,
 } from 'lucide-react';
 import type { AutonomySummary, ControlPlaneSummary, WorkflowTask } from '../types';
+import { DiffViewer, looksLikeUnifiedDiff } from './DiffViewer';
 
 type Props = { language: 'ru' | 'en' };
 type Filter = 'all' | 'approval' | 'active' | 'finished';
@@ -298,7 +299,9 @@ export function ProcessesTab({ language }: Props) {
             </dl>
             <section className="contract-block"><h4>{copy.acceptance}</h4><ul>{selected.acceptance.map(item => <li key={item}>{item}</li>)}</ul></section>
             <section className="contract-block"><h4>{copy.rollback}</h4><p>{selected.rollback || '—'}</p></section>
-            {selected.result && <section className="contract-block is-result"><h4>{copy.result}</h4><pre>{selected.result}</pre></section>}
+            {selected.result && <section className="contract-block is-result"><h4>{copy.result}</h4>
+              {looksLikeUnifiedDiff(selected.result) ? <DiffViewer diff={selected.result} /> : <pre>{selected.result}</pre>}
+            </section>}
             {selected.error && <section className="contract-block is-error"><h4>{copy.error}</h4><p>{selected.error}</p></section>}
           </>}
         </aside>
