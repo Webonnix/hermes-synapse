@@ -1,0 +1,25 @@
+# Sandbox container for autonomous dev-runs: filesystem + argv exec over the
+# mounted dev-repo only. No Hermes backend code besides dev_runner_api.py.
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir "fastapi>=0.100.0" "uvicorn>=0.22.0" "pytest==8.3.5"
+
+RUN useradd --create-home --uid 10001 runner \
+    && mkdir -p /dev-repo && chown runner:runner /dev-repo \
+    && git config --system safe.directory /dev-repo
+
+COPY backend/dev_runner_api.py /runner/dev_runner_api.py
+
+USER runner
+WORKDIR /dev-repo
+
+EXPOSE 8600
+
+CMD ["uvicorn", "dev_runner_api:app", "--app-dir", "/runner", "--host", "0.0.0.0", "--port", "8600", "--no-access-log"]
