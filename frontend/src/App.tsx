@@ -52,6 +52,9 @@ import { HermesMark } from './components/HermesMark';
 import { MetricsTab } from './components/MetricsTab';
 import { FloatingWindow } from './components/FloatingWindow';
 import { VexaCommandCenter } from './components/VexaCommandCenter';
+import { DevRunsTab } from './components/DevRunsTab';
+import { AppHeader } from './components/AppHeader';
+import type { DevRunEvent } from './types';
 
 // Initialize global fetch interceptor
 initFetchInterceptor();
@@ -63,7 +66,7 @@ const langToLocale: Record<string, string> = {
 
 export default function App() {
   const legacySettingsTabs = ['config', 'logs', 'activity', 'memory', 'tools', 'subagents', 'obsidian', 'mcp'];
-  const [activeTab, setActiveTab] = useState<'vexa' | 'processes' | 'agents' | 'schedule' | 'settings' | 'network' | 'metrics'>(() => {
+  const [activeTab, setActiveTab] = useState<'vexa' | 'processes' | 'devruns' | 'agents' | 'schedule' | 'settings' | 'network' | 'metrics'>(() => {
     const saved = localStorage.getItem('jarvis_active_tab');
     if (saved === 'chat') return 'vexa';
     if (saved === 'settings' || (saved && legacySettingsTabs.includes(saved))) return 'settings';
@@ -116,6 +119,14 @@ export default function App() {
     { role: 'assistant', content: 'Greetings, Albert. Connection to the Hermes network is complete. Awaiting your instructions.' }
   ]);
   const [logs, setLogs] = useState<DecisionLog[]>([]);
+  const [lastDevRunEvent, setLastDevRunEvent] = useState<DevRunEvent | null>(null);
+  const [devRunNotificationsEnabled, setDevRunNotificationsEnabled] = useState<boolean>(
+    () => localStorage.getItem('hermes_devrun_notifications') === '1'
+  );
+  const devRunNotificationsRef = useRef(devRunNotificationsEnabled);
+  useEffect(() => {
+    devRunNotificationsRef.current = devRunNotificationsEnabled;
+  }, [devRunNotificationsEnabled]);
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
   const [metrics, setMetrics] = useState<any>(null);
   const [isMetricsLoading, setIsMetricsLoading] = useState(false);
@@ -1092,6 +1103,21 @@ export default function App() {
             });
             playAlarmSound();
             speakText(`Albert, the alarm "${data.alarm.label}" has gone off.`);
+          } else if (data.type === 'dev_run_event') {
+            const runEvent = data as DevRunEvent;
+            setLastDevRunEvent(runEvent);
+            if (
+              devRunNotificationsRef.current &&
+              'Notification' in window &&
+              Notification.permission === 'granted' &&
+              ['awaiting_approval', 'done', 'failed'].includes(runEvent.event)
+            ) {
+              new Notification(`Dev-run ${runEvent.run_id}`, {
+                body: `${runEvent.event}: ${runEvent.summary}`.slice(0, 120),
+                icon: '/favicon.svg',
+                tag: `dev-run-${runEvent.run_id}`,
+              });
+            }
           } else if (data.type === 'trace_update') {
             if (data.trace.agent !== 'Router') {
               setMessages((prev) => [...prev, {
@@ -2086,6 +2112,15 @@ export default function App() {
           </button>
 
           <button
+            style={navStyle('devruns')}
+            onClick={() => { setActiveTab('devruns'); setSidebarOpen(false); }}
+            title="Dev Runs"
+          >
+            <Terminal size={18} />
+            <span>Dev Runs</span>
+          </button>
+
+          <button
             style={navStyle('agents')}
             onClick={() => { setActiveTab('agents'); setSidebarOpen(false); }}
             title={t('navAgents')}
@@ -2234,13 +2269,24 @@ export default function App() {
                   onChangeModel={() => { setActiveTab('settings'); setSettingsSection('config'); }}
                   subagents={subagents}
                   handleSetSessionAgent={handleSetSessionAgent}
+                  activeDevRun={lastDevRunEvent}
+                  onOpenDevRuns={() => { setVexaTranscriptOpen(false); setActiveTab('devruns'); }}
                 />
               </FloatingWindow>
             )}
           </>
         )}
 
+        <AppHeader
+          language={language}
+          onOpenProcesses={() => setActiveTab('processes')}
+        />
+
         {activeTab === 'processes' && <ProcessesTab language={language} />}
+
+        {activeTab === 'devruns' && (
+          <DevRunsTab language={language} lastEvent={lastDevRunEvent} />
+        )}
 
         {activeTab === 'agents' && (
           <AgentsAdminTab
@@ -2329,6 +2375,11 @@ export default function App() {
                 setRuntimeConfig={setEditedRuntimeConfig}
                 language={language}
                 onLanguageChange={(nextLanguage) => setLanguage(nextLanguage as Language)}
+                devRunNotificationsEnabled={devRunNotificationsEnabled}
+                onDevRunNotificationsChange={(enabled) => {
+                  localStorage.setItem('hermes_devrun_notifications', enabled ? '1' : '0');
+                  setDevRunNotificationsEnabled(enabled);
+                }}
               />
             )}
 

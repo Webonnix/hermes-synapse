@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Cpu, Shield, Activity, Database, Globe, Server, Zap, KeyRound } from 'lucide-react';
+import { Cpu, Shield, Activity, Database, Globe, Server, Zap, KeyRound, Bell } from 'lucide-react';
 import { styles } from '../styles';
 import type { SystemConfig } from '../types';
 import { OllamaManager } from './OllamaManager';
@@ -138,6 +138,8 @@ interface ConfigTabProps {
   setRuntimeConfig: React.Dispatch<React.SetStateAction<Partial<SystemConfig>>>;
   language: string;
   onLanguageChange: (language: string) => void;
+  devRunNotificationsEnabled?: boolean;
+  onDevRunNotificationsChange?: (enabled: boolean) => void;
 }
 
 export function ConfigTab({
@@ -151,7 +153,9 @@ export function ConfigTab({
   runtimeConfig,
   setRuntimeConfig,
   language,
-  onLanguageChange
+  onLanguageChange,
+  devRunNotificationsEnabled = false,
+  onDevRunNotificationsChange
 }: ConfigTabProps) {
   
   // Check if editedModel is part of the returned models list.
@@ -238,6 +242,43 @@ export function ConfigTab({
           </select>
           <span style={styles.formHelp}>
             Agents will respond in this language. Also sets voice (TTS) and microphone (STT) locale. Takes effect immediately — no save required.
+          </span>
+        </div>
+      </div>
+
+      {/* ── Browser notifications for dev-runs (instant save, no submit) ── */}
+      <div className="glass-panel" style={{ ...styles.configForm, marginBottom: '16px' }}>
+        <div style={styles.formGroup}>
+          <label style={styles.formLabel}>
+            <Bell size={16} style={{ color: '#00f0ff' }} />
+            <span>Dev-run browser notifications</span>
+          </label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={devRunNotificationsEnabled}
+                onChange={(e) => {
+                  const enabled = e.target.checked;
+                  if (enabled && 'Notification' in window && Notification.permission === 'default') {
+                    void Notification.requestPermission().then(permission => {
+                      onDevRunNotificationsChange?.(permission === 'granted');
+                    });
+                    return;
+                  }
+                  onDevRunNotificationsChange?.(enabled);
+                }}
+              />
+              <span>Notify on awaiting approval / done / failed</span>
+            </label>
+            {'Notification' in window && Notification.permission === 'denied' && (
+              <span style={{ color: 'var(--danger)', fontSize: '0.8rem' }}>
+                Notifications are blocked in browser settings.
+              </span>
+            )}
+          </div>
+          <span style={styles.formHelp}>
+            Shows a system notification when an autonomous dev-run needs your approval or finishes.
           </span>
         </div>
       </div>

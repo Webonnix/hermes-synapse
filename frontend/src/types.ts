@@ -458,3 +458,44 @@ export interface ChatSession {
   title: string;
   agent_id?: string;
 }
+
+export type DevRunStatus =
+  | 'planned' | 'running' | 'paused' | 'awaiting_approval'
+  | 'verifying' | 'done' | 'failed' | 'cancelled';
+
+export interface DevRunStep {
+  id: string;
+  run_id: string;
+  seq: number;
+  phase: string;
+  tool: string;
+  summary: string;
+  status: string;
+  created_at: string;
+}
+
+export interface DevRun {
+  id: string;
+  goal: string;
+  status: DevRunStatus;
+  plan_id: string | null;
+  trace_id: string | null;
+  iter_used: number;
+  iter_budget: number;
+  cost_used: number;
+  cost_budget: number | null;
+  wall_deadline: string | null;
+  checkpoint_step: string | null;
+  status_reason: string;
+  created_at: string;
+  updated_at: string;
+  steps?: DevRunStep[];
+}
+
+export interface DevRunEvent {
+  type: 'dev_run_event';
+  run_id: string;
+  status: DevRunStatus;
+  event: string;
+  summary: string;
+}

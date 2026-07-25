@@ -1541,3 +1541,91 @@ main.vexa-main {
   .vexa-command-center *::before,
   .vexa-command-center *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* ── App header (approvals badge + kill switch) ─────────────────────────── */
+.app-header { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 8px 18px 0; }
+.app-header-approvals { display: inline-flex; align-items: center; gap: 7px; min-height: 30px; padding: 0 10px; border: 1px solid rgba(255,255,255,.12); border-radius: 5px; color: var(--text-muted); background: rgba(255,255,255,.03); font: 600 .66rem var(--font-sans); cursor: pointer; }
+.app-header-approvals.has-pending { border-color: rgba(255,195,72,.4); color: #ffd070; background: rgba(255,195,72,.08); }
+.app-header-badge { min-width: 18px; padding: 1px 5px; border-radius: 9px; background: rgba(255,255,255,.09); font: 700 .62rem var(--font-mono); text-align: center; }
+.app-header-approvals.has-pending .app-header-badge { background: rgba(255,195,72,.24); color: #ffe1a1; }
+.app-header-kill { display: inline-flex; align-items: center; gap: 7px; min-height: 30px; padding: 0 10px; border: 1px solid rgba(255,93,143,.38); border-radius: 5px; color: #ff8bae; background: rgba(255,93,143,.07); font: 700 .66rem var(--font-sans); cursor: pointer; }
+.app-header-kill.is-stopped { border-color: rgba(95,240,191,.35); color: var(--success); background: rgba(95,240,191,.07); }
+.app-header-kill em { font: 700 .56rem var(--font-mono); color: #ff8bae; font-style: normal; }
+.is-vexa-mode .app-header { position: absolute; top: 0; right: 0; z-index: 60; padding: 10px 14px 0; }
+@media (max-width: 640px) { .app-header { padding: 6px 10px 0; flex-wrap: wrap; } .app-header-badge-label { display: none; } }
+
+/* ── Dev Runs — Mission Control ─────────────────────────────────────────── */
+.devruns-page { padding: 18px 20px 26px; overflow: auto; height: 100%; }
+.devrun-create { display: flex; align-items: center; gap: 9px; margin: 16px 0; padding: 10px 12px; border: 1px solid rgba(0,240,255,.16); border-radius: 6px; background: rgba(0,240,255,.04); color: var(--accent-cyan); }
+.devrun-create input { flex: 1; min-width: 0; min-height: 32px; padding: 0 10px; border: 1px solid rgba(255,255,255,.12); border-radius: 5px; color: var(--text-primary); background: rgba(10,12,22,.7); font: 500 .74rem var(--font-sans); }
+.devrun-create button { min-height: 32px; display: inline-flex; align-items: center; gap: 6px; padding: 0 12px; border: 1px solid rgba(0,240,255,.32); border-radius: 5px; color: var(--accent-cyan); background: rgba(0,240,255,.08); font: 700 .68rem var(--font-sans); cursor: pointer; }
+.devrun-create button:disabled { opacity: .45; cursor: default; }
+.devruns-workspace { display: grid; grid-template-columns: minmax(330px,.9fr) minmax(380px,1.1fr); gap: 14px; align-items: start; }
+.devruns-list { border: 1px solid rgba(255,255,255,.09); border-radius: 6px; overflow: auto; max-height: 70vh; background: rgba(10,11,20,.38); }
+.devrun-row { width: 100%; display: grid; grid-template-columns: auto minmax(140px,1fr) 90px; align-items: center; gap: 10px; padding: 10px 12px; border: 0; border-bottom: 1px solid rgba(255,255,255,.055); color: inherit; background: transparent; text-align: left; cursor: pointer; }
+.devrun-row:hover, .devrun-row.is-selected { background: rgba(0,240,255,.05); }
+.devrun-row-main { min-width: 0; display: grid; gap: 2px; }
+.devrun-row-main strong { font-size: .74rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.devrun-row-main small { color: var(--text-dim); font: 500 .6rem var(--font-mono); }
+.devrun-row-progress { min-width: 0; }
+.devrun-inspector { border: 1px solid rgba(255,255,255,.09); border-radius: 6px; padding: 14px; background: rgba(17,18,30,.46); overflow: auto; max-height: 78vh; }
+.devrun-inspector-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,.075); }
+.devrun-inspector-head h3 { margin: 6px 0 4px; font-size: .86rem; }
+.devrun-inspector-head code { color: var(--text-dim); font: 500 .62rem var(--font-mono); }
+.devrun-commands { display: flex; gap: 6px; flex-wrap: wrap; }
+.devrun-commands button { min-height: 30px; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border: 1px solid rgba(255,255,255,.16); border-radius: 5px; color: var(--text-primary); background: rgba(255,255,255,.04); font: 650 .64rem var(--font-sans); cursor: pointer; }
+.devrun-commands button.is-danger { border-color: rgba(255,93,143,.38); color: #ff8bae; background: rgba(255,93,143,.07); }
+.devrun-reason { margin: 10px 0 0; padding: 8px 10px; border: 1px solid rgba(255,195,72,.26); border-radius: 5px; color: #ffd070; background: rgba(255,195,72,.06); font-size: .7rem; }
+.devrun-budgets { display: grid; gap: 8px; margin: 14px 0; }
+.devrun-progress { display: grid; grid-template-columns: 78px minmax(50px,1fr) auto; align-items: center; gap: 8px; }
+.devrun-row-progress .devrun-progress { grid-template-columns: 1fr; }
+.devrun-progress-label { color: var(--text-dim); font: 600 .58rem var(--font-mono); text-transform: uppercase; }
+.devrun-progress-track { height: 6px; border-radius: 3px; background: rgba(255,255,255,.07); overflow: hidden; }
+.devrun-progress-fill { height: 100%; border-radius: 3px; background: var(--accent-cyan); transition: width .3s; }
+.devrun-progress-fill.is-warning { background: var(--warning); }
+.devrun-progress-fill.is-critical { background: #ff5d8f; }
+.devrun-progress-value { color: var(--text-muted); font: 600 .6rem var(--font-mono); white-space: nowrap; }
+.devrun-steps { margin-top: 12px; border: 1px solid rgba(255,255,255,.075); border-radius: 6px; overflow: hidden; background: rgba(10,11,20,.35); }
+.devrun-step-list { margin: 0; padding: 0; list-style: none; max-height: 340px; overflow: auto; }
+.devrun-step { display: grid; grid-template-columns: 30px minmax(150px,1fr) auto; align-items: start; gap: 9px; padding: 8px 12px; border-bottom: 1px solid rgba(255,255,255,.05); }
+.devrun-step:last-child { border-bottom: 0; }
+.devrun-step-seq { display: inline-grid; place-items: center; min-width: 22px; height: 20px; border-radius: 4px; background: rgba(255,255,255,.06); color: var(--text-dim); font: 700 .58rem var(--font-mono); }
+.devrun-step-body { min-width: 0; display: grid; gap: 2px; }
+.devrun-step-body strong { font: 650 .66rem var(--font-mono); color: var(--accent-cyan); }
+.devrun-step-body small { color: var(--text-muted); font-size: .66rem; word-break: break-word; }
+.devrun-step.is-failed .devrun-step-body strong { color: #ff8bae; }
+.devrun-step.is-awaiting_approval .devrun-step-body strong, .devrun-step.is-escalated .devrun-step-body strong { color: var(--warning); }
+.devrun-step time { color: var(--text-dim); font: 500 .58rem var(--font-mono); white-space: nowrap; }
+.devrun-report { margin-top: 12px; padding: 12px; border: 1px solid rgba(95,240,191,.22); border-radius: 6px; background: rgba(95,240,191,.05); }
+.devrun-report h4 { margin: 0 0 8px; color: var(--success); font-size: .72rem; }
+.devrun-report p { margin: 4px 0; font-size: .7rem; color: var(--text-muted); }
+.devrun-commit { display: flex; align-items: center; gap: 7px; }
+.devrun-commit a { display: inline-flex; align-items: center; gap: 4px; color: var(--accent-cyan); font-size: .64rem; }
+.task-status.is-paused { color: var(--warning); }
+.task-status.is-verifying, .task-status.is-planned { color: var(--accent-cyan); }
+.task-status.is-cancelled { color: #9aa4b7; }
+@media (max-width: 1000px) { .devruns-workspace { grid-template-columns: 1fr; } .devruns-list { max-height: 300px; } .devrun-inspector { max-height: none; } }
+@media (max-width: 620px) { .devruns-page { padding: 10px; } .devrun-row { grid-template-columns: auto minmax(110px,1fr); } .devrun-row-progress { display: none; } .devrun-progress { grid-template-columns: 64px minmax(40px,1fr) auto; } .devrun-inspector-head { flex-direction: column; } }
+
+/* ── Unified diff viewer ────────────────────────────────────────────────── */
+.diff-viewer { display: grid; gap: 8px; margin-top: 6px; }
+.diff-file { border: 1px solid rgba(255,255,255,.09); border-radius: 5px; overflow: hidden; background: rgba(8,10,18,.6); }
+.diff-file-head { width: 100%; display: flex; align-items: center; gap: 7px; min-height: 30px; padding: 0 9px; border: 0; color: var(--text-muted); background: rgba(255,255,255,.04); font: 600 .64rem var(--font-mono); cursor: pointer; text-align: left; }
+.diff-file-head code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
+.diff-file-stats { display: inline-flex; gap: 6px; }
+.diff-file-stats em { font-style: normal; font: 700 .6rem var(--font-mono); }
+.diff-file-stats .is-add { color: #72dcb8; }
+.diff-file-stats .is-del { color: #ff8bae; }
+.diff-body { margin: 0; padding: 6px 0; overflow-x: auto; font: 500 .64rem/1.5 var(--font-mono); }
+.diff-line { display: block; padding: 0 10px; white-space: pre; }
+.diff-line.is-add { color: #a8f0d4; background: rgba(95,240,191,.1); }
+.diff-line.is-del { color: #ffb8cd; background: rgba(255,93,143,.1); }
+.diff-line.is-hunk { color: var(--accent-cyan); background: rgba(0,240,255,.06); }
+.diff-line.is-meta { color: var(--text-dim); }
+
+/* ── Chat dev-run status card ───────────────────────────────────────────── */
+.chat-devrun-card { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; padding: 9px 12px; border: 1px solid rgba(0,240,255,.2); border-radius: 6px; background: rgba(0,240,255,.05); }
+.chat-devrun-main { min-width: 0; display: grid; gap: 2px; flex: 1; }
+.chat-devrun-main strong { font: 650 .68rem var(--font-mono); color: var(--accent-cyan); }
+.chat-devrun-main small { color: var(--text-muted); font-size: .64rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-devrun-card button { min-height: 28px; padding: 0 10px; border: 1px solid rgba(0,240,255,.3); border-radius: 5px; color: var(--accent-cyan); background: transparent; font: 650 .64rem var(--font-sans); cursor: pointer; white-space: nowrap; }

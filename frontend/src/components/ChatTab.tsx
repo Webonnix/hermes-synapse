@@ -64,6 +64,10 @@ interface ChatTabProps {
   onChangeModel?: () => void;
   subagents?: Array<{ id: string; name: string; agent_type?: string }>;
   handleSetSessionAgent?: (sessionId: string, agentId: string) => void;
+  /** Latest dev-run event (when a dev-run was launched from this dialog) —
+   * renders a compact status card above the message stream. */
+  activeDevRun?: { run_id: string; status: string; event: string; summary: string } | null;
+  onOpenDevRuns?: () => void;
 }
 
 export function ChatTab({
@@ -103,7 +107,9 @@ export function ChatTab({
   hasLastUserMessage,
   onChangeModel,
   subagents = [],
-  handleSetSessionAgent = () => undefined
+  handleSetSessionAgent = () => undefined,
+  activeDevRun = null,
+  onOpenDevRuns
 }: ChatTabProps) {
   const [activeMenu, setActiveMenu] = React.useState<string | null>(null);
   const [expandedMeta, setExpandedMeta] = React.useState<number | null>(null);
@@ -175,8 +181,22 @@ export function ChatTab({
     if (response.ok) fetchChatSessions();
   };
 
+  const devRunActive = activeDevRun && !['done', 'failed', 'cancelled'].includes(activeDevRun.status);
+
   return (
     <div style={styles.tabWrapper}>
+      {devRunActive && (
+        <div className="chat-devrun-card" data-testid="chat-devrun-card">
+          <span className={`task-status is-${activeDevRun.status}`}>{activeDevRun.status}</span>
+          <span className="chat-devrun-main">
+            <strong>Dev-run {activeDevRun.run_id}</strong>
+            <small>{activeDevRun.event}: {activeDevRun.summary}</small>
+          </span>
+          {onOpenDevRuns && (
+            <button type="button" onClick={onOpenDevRuns}>Dev Runs →</button>
+          )}
+        </div>
+      )}
       <div style={styles.tabHeader}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <div>
