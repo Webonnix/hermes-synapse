@@ -429,7 +429,7 @@ export function SubagentsTab({
                     <ModelSelect value={newAgentModel} onChange={setNewAgentModel} models={models} />
                     {!modelSupportsTools(newAgentModel) && (
                       <span style={{ fontSize: '0.75rem', color: '#f59e0b', marginTop: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        ⚠️ This reasoning model does not support direct tool calling. Jarvis will run research/code tools on its behalf if scheduled in the query plan.
+                        ⚠️ This reasoning model does not support direct tool calling. Vexa will run research/code tools on its behalf if scheduled in the query plan.
                       </span>
                     )}
                   </>
@@ -477,7 +477,7 @@ export function SubagentsTab({
                     <ModelSelect value={editAgentModel} onChange={setEditAgentModel} models={models} />
                     {!modelSupportsTools(editAgentModel) && (
                       <span style={{ fontSize: '0.75rem', color: '#f59e0b', marginTop: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        ⚠️ This reasoning model does not support direct tool calling. Jarvis will run research/code tools on its behalf if scheduled in the query plan.
+                        ⚠️ This reasoning model does not support direct tool calling. Vexa will run research/code tools on its behalf if scheduled in the query plan.
                       </span>
                     )}
                   </>

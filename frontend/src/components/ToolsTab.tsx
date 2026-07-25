@@ -23,8 +23,6 @@ interface ToolsTabProps {
   systemStats: SystemStats | null;
   uploads: { name: string; size_bytes: number }[];
   language: Language;
-  setLanguage: (language: Language) => void;
-  t: (key: string) => string;
 }
 
 const formatBytes = (bytes?: number | null, decimals = 1) => {
@@ -61,8 +59,6 @@ export function ToolsTab({
   systemStats,
   uploads,
   language,
-  setLanguage,
-  t
 }: ToolsTabProps) {
   const host = systemStats?.host;
   const cpu = host?.cpu;
@@ -235,7 +231,7 @@ export function ToolsTab({
             
             {uploads.length === 0 ? (
               <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', textAlign: 'center', padding: '16px 0' }}>
-                No loaded datasets, Sir. Attach a CSV/Excel file in the chat.
+                No loaded datasets, Albert. Attach a CSV/Excel file in the chat.
               </div>
             ) : (
               <div style={styles.datasetList}>
@@ -258,47 +254,6 @@ export function ToolsTab({
 
         {/* Right Column: Active Sub-agents & Core Tools */}
         <div style={styles.toolsContentRight}>
-          <div style={styles.toolsRegistryWrapper} className="glass-panel">
-            <h3 style={styles.toolsPanelTitle}>
-              <Settings size={18} style={{ color: 'var(--accent-cyan)' }} />
-              <span>{t('language')}</span>
-            </h3>
-
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-              {([
-                ['ru', 'Русский'],
-                ['en', 'English'],
-              ] as const).map(([value, label]) => (
-                <button
-                  key={value}
-                  type="button"
-                  onClick={() => setLanguage(value)}
-                  className="btn-primary"
-                  style={{
-                    borderColor: language === value ? 'var(--accent-cyan)' : 'rgba(255,255,255,0.14)',
-                    background: language === value ? 'rgba(0,240,255,0.12)' : 'rgba(255,255,255,0.03)',
-                    color: language === value ? 'var(--accent-cyan)' : 'var(--text-muted)',
-                  }}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            <p style={{ ...styles.formHelp, marginTop: 12 }}>{t('languageHelp')}</p>
-            <div style={{
-              marginTop: 14,
-              padding: 12,
-              borderRadius: 8,
-              border: '1px solid rgba(16,185,129,0.22)',
-              background: 'rgba(16,185,129,0.06)',
-              color: 'var(--success)',
-              fontSize: '0.86rem',
-              fontWeight: 600,
-            }}>
-              {t('saveStatus')}
-            </div>
-          </div>
-
           {/* Active Sub-agents (Orchestrator Graph) */}
           <div className="glass-panel" style={{ ...styles.toolsRegistryWrapper, marginBottom: '0px' }}>
             <h3 style={styles.toolsPanelTitle}>

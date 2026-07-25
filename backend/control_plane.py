@@ -49,6 +49,20 @@ TOOL_RISKS = {
     "sync_obsidian_vault": "R3",
     "delete_todoist_task": "R4",
     "execute_command": "R4",
+    # Narrow, reversible operations scoped to backend/data/dev-repo (a dedicated
+    # Gitea-backed clone) rather than the raw shell — read-only ops match
+    # get_system_stats/web_search's R0/R1 tier; the two that actually write
+    # (commit/push) match call_subagent/set_timer's R2 tier, not execute_command's R4.
+    "git_status": "R0",
+    "git_diff": "R0",
+    "git_commit": "R2",
+    "git_push": "R2",
+    # Costs real money per call (Stability AI), but is gated by a hard per-agent
+    # $ budget check in agent.py before dispatch (see PAID_TOOLS there) rather
+    # than by manual owner approval — R3 would queue every single image behind
+    # a Control Plane approval click, defeating autonomous use by e.g. the
+    # Senior Web Developer agent. The budget cap is the actual safety net.
+    "generate_image": "R2",
 }
 
 _SECRET_KEY = re.compile(r"(password|passwd|secret|token|api[_-]?key|authorization|cookie|private[_-]?key)", re.I)

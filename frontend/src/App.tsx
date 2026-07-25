@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { 
-  MessageSquare, 
-  Settings, 
+import {
+  Settings,
   Terminal, 
   Activity, 
   Cpu, 
@@ -14,14 +13,13 @@ import {
   Clock,
   Menu,
   X,
-  ChevronDown,
-  ChevronRight,
-  Building2,
   UserCog,
   ChevronsLeft,
   ChevronsRight,
   ShieldCheck,
-  AudioWaveform
+  AudioWaveform,
+  KeyRound,
+  MessageCircle
 } from 'lucide-react';
 
 import type { AppSettings, ChatMessage, ChatSession, DecisionLog, ActivityLog, SystemConfig, AgentModel, SystemStats } from './types';
@@ -47,10 +45,12 @@ import { ObsidianTab } from './components/ObsidianTab';
 import { NetworkTab } from './components/NetworkTab';
 import { MCPTab } from './components/MCPTab';
 import { AgentsAdminTab } from './components/AgentsAdminTab';
-import { OfficeTab, type OfficeLiveTrace } from './components/OfficeTab';
+import { ApiKeysTab } from './components/ApiKeysTab';
+import { MessengerChannelsTab } from './components/MessengerChannelsTab';
 import { ProcessesTab } from './components/ProcessesTab';
 import { HermesMark } from './components/HermesMark';
 import { MetricsTab } from './components/MetricsTab';
+import { FloatingWindow } from './components/FloatingWindow';
 import { VexaCommandCenter } from './components/VexaCommandCenter';
 
 // Initialize global fetch interceptor
@@ -62,13 +62,21 @@ const langToLocale: Record<string, string> = {
 };
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'chat' | 'vexa' | 'office' | 'processes' | 'agents' | 'schedule' | 'config' | 'logs' | 'activity' | 'memory' | 'tools' | 'subagents' | 'obsidian' | 'network' | 'mcp' | 'metrics'>(() => {
+  const legacySettingsTabs = ['config', 'logs', 'activity', 'memory', 'tools', 'subagents', 'obsidian', 'mcp'];
+  const [activeTab, setActiveTab] = useState<'vexa' | 'processes' | 'agents' | 'schedule' | 'settings' | 'network' | 'metrics'>(() => {
     const saved = localStorage.getItem('jarvis_active_tab');
-    if (saved === 'settings') return 'tools';
-    return (saved as any) || 'chat';
+    if (saved === 'chat') return 'vexa';
+    if (saved === 'settings' || (saved && legacySettingsTabs.includes(saved))) return 'settings';
+    return (saved as any) || 'vexa';
   });
+  const [settingsSection, setSettingsSection] = useState<'config' | 'tools' | 'subagents' | 'mcp' | 'obsidian' | 'memory' | 'logs' | 'activity' | 'keys' | 'channels'>(() => {
+    const savedSection = localStorage.getItem('jarvis_settings_section');
+    if (savedSection && [...legacySettingsTabs, 'keys', 'channels'].includes(savedSection)) return savedSection as any;
+    const savedTab = localStorage.getItem('jarvis_active_tab');
+    return (savedTab && legacySettingsTabs.includes(savedTab) ? savedTab : 'config') as any;
+  });
+  const [vexaTranscriptOpen, setVexaTranscriptOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => localStorage.getItem('hermes_sidebar_collapsed') === '1');
   const [language, setLanguageState] = useState<Language>(() => (localStorage.getItem('hermes_language') as Language) || 'ru');
   const [appSettings, setAppSettings] = useState<AppSettings>({ language });
@@ -99,8 +107,13 @@ export default function App() {
   const [otpCode, setOtpCode] = useState('');
   const [authStatus, setAuthStatus] = useState<'idle' | 'sending' | 'sent' | 'verifying' | 'error' | 'success'>('idle');
   const [authError, setAuthError] = useState('');
+  const [loginMode, setLoginMode] = useState<'telegram' | 'password'>('telegram');
+  const [pwUsername, setPwUsername] = useState('');
+  const [pwPassword, setPwPassword] = useState('');
+  const [pwStatus, setPwStatus] = useState<'idle' | 'submitting' | 'error'>('idle');
+  const [pwError, setPwError] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([
-    { role: 'assistant', content: 'Greetings, Sir. Connection to the Hermes network is complete. Awaiting your instructions.' }
+    { role: 'assistant', content: 'Greetings, Albert. Connection to the Hermes network is complete. Awaiting your instructions.' }
   ]);
   const [logs, setLogs] = useState<DecisionLog[]>([]);
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
@@ -149,8 +162,9 @@ export default function App() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [playingMsgIndex, setPlayingMsgIndex] = useState<number | null>(null);
   const [micEnabled, setMicEnabled] = useState(false);
-  const [micState, setMicState] = useState<'off' | 'listening' | 'capturing' | 'transcribing'>('off');
-  
+  const [micState, setMicState] = useState<'off' | 'listening' | 'capturing' | 'transcribing' | 'error'>('off');
+  const [micErrorMessage, setMicErrorMessage] = useState('');
+
   const [inputValue, setInputValue] = useState('');
   const [selectedLog, setSelectedLog] = useState<DecisionLog | null>(null);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
@@ -158,8 +172,6 @@ export default function App() {
   const [editedPrompt, setEditedPrompt] = useState('');
   const [editedModel, setEditedModel] = useState('');
   const [editedRuntimeConfig, setEditedRuntimeConfig] = useState<Partial<SystemConfig>>({});
-  
-  const [officeLiveTrace, setOfficeLiveTrace] = useState<OfficeLiveTrace | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const mainChatEndRef = useRef<HTMLDivElement | null>(null);
@@ -171,7 +183,8 @@ export default function App() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const voiceStreamRef = useRef<MediaStream | null>(null);
   const voiceChunksRef = useRef<Blob[]>([]);
-  const micStateRef = useRef<'off' | 'listening' | 'capturing' | 'transcribing'>('off');
+  const vadCleanupRef = useRef<(() => void) | null>(null);
+  const micStateRef = useRef<'off' | 'listening' | 'capturing' | 'transcribing' | 'error'>('off');
   const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
   const ttsAudioUrlRef = useRef('');
   const ttsRequestRef = useRef(0);
@@ -222,16 +235,13 @@ export default function App() {
     localStorage.setItem('jarvis_active_tab', activeTab);
   }, [activeTab]);
 
+  useEffect(() => {
+    localStorage.setItem('jarvis_settings_section', settingsSection);
+  }, [settingsSection]);
+
   // Keep ttsEnabledRef in sync with its state
   useEffect(() => { ttsEnabledRef.current = isTTSEnabled; }, [isTTSEnabled]);
   useEffect(() => { appSettingsRef.current = appSettings; }, [appSettings]);
-
-  // Open Settings dropdown automatically if a settings sub-tab is active
-  useEffect(() => {
-    if (['config', 'subagents', 'mcp', 'obsidian', 'logs', 'activity', 'memory', 'tools'].includes(activeTab)) {
-      setSettingsOpen(true);
-    }
-  }, [activeTab]);
 
   const stopSpeech = useCallback(() => {
     ttsRequestRef.current += 1;
@@ -247,6 +257,17 @@ export default function App() {
     }
     setIsSpeaking(false);
     setPlayingMsgIndex(null);
+  }, []);
+
+  // Shared "voice pipeline failed" indicator — same inline pill used by both the mic
+  // (STT) and speech (TTS) paths, auto-clearing so it never lingers as a stale state.
+  const showVoiceError = useCallback((message: string) => {
+    setMicState('error');
+    setMicErrorMessage(message);
+    setTimeout(() => {
+      setMicState(current => (current === 'error' ? 'off' : current));
+      setMicErrorMessage('');
+    }, 3500);
   }, []);
 
   // ── TTS helper ─────────────────────────────────────────────────────────────
@@ -292,7 +313,11 @@ export default function App() {
     if (msgIndex !== undefined) setPlayingMsgIndex(msgIndex);
 
     const browserFallback = () => {
-      if (requestId !== ttsRequestRef.current || !('speechSynthesis' in window)) return;
+      if (requestId !== ttsRequestRef.current) return;
+      if (!('speechSynthesis' in window)) {
+        showVoiceError('Голосовой движок недоступен в этом браузере.');
+        return;
+      }
       const utter = new SpeechSynthesisUtterance(clean);
       const locale = langToLocale[appSettingsRef.current.language] || 'ru-RU';
       utter.lang = locale;
@@ -316,7 +341,17 @@ export default function App() {
       if (femaleVoice) utter.voice = femaleVoice;
       else if (langVoices.length > 0) utter.voice = langVoices[0];
 
-      utter.onstart = () => setIsSpeaking(true);
+      // Chrome (and others) can silently drop speechSynthesis.speak() — no onstart, no
+      // onerror, just nothing — when it's called from code the browser doesn't consider
+      // a "real" user gesture (e.g. an auto-triggered reply from a WebSocket push after
+      // the page has been idle). There's a proactive fix for this (the first-interaction
+      // "unlock" effect below), but if it still happens, surface it instead of staying
+      // silent forever with zero indication of why Vexa stopped talking.
+      let started = false;
+      utter.onstart = () => {
+        started = true;
+        setIsSpeaking(true);
+      };
       utter.onend = () => {
         setIsSpeaking(false);
         setPlayingMsgIndex(null);
@@ -324,14 +359,24 @@ export default function App() {
       utter.onerror = () => {
         setIsSpeaking(false);
         setPlayingMsgIndex(null);
+        if (requestId === ttsRequestRef.current) {
+          showVoiceError('Не удалось озвучить ответ.');
+        }
       };
       window.speechSynthesis.speak(utter);
+      setTimeout(() => {
+        if (!started && requestId === ttsRequestRef.current) {
+          showVoiceError('Браузер заблокировал голосовой ответ — кликните на странице и повторите.');
+        }
+      }, 1200);
     };
 
     void (async () => {
       try {
+        const authToken = localStorage.getItem('jarvis_auth_token');
+        const authHeaders: Record<string, string> = authToken ? { 'Authorization': `Bearer ${authToken}` } : {};
         if (serverTtsAvailableRef.current === null) {
-          const statusResponse = await fetch('/api/voice/tts/status');
+          const statusResponse = await fetch('/api/voice/tts/status', { headers: authHeaders });
           const status = statusResponse.ok ? await statusResponse.json() : null;
           serverTtsAvailableRef.current = Boolean(status?.available);
         }
@@ -342,7 +387,7 @@ export default function App() {
 
         const response = await fetch('/api/voice/synthesize', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
           body: JSON.stringify({ text: clean, rate: 1 }),
         });
         if (!response.ok) throw new Error('Local TTS provider is unavailable.');
@@ -355,7 +400,11 @@ export default function App() {
         audio.onplay = () => setIsSpeaking(true);
         audio.onended = stopSpeech;
         audio.onerror = () => {
-          serverTtsAvailableRef.current = false;
+          // Reset to null (not false) — a single failure shouldn't permanently
+          // downgrade every future reply to the browser's robotic fallback voice
+          // for the rest of the page session. null makes the next speakText call
+          // re-probe /api/voice/tts/status and retry the real server voice.
+          serverTtsAvailableRef.current = null;
           ttsAudioRef.current = null;
           if (ttsAudioUrlRef.current) {
             URL.revokeObjectURL(ttsAudioUrlRef.current);
@@ -366,11 +415,11 @@ export default function App() {
         };
         await audio.play();
       } catch {
-        serverTtsAvailableRef.current = false;
+        serverTtsAvailableRef.current = null;
         browserFallback();
       }
     })();
-  }, [playingMsgIndex, stopSpeech]);
+  }, [playingMsgIndex, stopSpeech, showVoiceError]);
 
   // ── Voice command helpers ───────────────────────────────────────────────────
   useEffect(() => {
@@ -431,6 +480,8 @@ export default function App() {
   }, [stopSpeech]);
 
   const resetVoiceRecorder = useCallback(() => {
+    vadCleanupRef.current?.();
+    vadCleanupRef.current = null;
     voiceStreamRef.current?.getTracks().forEach(track => track.stop());
     voiceStreamRef.current = null;
     mediaRecorderRef.current = null;
@@ -446,6 +497,7 @@ export default function App() {
 
     setMicEnabled(true);
     setMicState('transcribing');
+    setMicErrorMessage('');
     const formData = new FormData();
     formData.append('file', blob, `jarvis-voice-${Date.now()}.webm`);
 
@@ -464,6 +516,11 @@ export default function App() {
         throw new Error('No speech detected in recording.');
       }
 
+      // Show what was recognized before it's auto-sent, so the user can actually see
+      // their dictated text rather than it silently vanishing straight into the chat.
+      setInputValue(text);
+      await new Promise(resolve => setTimeout(resolve, 550));
+
       const vexaMode = localStorage.getItem('jarvis_active_tab') === 'vexa';
       if (vexaMode && currentChatIdRef.current !== 'dashboard') {
         currentChatIdRef.current = 'dashboard';
@@ -473,14 +530,17 @@ export default function App() {
       const sent = sendChatText(text, vexaMode ? 'dashboard' : currentChatIdRef.current);
       setInputValue(sent ? '' : text);
       if (sent) playBeep(1040, 0.12);
-    } catch (err) {
-      console.error('Voice transcription error:', err);
-      alert(err instanceof Error ? err.message : 'Voice transcription failed.');
-    } finally {
       setMicEnabled(false);
       setMicState('off');
+    } catch (err) {
+      // A transient "didn't catch that" is routine (short utterance, pause, background
+      // noise) — surface it inline through the same mic-status pill used for
+      // listening/capturing/transcribing instead of a blocking native alert().
+      console.error('Voice transcription error:', err);
+      setMicEnabled(false);
+      showVoiceError(err instanceof Error ? err.message : 'Voice transcription failed.');
     }
-  }, [sendChatText]);
+  }, [sendChatText, showVoiceError]);
 
   const stopVoiceRecording = useCallback(() => {
     const recorder = mediaRecorderRef.current;
@@ -509,7 +569,14 @@ export default function App() {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
-        }
+          // Chrome-only: actively cancel out Vexa's own TTS reply bleeding back
+          // through the speakers into this same recording — without it, dialog
+          // mode re-arming the mic shortly after a reply finishes can pick up
+          // the tail of its own voice as noise/echo, which both sounds like
+          // distortion and can confuse the STT's speech/silence detection on
+          // the next turn. Unsupported browsers just ignore the unknown key.
+          suppressLocalAudioPlayback: true,
+        } as MediaTrackConstraints
       });
 
       const mimeCandidates = [
@@ -545,6 +612,96 @@ export default function App() {
         setMicState('off');
         alert('Voice recorder failed.');
       };
+
+      // Auto-stop on end-of-speech (simple client-side VAD) so the user doesn't have to
+      // click the mic again to submit — speak, pause, done. Tuned generously (1.0s of
+      // sustained quiet after real speech was heard) to avoid cutting off mid-sentence
+      // pauses; a hard 60s cap guards against a stuck/silent stream never triggering it.
+      try {
+        const AudioContextCtor = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+        if (AudioContextCtor) {
+          const vadCtx = new AudioContextCtor();
+          const source = vadCtx.createMediaStreamSource(stream);
+          const analyser = vadCtx.createAnalyser();
+          analyser.fftSize = 512;
+          source.connect(analyser);
+          const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+          const SPEECH_RMS_THRESHOLD = 0.025;
+          const SILENCE_MS = 1000;
+          // A single instant above threshold used to count as "speech started" — the
+          // confirmation beep (played the moment recording starts) or any stray click
+          // bleeding into the mic could trip that, and since SILENCE_MS alone always
+          // exceeds this, the old MIN_SPEECH_MS check never actually required sustained
+          // voice. Recordings ended up ~1.5s of pure noise with zero real speech, which
+          // the STT then correctly reported as "no speech detected". Now the RMS must
+          // stay above threshold continuously for MIN_SUSTAINED_SPEECH_MS before we
+          // treat it as real speech at all, and ARM_DELAY_MS ignores the recording's
+          // first moments outright (covers the beep's own ~120ms tail).
+          const MIN_SUSTAINED_SPEECH_MS = 200;
+          const ARM_DELAY_MS = 350;
+          const MAX_RECORDING_MS = 60000;
+          const startedAt = performance.now();
+          let candidateSpeechAt: number | null = null;
+          let speechStartedAt: number | null = null;
+          let silenceStartedAt: number | null = null;
+          let stopped = false;
+          let rafId = 0;
+
+          const tick = () => {
+            if (stopped) return;
+            analyser.getByteTimeDomainData(dataArray);
+            let sumSquares = 0;
+            for (let i = 0; i < dataArray.length; i += 1) {
+              const normalized = (dataArray[i] - 128) / 128;
+              sumSquares += normalized * normalized;
+            }
+            const rms = Math.sqrt(sumSquares / dataArray.length);
+            const now = performance.now();
+
+            if (now - startedAt < ARM_DELAY_MS) {
+              rafId = requestAnimationFrame(tick);
+              return;
+            }
+
+            if (rms > SPEECH_RMS_THRESHOLD) {
+              if (candidateSpeechAt === null) candidateSpeechAt = now;
+              if (speechStartedAt === null && now - candidateSpeechAt >= MIN_SUSTAINED_SPEECH_MS) {
+                speechStartedAt = candidateSpeechAt;
+              }
+              silenceStartedAt = null;
+            } else {
+              candidateSpeechAt = null;
+              if (speechStartedAt !== null) {
+                if (silenceStartedAt === null) silenceStartedAt = now;
+                else if (now - silenceStartedAt > SILENCE_MS) {
+                  stopped = true;
+                  stopVoiceRecording();
+                  return;
+                }
+              }
+            }
+
+            if (now - startedAt > MAX_RECORDING_MS) {
+              stopped = true;
+              stopVoiceRecording();
+              return;
+            }
+            rafId = requestAnimationFrame(tick);
+          };
+          rafId = requestAnimationFrame(tick);
+
+          vadCleanupRef.current = () => {
+            stopped = true;
+            cancelAnimationFrame(rafId);
+            source.disconnect();
+            analyser.disconnect();
+            vadCtx.close().catch(() => {});
+          };
+        }
+      } catch (vadErr) {
+        console.error('Voice activity detection setup failed (manual stop still works):', vadErr);
+      }
 
       recorder.start();
       setMicEnabled(true);
@@ -590,6 +747,35 @@ export default function App() {
       window.speechSynthesis.getVoices();
       window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
     }
+  }, []);
+
+  // Unlock audio/speech autoplay on the first real user interaction. Vexa's spoken
+  // replies are triggered from an async WebSocket push, not a click — browsers (Chrome
+  // especially) can block both <audio>.play() and speechSynthesis.speak() from
+  // auto-triggered code until the page has seen at least one genuine gesture, and the
+  // failure is completely silent (no error event fires either way). A single click or
+  // keypress anywhere registers that gesture for the rest of the page session.
+  useEffect(() => {
+    const unlock = () => {
+      try {
+        const silent = new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=');
+        silent.volume = 0;
+        void silent.play().catch(() => {});
+      } catch { /* best-effort */ }
+      if ('speechSynthesis' in window) {
+        try {
+          const primer = new SpeechSynthesisUtterance('');
+          primer.volume = 0;
+          window.speechSynthesis.speak(primer);
+        } catch { /* best-effort */ }
+      }
+    };
+    document.addEventListener('pointerdown', unlock, { once: true });
+    document.addEventListener('keydown', unlock, { once: true });
+    return () => {
+      document.removeEventListener('pointerdown', unlock);
+      document.removeEventListener('keydown', unlock);
+    };
   }, []);
 
   // Listen for unauthorized events to clear auth state
@@ -670,6 +856,33 @@ export default function App() {
     verifyOtpCode(otpCode);
   };
 
+  const handlePasswordLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pwUsername.trim() || !pwPassword) return;
+    setPwStatus('submitting');
+    setPwError('');
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: pwUsername.trim(), password: pwPassword })
+      });
+      const data = await res.json();
+      if (res.ok && data.token) {
+        localStorage.setItem('jarvis_auth_token', data.token);
+        setIsAuthenticated(true);
+        setPwPassword('');
+        setPwStatus('idle');
+      } else {
+        setPwStatus('error');
+        setPwError(data.detail || 'Invalid username or password.');
+      }
+    } catch (err) {
+      setPwStatus('error');
+      setPwError('Error connecting to backend.');
+    }
+  };
+
   useEffect(() => {
     if (otpCode.length === 6 && authStatus !== 'verifying') {
       verifyOtpCode(otpCode);
@@ -686,10 +899,26 @@ export default function App() {
     const connectWS = () => {
       if (isCleanedUp) return;
 
+      // Guard against overlapping reconnect attempts (e.g. onclose firing more
+      // than once for the same disconnect): cancel any pending retry and force-
+      // close any still-live previous socket before opening a new one. Without
+      // this, a stale socket can keep receiving server broadcasts alongside the
+      // new one, causing every chat/TTS message to be processed twice.
+      if (reconnectTimeoutId) {
+        clearTimeout(reconnectTimeoutId);
+        reconnectTimeoutId = null;
+      }
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.onmessage = null;
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const token = localStorage.getItem('jarvis_auth_token') || '';
       const wsUrl = `${protocol}//${window.location.host}/api/ws`;
-      
+
       console.log('Connecting to authenticated WebSocket.');
       const ws = new WebSocket(wsUrl, ['hermes-v1', `hermes-auth.${token}`]);
       wsRef.current = ws;
@@ -702,7 +931,7 @@ export default function App() {
       ws.onclose = () => {
         setIsConnected(false);
         console.log('WebSocket disconnected. Reconnecting in 3s...');
-        if (!isCleanedUp) {
+        if (!isCleanedUp && wsRef.current === ws) {
           reconnectTimeoutId = setTimeout(connectWS, 3000);
         }
       };
@@ -852,7 +1081,7 @@ export default function App() {
               return [...prev, { ...data.timer, time_left: 0, status: 'completed' }];
             });
             playAlarmSound();
-            speakText(`Sir, the timer "${data.timer.label}" is complete.`);
+            speakText(`Albert, the timer "${data.timer.label}" is complete.`);
           } else if (data.type === 'alarm_fired') {
             setTimers((prev) => {
               const exists = prev.some(t => t.id === data.alarm.id);
@@ -862,20 +1091,13 @@ export default function App() {
               return [...prev, { ...data.alarm, time_left: 0, status: 'completed' }];
             });
             playAlarmSound();
-            speakText(`Sir, the alarm "${data.alarm.label}" has gone off.`);
+            speakText(`Albert, the alarm "${data.alarm.label}" has gone off.`);
           } else if (data.type === 'trace_update') {
             if (data.trace.agent !== 'Router') {
               setMessages((prev) => [...prev, {
                 role: 'system',
                 content: `⚙️ [${data.trace.agent}] ${data.trace.action}: ${data.trace.message.split('\n')[0]}`
               }]);
-              setOfficeLiveTrace({
-                agent: data.trace.agent,
-                action: data.trace.action,
-                message: data.trace.message,
-                status: data.trace.status,
-                ts: Date.now(),
-              });
             }
           }
         } catch (err) {
@@ -1041,13 +1263,13 @@ export default function App() {
           setMessages(data);
         } else {
           if (chatId === 'dashboard') {
-            setMessages([{ role: 'assistant', content: 'Greetings, Sir. Connection to the Hermes network is complete. Awaiting your instructions.' }]);
+            setMessages([{ role: 'assistant', content: 'Greetings, Albert. Connection to the Hermes network is complete. Awaiting your instructions.' }]);
           } else {
             const agent = listToSearch.find((a: any) => a.id === chatId);
             if (chatId.startsWith('chat_')) {
-              setMessages([{ role: 'assistant', content: 'Conversation initialized, Sir. How can I assist you today?' }]);
+              setMessages([{ role: 'assistant', content: 'Conversation initialized, Albert. How can I assist you today?' }]);
             } else {
-              setMessages([{ role: 'assistant', content: `Sub-agent session "${agent?.name || chatId}" initialized, Sir. Ready for work.` }]);
+              setMessages([{ role: 'assistant', content: `Sub-agent session "${agent?.name || chatId}" initialized, Albert. Ready for work.` }]);
             }
           }
         }
@@ -1256,9 +1478,9 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthenticated]);
 
-  // Fetch system stats and timers when the "tools" tab is active
+  // Fetch system stats and timers when the "tools" (Server & Monitoring) tab is active
   useEffect(() => {
-    if (!isAuthenticated || activeTab !== 'tools') return;
+    if (!isAuthenticated || activeTab !== 'settings' || settingsSection !== 'tools') return;
 
     const fetchStats = () => {
       fetch('/api/system/stats')
@@ -1319,7 +1541,7 @@ export default function App() {
       clearInterval(statsInterval);
       clearInterval(timersInterval);
     };
-  }, [activeTab, isAuthenticated]);
+  }, [activeTab, settingsSection, isAuthenticated]);
 
   // Local smooth countdown for timers in state
   useEffect(() => {
@@ -1350,7 +1572,7 @@ export default function App() {
       if (res.ok) {
         setNoteTitle('');
         setNoteContent('');
-        alert('Document indexed, Sir.');
+        alert('Document indexed, Albert.');
         fetchDocuments();
       } else {
         alert('Index error.');
@@ -1522,7 +1744,7 @@ export default function App() {
   }, [sendChatText]);
 
   const handleClearChat = async () => {
-    if (!window.confirm('Sir, are you sure you want to completely clear the history of this session?')) return;
+    if (!window.confirm('Albert, are you sure you want to completely clear the history of this session?')) return;
     
     setMessages([]);
     try {
@@ -1532,10 +1754,10 @@ export default function App() {
       if (res.ok) {
         fetchChatSessions();
         if (currentChatId === 'dashboard') {
-          setMessages([{ role: 'assistant', content: 'Greetings, Sir. Connection to the Hermes network is complete. Awaiting your instructions.' }]);
+          setMessages([{ role: 'assistant', content: 'Greetings, Albert. Connection to the Hermes network is complete. Awaiting your instructions.' }]);
         } else {
           const agent = subagents.find((a: any) => a.id === currentChatId);
-          setMessages([{ role: 'assistant', content: `Sub-agent session "${agent?.name || currentChatId}" cleared, Sir. Ready for work.` }]);
+          setMessages([{ role: 'assistant', content: `Sub-agent session "${agent?.name || currentChatId}" cleared, Albert. Ready for work.` }]);
         }
       }
     } catch(e) {
@@ -1577,7 +1799,7 @@ export default function App() {
         setEditedRuntimeConfig(data.config);
         setEditedModel(data.config.model);
         fetchModels();
-        alert('System configuration updated, Sir.');
+        alert('System configuration updated, Albert.');
       } else {
         alert('Error updating configuration.');
       }
@@ -1620,29 +1842,90 @@ export default function App() {
             <p style={{ color: '#06b6d4', fontSize: '0.9rem', letterSpacing: 0, margin: '4px 0 0', textTransform: 'uppercase' }}>Secure Access Link</p>
           </div>
 
-          <p style={{ color: '#94a3b8', fontSize: '0.95rem', lineHeight: '1.6', marginBottom: '30px' }}>
-            Sir, identity confirmation is required to access the management console.
+          <p style={{ color: '#94a3b8', fontSize: '0.95rem', lineHeight: '1.6', marginBottom: '20px' }}>
+            Albert, identity confirmation is required to access the management console.
           </p>
 
-          {authStatus === 'idle' && (
-            <button
-              onClick={handleRequestOtp}
-              style={{
-                width: '100%',
-                padding: '14px',
-                borderRadius: '8px',
-                border: '1px solid #06b6d4',
-                background: 'rgba(6, 182, 212, 0.1)',
-                color: '#06b6d4',
-                fontWeight: 600,
-                fontSize: '1rem',
-                cursor: 'pointer',
-                transition: 'all 0.2s',
-              }}
-              className="glow-btn-cyan"
-            >
-              Request code in Telegram
-            </button>
+          {loginMode === 'password' ? (
+            <form onSubmit={handlePasswordLogin} style={{ display: 'flex', flexDirection: 'column', gap: '14px', marginBottom: '10px' }}>
+              <input
+                type="text"
+                value={pwUsername}
+                onChange={(e) => setPwUsername(e.target.value)}
+                placeholder="Username"
+                autoComplete="username"
+                style={{
+                  width: '100%', padding: '14px', borderRadius: '8px',
+                  border: '1px solid rgba(6, 182, 212, 0.3)', background: 'rgba(15, 23, 42, 0.6)',
+                  color: '#fff', fontSize: '1rem', outline: 'none', boxSizing: 'border-box'
+                }}
+                disabled={pwStatus === 'submitting'}
+                autoFocus
+              />
+              <input
+                type="password"
+                value={pwPassword}
+                onChange={(e) => setPwPassword(e.target.value)}
+                placeholder="Password"
+                autoComplete="current-password"
+                style={{
+                  width: '100%', padding: '14px', borderRadius: '8px',
+                  border: '1px solid rgba(6, 182, 212, 0.3)', background: 'rgba(15, 23, 42, 0.6)',
+                  color: '#fff', fontSize: '1rem', outline: 'none', boxSizing: 'border-box'
+                }}
+                disabled={pwStatus === 'submitting'}
+              />
+              {pwError && (
+                <p style={{ color: '#ef4444', fontSize: '0.85rem', margin: 0 }}>⚠️ {pwError}</p>
+              )}
+              <button
+                type="submit"
+                disabled={pwStatus === 'submitting'}
+                style={{
+                  width: '100%', padding: '14px', borderRadius: '8px', border: '1px solid #06b6d4',
+                  background: 'rgba(6, 182, 212, 0.1)', color: '#06b6d4', fontWeight: 600,
+                  fontSize: '1rem', cursor: pwStatus === 'submitting' ? 'default' : 'pointer', transition: 'all 0.2s',
+                }}
+                className="glow-btn-cyan"
+              >
+                {pwStatus === 'submitting' ? 'Signing in...' : 'Sign in'}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setLoginMode('telegram'); setPwError(''); setPwStatus('idle'); }}
+                style={{ background: 'none', border: 'none', color: '#64748b', fontSize: '0.85rem', cursor: 'pointer', textDecoration: 'underline', marginTop: '4px' }}
+              >
+                Use Telegram code instead
+              </button>
+            </form>
+          ) : authStatus === 'idle' && (
+            <>
+              <button
+                onClick={handleRequestOtp}
+                style={{
+                  width: '100%',
+                  padding: '14px',
+                  borderRadius: '8px',
+                  border: '1px solid #06b6d4',
+                  background: 'rgba(6, 182, 212, 0.1)',
+                  color: '#06b6d4',
+                  fontWeight: 600,
+                  fontSize: '1rem',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s',
+                }}
+                className="glow-btn-cyan"
+              >
+                Request code in Telegram
+              </button>
+              <button
+                type="button"
+                onClick={() => { setLoginMode('password'); setAuthError(''); }}
+                style={{ background: 'none', border: 'none', color: '#64748b', fontSize: '0.85rem', cursor: 'pointer', textDecoration: 'underline', marginTop: '14px' }}
+              >
+                Sign in with username &amp; password
+              </button>
+            </>
           )}
 
           {authStatus === 'sending' && (
@@ -1714,7 +1997,7 @@ export default function App() {
   }
 
   return (
-    <div className={`app-container scanlines${activeTab === 'office' ? ' is-office-mode' : ''}${activeTab === 'vexa' ? ' is-vexa-mode' : ''}`}>
+    <div className={`app-container scanlines${activeTab === 'vexa' ? ' is-vexa-mode' : ''}`}>
       {/* Mobile Menu Toggle Button */}
       <button 
         onClick={() => setSidebarOpen(!sidebarOpen)}
@@ -1781,15 +2064,6 @@ export default function App() {
         
         <nav style={{ ...styles.navMenu, ...(isSidebarCollapsed ? styles.navMenuCollapsed : {}) }}>
           <button
-            style={navStyle('chat')}
-            onClick={() => { setActiveTab('chat'); setSidebarOpen(false); }}
-            title={t('navChat')}
-          >
-            <MessageSquare size={18} />
-            <span>{t('navChat')}</span>
-          </button>
-
-          <button
             style={navStyle('vexa')}
             onClick={() => {
               selectChat('dashboard');
@@ -1800,15 +2074,6 @@ export default function App() {
           >
             <AudioWaveform size={18} />
             <span>{t('navVexa')}</span>
-          </button>
-
-          <button
-            style={navStyle('office')}
-            onClick={() => { setActiveTab('office'); setSidebarOpen(false); }}
-            title={t('navOffice')}
-          >
-            <Building2 size={18} />
-            <span>{t('navOffice')}</span>
           </button>
 
           <button
@@ -1848,105 +2113,13 @@ export default function App() {
           </button>
           
           <button
-            style={{
-              ...styles.navBtn,
-              ...(isSidebarCollapsed ? styles.navBtnCollapsed : {}),
-              justifyContent: 'space-between',
-              paddingRight: '12px',
-              ...((['config', 'subagents', 'mcp', 'obsidian', 'logs', 'activity', 'memory', 'tools'].includes(activeTab)) ? styles.navBtnActive : {})
-            }}
-            onClick={() => setSettingsOpen(!settingsOpen)}
+            style={navStyle('settings')}
+            onClick={() => { setActiveTab('settings'); setSidebarOpen(false); }}
             title={t('navSettings')}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <Settings size={18} />
-              <span>{t('navSettings')}</span>
-            </div>
-            {settingsOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+            <Settings size={18} />
+            <span>{t('navSettings')}</span>
           </button>
-
-          {settingsOpen && (
-            <div style={{ paddingLeft: isSidebarCollapsed ? 0 : '20px', display: 'flex', flexDirection: 'column', gap: '4px', marginTop: '4px', marginBottom: '4px' }}>
-              {!isSidebarCollapsed && <span className="nav-section-label">SYSTEM</span>}
-              <button
-                style={navStyle('config')}
-                onClick={() => { setActiveTab('config'); setSidebarOpen(false); }}
-                title={t('navConfig')}
-              >
-                <Settings size={18} />
-                <span>{t('navConfig')}</span>
-              </button>
-
-              <button
-                style={navStyle('tools')}
-                onClick={() => { setActiveTab('tools'); setSidebarOpen(false); }}
-                title={t('navTools')}
-              >
-                <Wrench size={18} />
-                <span>{t('navTools')}</span>
-              </button>
-
-              {!isSidebarCollapsed && <span className="nav-section-label">AGENTS</span>}
-              <button
-                style={navStyle('subagents')}
-                onClick={() => {
-                  setActiveTab('subagents');
-                  selectChat(currentChatId === 'dashboard' ? 'dashboard' : currentChatId);
-                  setSidebarOpen(false);
-                }}
-                title={t('navSubagents')}
-              >
-                <Layers size={18} />
-                <span>{t('navSubagents')}</span>
-              </button>
-
-              <button
-                style={navStyle('mcp')}
-                onClick={() => { setActiveTab('mcp'); setSidebarOpen(false); }}
-                title={t('navMcp')}
-              >
-                <Server size={18} />
-                <span>{t('navMcp')}</span>
-              </button>
-
-              <button
-                style={navStyle('obsidian')}
-                onClick={() => { setActiveTab('obsidian'); setSidebarOpen(false); }}
-                title={t('navObsidian')}
-              >
-                <BookOpen size={18} />
-                <span>{t('navObsidian')}</span>
-              </button>
-              
-              <button
-                style={navStyle('memory')}
-                onClick={() => { setActiveTab('memory'); setSidebarOpen(false); }}
-                title={t('navMemory')}
-              >
-                <Database size={18} />
-                <span>{t('navMemory')}</span>
-              </button>
-
-              {!isSidebarCollapsed && <span className="nav-section-label">LOGS</span>}
-              <button
-                style={navStyle('logs')}
-                onClick={() => { setActiveTab('logs'); setSidebarOpen(false); }}
-                title={t('navLogs')}
-              >
-                <Terminal size={18} />
-                <span>{t('navLogs')}</span>
-              </button>
-              
-              <button
-                style={navStyle('activity')}
-                onClick={() => { setActiveTab('activity'); setSidebarOpen(false); }}
-                title={t('navActivity')}
-              >
-                <Activity size={18} />
-                <span>{t('navActivity')}</span>
-              </button>
-            </div>
-          )}
         </nav>
 
         {/* Sidebar Status Info */}
@@ -1981,75 +2154,90 @@ export default function App() {
       {/* 2. Main Workspace */}
       <main
         style={styles.mainContent}
-        className={activeTab === 'office' ? 'office-main' : activeTab === 'vexa' ? 'vexa-main' : undefined}
+        className={activeTab === 'vexa' ? 'vexa-main' : undefined}
       >
-        {activeTab === 'chat' && (
-          <ChatTab
-            currentChatId={currentChatId}
-            chatSessions={chatSessions}
-            messages={messages}
-            inputValue={inputValue}
-            setInputValue={setInputValue}
-            isSpeaking={isSpeaking}
-            setIsSpeaking={setIsSpeaking}
-            micState={micState}
-            micEnabled={micEnabled}
-            onVoiceToggle={handleVoiceToggle}
-            isTTSEnabled={isTTSEnabled}
-            setIsTTSEnabled={setIsTTSEnabled}
-            isGenerating={isGenerating}
-            playingMsgIndex={playingMsgIndex}
-            setPlayingMsgIndex={setPlayingMsgIndex}
-            config={config}
-            isConnected={isConnected}
-            isUploading={isUploading}
-            attachedFile={attachedFile}
-            setAttachedFile={setAttachedFile}
-            speakText={speakText}
-            handleClearChat={handleClearChat}
-            handleSendMessage={handleSendMessage}
-            handleChatFileAttach={handleChatFileAttach}
-            selectChat={selectChat}
-            handleCreateNewSession={handleCreateNewSession}
-            fetchChatSessions={fetchChatSessions}
-            getSessionLabel={getSessionLabel}
-            mainChatEndRef={mainChatEndRef}
-            t={t}
-            onStopGeneration={handleStopGeneration}
-            onRetryLast={handleRetryLast}
-            hasLastUserMessage={messages.some(message => message.role === 'user')}
-            onChangeModel={() => setActiveTab('config')}
-            subagents={subagents}
-            handleSetSessionAgent={handleSetSessionAgent}
-          />
-        )}
-
         {activeTab === 'vexa' && (
-          <VexaCommandCenter
-            agents={subagents}
-            messages={messages}
-            isConnected={isConnected}
-            isGenerating={isGenerating}
-            isSpeaking={isSpeaking}
-            micState={micState}
-            onVoiceToggle={handleVoiceToggle}
-            onCommand={handleVexaCommand}
-            onStop={handleStopGeneration}
-            language={language}
-          />
-        )}
-
-        {activeTab === 'office' && (
-          <OfficeTab
-            t={t}
-            isConnected={isConnected}
-            language={language}
-            liveTrace={officeLiveTrace}
-            selectChat={(agentId) => {
-              selectChat(agentId);
-              setActiveTab('chat');
-            }}
-          />
+          <>
+            <VexaCommandCenter
+              agents={subagents}
+              messages={messages}
+              isConnected={isConnected}
+              isGenerating={isGenerating}
+              isSpeaking={isSpeaking}
+              micState={micState}
+              micErrorMessage={micErrorMessage}
+              onVoiceToggle={handleVoiceToggle}
+              onCommand={handleVexaCommand}
+              onStop={handleStopGeneration}
+              language={language}
+              micStreamRef={voiceStreamRef}
+              ttsAudioElRef={ttsAudioRef}
+              onOpenAgentChat={(agentId) => {
+                if (agentId) selectChat(agentId);
+                setVexaTranscriptOpen(true);
+              }}
+              chatSessions={chatSessions}
+              currentChatId={currentChatId}
+              getSessionLabel={getSessionLabel}
+              onCreateSession={handleCreateNewSession}
+              fetchAgents={fetchSubagents}
+            />
+            {vexaTranscriptOpen && (
+              <FloatingWindow
+                title={t('navVexa')}
+                subtitle={getSessionLabel(currentChatId)}
+                storageKey="hermes_vexa_channel_window"
+                onClose={() => setVexaTranscriptOpen(false)}
+                labels={{
+                  minimize: t('vexaWindowMinimize'),
+                  restore: t('vexaWindowRestore'),
+                  fullscreen: t('vexaWindowFullscreen'),
+                  exitFullscreen: t('vexaWindowExitFullscreen'),
+                  close: t('vexaWindowClose'),
+                }}
+              >
+                <ChatTab
+                  currentChatId={currentChatId}
+                  chatSessions={chatSessions}
+                  messages={messages}
+                  inputValue={inputValue}
+                  setInputValue={setInputValue}
+                  isSpeaking={isSpeaking}
+                  setIsSpeaking={setIsSpeaking}
+                  micState={micState}
+                  micErrorMessage={micErrorMessage}
+                  micEnabled={micEnabled}
+                  onVoiceToggle={handleVoiceToggle}
+                  isTTSEnabled={isTTSEnabled}
+                  setIsTTSEnabled={setIsTTSEnabled}
+                  isGenerating={isGenerating}
+                  playingMsgIndex={playingMsgIndex}
+                  setPlayingMsgIndex={setPlayingMsgIndex}
+                  config={config}
+                  isConnected={isConnected}
+                  isUploading={isUploading}
+                  attachedFile={attachedFile}
+                  setAttachedFile={setAttachedFile}
+                  speakText={speakText}
+                  handleClearChat={handleClearChat}
+                  handleSendMessage={handleSendMessage}
+                  handleChatFileAttach={handleChatFileAttach}
+                  selectChat={selectChat}
+                  handleCreateNewSession={handleCreateNewSession}
+                  fetchChatSessions={fetchChatSessions}
+                  getSessionLabel={getSessionLabel}
+                  mainChatEndRef={mainChatEndRef}
+                  t={t}
+                  onStopGeneration={handleStopGeneration}
+                  onRetryLast={handleRetryLast}
+                  hasLastUserMessage={messages.some(message => message.role === 'user')}
+                  onChangeModel={() => { setActiveTab('settings'); setSettingsSection('config'); }}
+                  subagents={subagents}
+                  handleSetSessionAgent={handleSetSessionAgent}
+                />
+              </FloatingWindow>
+            )}
+          </>
         )}
 
         {activeTab === 'processes' && <ProcessesTab language={language} />}
@@ -2063,62 +2251,11 @@ export default function App() {
           />
         )}
 
-        {activeTab === 'config' && (
-          <ConfigTab
-            editedModel={editedModel}
-            setEditedModel={setEditedModel}
-            editedPrompt={editedPrompt}
-            setEditedPrompt={setEditedPrompt}
-            isSavingConfig={isSavingConfig}
-            handleSaveConfig={handleSaveConfig}
-            models={models}
-            runtimeConfig={editedRuntimeConfig}
-            setRuntimeConfig={setEditedRuntimeConfig}
-            language={language}
-            onLanguageChange={(nextLanguage) => setLanguage(nextLanguage as Language)}
-          />
-        )}
-
-        {activeTab === 'logs' && (
-          <LogsTab
-            logs={logs}
-            selectedLog={selectedLog}
-            setSelectedLog={setSelectedLog}
-          />
-        )}
-
         {activeTab === 'metrics' && (
           <MetricsTab
             metrics={metrics}
             isLoading={isMetricsLoading}
             onRefresh={fetchMetrics}
-          />
-        )}
-
-        {activeTab === 'activity' && (
-          <ActivityTab
-            isGenerating={isGenerating}
-            activityLogs={activityLogs}
-            handleClearActivityLogs={handleClearActivityLogs}
-          />
-        )}
-
-        {activeTab === 'memory' && (
-          <MemoryTab
-            noteTitle={noteTitle}
-            setNoteTitle={setNoteTitle}
-            noteContent={noteContent}
-            setNoteContent={setNoteContent}
-            isIndexing={isIndexing}
-            documents={documents}
-            memorySearchQuery={memorySearchQuery}
-            setMemorySearchQuery={setMemorySearchQuery}
-            isSearchingMemory={isSearchingMemory}
-            memorySearchResults={memorySearchResults}
-            handleIndexNote={handleIndexNote}
-            handleSearchMemory={handleSearchMemory}
-            handleClearMemorySearch={handleClearMemorySearch}
-            handleDeleteDocument={handleDeleteDocument}
           />
         )}
 
@@ -2130,78 +2267,178 @@ export default function App() {
           />
         )}
 
-        {activeTab === 'tools' && (
-          <ToolsTab
-            systemStats={systemStats}
-            uploads={uploads}
-            language={language}
-            setLanguage={setLanguage}
-            t={t}
-          />
-        )}
-
-        {activeTab === 'subagents' && (
-          <SubagentsTab
-            currentChatId={currentChatId}
-            subagents={subagents}
-            messages={messages}
-            inputValue={inputValue}
-            setInputValue={setInputValue}
-            isSpeaking={isSpeaking}
-            setIsSpeaking={setIsSpeaking}
-            isGenerating={isGenerating}
-            playingMsgIndex={playingMsgIndex}
-            setPlayingMsgIndex={setPlayingMsgIndex}
-            config={config}
-            isConnected={isConnected}
-            newAgentId={newAgentId}
-            setNewAgentId={setNewAgentId}
-            newAgentName={newAgentName}
-            setNewAgentName={setNewAgentName}
-            newAgentPrompt={newAgentPrompt}
-            setNewAgentPrompt={setNewAgentPrompt}
-            newAgentModel={newAgentModel}
-            setNewAgentModel={setNewAgentModel}
-            newAgentSkills={newAgentSkills}
-            setNewAgentSkills={setNewAgentSkills}
-            newAgentTemperature={newAgentTemperature}
-            setNewAgentTemperature={setNewAgentTemperature}
-            isCreatingAgent={isCreatingAgent}
-            editingAgentId={editingAgentId}
-            setEditingAgentId={setEditingAgentId}
-            editAgentName={editAgentName}
-            setEditAgentName={setEditAgentName}
-            editAgentPrompt={editAgentPrompt}
-            setEditAgentPrompt={setEditAgentPrompt}
-            editAgentModel={editAgentModel}
-            setEditAgentModel={setEditAgentModel}
-            editAgentSkills={editAgentSkills}
-            setEditAgentSkills={setEditAgentSkills}
-            editAgentTemperature={editAgentTemperature}
-            setEditAgentTemperature={setEditAgentTemperature}
-            isUpdatingAgent={isUpdatingAgent}
-            speakText={speakText}
-            handleSendMessage={handleSendMessage}
-            selectChat={selectChat}
-            handleCreateSubagent={handleCreateSubagent}
-            handleUpdateSubagent={handleUpdateSubagent}
-            handleDeleteSubagent={handleDeleteSubagent}
-            setCurrentChatId={setCurrentChatId}
-            subagentChatEndRef={subagentChatEndRef}
-            models={models}
-          />
-        )}
-
-        {activeTab === 'obsidian' && (
-          <ObsidianTab authToken={localStorage.getItem('jarvis_auth_token')} />
-        )}
-
         {activeTab === 'network' && (
           <NetworkTab subagents={subagents} setSubagents={setSubagents} fetchSubagents={fetchSubagents} models={models} />
         )}
 
-        {activeTab === 'mcp' && (
-          <MCPTab />
+        {activeTab === 'settings' && (
+          <div style={styles.tabWrapper}>
+            <nav className="admin-subnav">
+              <button type="button" className={settingsSection === 'config' ? 'is-active' : ''} onClick={() => setSettingsSection('config')}>
+                <Settings size={15} />
+                <span>{t('navConfig')}</span>
+              </button>
+              <button type="button" className={settingsSection === 'keys' ? 'is-active' : ''} onClick={() => setSettingsSection('keys')}>
+                <KeyRound size={15} />
+                <span>{t('navApiKeys')}</span>
+              </button>
+              <button type="button" className={settingsSection === 'channels' ? 'is-active' : ''} onClick={() => setSettingsSection('channels')}>
+                <MessageCircle size={15} />
+                <span>{t('navChannels')}</span>
+              </button>
+              <button type="button" className={settingsSection === 'tools' ? 'is-active' : ''} onClick={() => setSettingsSection('tools')}>
+                <Wrench size={15} />
+                <span>{t('navTools')}</span>
+              </button>
+              <button type="button" className={settingsSection === 'subagents' ? 'is-active' : ''} onClick={() => { setSettingsSection('subagents'); selectChat(currentChatId === 'dashboard' ? 'dashboard' : currentChatId); }}>
+                <Layers size={15} />
+                <span>{t('navSubagents')}</span>
+              </button>
+              <button type="button" className={settingsSection === 'mcp' ? 'is-active' : ''} onClick={() => setSettingsSection('mcp')}>
+                <Server size={15} />
+                <span>{t('navMcp')}</span>
+              </button>
+              <button type="button" className={settingsSection === 'obsidian' ? 'is-active' : ''} onClick={() => setSettingsSection('obsidian')}>
+                <BookOpen size={15} />
+                <span>{t('navObsidian')}</span>
+              </button>
+              <button type="button" className={settingsSection === 'memory' ? 'is-active' : ''} onClick={() => setSettingsSection('memory')}>
+                <Database size={15} />
+                <span>{t('navMemory')}</span>
+              </button>
+              <button type="button" className={settingsSection === 'logs' ? 'is-active' : ''} onClick={() => setSettingsSection('logs')}>
+                <Terminal size={15} />
+                <span>{t('navLogs')}</span>
+              </button>
+              <button type="button" className={settingsSection === 'activity' ? 'is-active' : ''} onClick={() => setSettingsSection('activity')}>
+                <Activity size={15} />
+                <span>{t('navActivity')}</span>
+              </button>
+            </nav>
+
+            {settingsSection === 'config' && (
+              <ConfigTab
+                editedModel={editedModel}
+                setEditedModel={setEditedModel}
+                editedPrompt={editedPrompt}
+                setEditedPrompt={setEditedPrompt}
+                isSavingConfig={isSavingConfig}
+                handleSaveConfig={handleSaveConfig}
+                models={models}
+                runtimeConfig={editedRuntimeConfig}
+                setRuntimeConfig={setEditedRuntimeConfig}
+                language={language}
+                onLanguageChange={(nextLanguage) => setLanguage(nextLanguage as Language)}
+              />
+            )}
+
+            {settingsSection === 'keys' && <ApiKeysTab />}
+
+            {settingsSection === 'channels' && <MessengerChannelsTab agents={subagents} />}
+
+            {settingsSection === 'logs' && (
+              <LogsTab
+                logs={logs}
+                selectedLog={selectedLog}
+                setSelectedLog={setSelectedLog}
+              />
+            )}
+
+            {settingsSection === 'activity' && (
+              <ActivityTab
+                isGenerating={isGenerating}
+                activityLogs={activityLogs}
+                handleClearActivityLogs={handleClearActivityLogs}
+              />
+            )}
+
+            {settingsSection === 'memory' && (
+              <MemoryTab
+                noteTitle={noteTitle}
+                setNoteTitle={setNoteTitle}
+                noteContent={noteContent}
+                setNoteContent={setNoteContent}
+                isIndexing={isIndexing}
+                documents={documents}
+                memorySearchQuery={memorySearchQuery}
+                setMemorySearchQuery={setMemorySearchQuery}
+                isSearchingMemory={isSearchingMemory}
+                memorySearchResults={memorySearchResults}
+                handleIndexNote={handleIndexNote}
+                handleSearchMemory={handleSearchMemory}
+                handleClearMemorySearch={handleClearMemorySearch}
+                handleDeleteDocument={handleDeleteDocument}
+              />
+            )}
+
+            {settingsSection === 'tools' && (
+              <ToolsTab
+                systemStats={systemStats}
+                uploads={uploads}
+                language={language}
+              />
+            )}
+
+            {settingsSection === 'subagents' && (
+              <SubagentsTab
+                currentChatId={currentChatId}
+                subagents={subagents}
+                messages={messages}
+                inputValue={inputValue}
+                setInputValue={setInputValue}
+                isSpeaking={isSpeaking}
+                setIsSpeaking={setIsSpeaking}
+                isGenerating={isGenerating}
+                playingMsgIndex={playingMsgIndex}
+                setPlayingMsgIndex={setPlayingMsgIndex}
+                config={config}
+                isConnected={isConnected}
+                newAgentId={newAgentId}
+                setNewAgentId={setNewAgentId}
+                newAgentName={newAgentName}
+                setNewAgentName={setNewAgentName}
+                newAgentPrompt={newAgentPrompt}
+                setNewAgentPrompt={setNewAgentPrompt}
+                newAgentModel={newAgentModel}
+                setNewAgentModel={setNewAgentModel}
+                newAgentSkills={newAgentSkills}
+                setNewAgentSkills={setNewAgentSkills}
+                newAgentTemperature={newAgentTemperature}
+                setNewAgentTemperature={setNewAgentTemperature}
+                isCreatingAgent={isCreatingAgent}
+                editingAgentId={editingAgentId}
+                setEditingAgentId={setEditingAgentId}
+                editAgentName={editAgentName}
+                setEditAgentName={setEditAgentName}
+                editAgentPrompt={editAgentPrompt}
+                setEditAgentPrompt={setEditAgentPrompt}
+                editAgentModel={editAgentModel}
+                setEditAgentModel={setEditAgentModel}
+                editAgentSkills={editAgentSkills}
+                setEditAgentSkills={setEditAgentSkills}
+                editAgentTemperature={editAgentTemperature}
+                setEditAgentTemperature={setEditAgentTemperature}
+                isUpdatingAgent={isUpdatingAgent}
+                speakText={speakText}
+                handleSendMessage={handleSendMessage}
+                selectChat={selectChat}
+                handleCreateSubagent={handleCreateSubagent}
+                handleUpdateSubagent={handleUpdateSubagent}
+                handleDeleteSubagent={handleDeleteSubagent}
+                setCurrentChatId={setCurrentChatId}
+                subagentChatEndRef={subagentChatEndRef}
+                models={models}
+              />
+            )}
+
+            {settingsSection === 'obsidian' && (
+              <ObsidianTab authToken={localStorage.getItem('jarvis_auth_token')} />
+            )}
+
+            {settingsSection === 'mcp' && (
+              <MCPTab />
+            )}
+          </div>
         )}
 
       </main>
@@ -2285,7 +2522,7 @@ export default function App() {
                   cursor: 'pointer'
                 }}
               >
-                <option value="jarvis">👑 Jarvis (Main)</option>
+                <option value="jarvis">👑 Vexa (Main)</option>
                 {subagents.map(a => {
                   const isOrch = a.agent_type === 'orchestrator' || a.agent_type === 'sub-orchestrator';
                   const icon = isOrch ? '🧠' : '🤖';

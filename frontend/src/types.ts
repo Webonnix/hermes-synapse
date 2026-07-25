@@ -60,6 +60,7 @@ export interface SystemConfig {
   memory_enabled?: boolean;
   memory_auto_save?: boolean;
   memory_max_items?: number;
+  telegram_voice_replies?: boolean;
   provider?: 'ollama' | 'openrouter' | 'openai_compatible' | string;
   api_base?: string;
   ollama_base_url?: string;
@@ -124,6 +125,88 @@ export interface AgentModel {
   progress?: number;
   updated_at?: string;
   recent_events?: AgentEvent[];
+  budget_usd_limit?: number | null;
+  budget_period?: 'monthly' | 'lifetime' | string;
+  tier_id?: string | null;
+}
+
+// Spend vs. configured budget for one agent — backend/database.py::get_agent_budget_status.
+export interface AgentBudgetStatus {
+  agent_id: string;
+  budget_usd_limit: number | null;
+  budget_period: 'monthly' | 'lifetime' | string;
+  used_usd: number;
+  remaining_usd: number | null;
+  exceeded: boolean;
+}
+
+// A named preset of feature-flag defaults an agent can be assigned to — backend/agent_tiers.py.
+export interface AgentTier {
+  id: string;
+  name: string;
+  description: string;
+  budget_usd_limit_default: number | null;
+  budget_period_default: 'monthly' | 'lifetime' | string;
+  allow_external_provider: boolean;
+  allow_messenger: boolean;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+// A dedicated Telegram bot for one agent — backend/agent_messenger_governance.py.
+export interface AgentTelegramBinding {
+  id: string;
+  subagent_id: string;
+  platform: 'telegram' | string;
+  bot_username: string;
+  allowed_chat_ids: string[];
+  status: 'awaiting_approval' | 'approved' | 'active' | 'failed' | 'revoked' | string;
+  control_task_id?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// A dedicated Element/Matrix account for one agent — backend/agent_messenger_governance.py.
+export interface AgentMatrixBinding {
+  id: string;
+  subagent_id: string;
+  platform: 'matrix' | string;
+  bot_username: string; // resolved Matrix user id, e.g. "@agent:matrix.org" — reuses Telegram's column name
+  allowed_chat_ids: string[]; // Matrix room ids
+  status: 'awaiting_approval' | 'approved' | 'active' | 'failed' | 'revoked' | string;
+  control_task_id?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// Cross-agent, cross-platform row from GET /api/messenger-bindings — powers the
+// central "Каналы связи" admin page (MessengerChannelsTab.tsx).
+export interface MessengerBinding {
+  id: string;
+  subagent_id: string;
+  agent_name: string;
+  platform: string;
+  bot_username: string;
+  allowed_chat_ids: string[];
+  status: 'awaiting_approval' | 'approved' | 'active' | 'failed' | 'revoked' | string;
+  control_task_id?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// An external LLM provider an agent can be bound to (agent.model_provider references
+// its `id`, or the literal "ollama" for the always-available local model). The API key
+// itself is never returned by the backend — see backend/provider_governance.py.
+export interface ProviderBinding {
+  id: string;
+  name: string;
+  provider_type: string;
+  api_base: string;
+  status: 'awaiting_approval' | 'approved' | 'active' | 'failed' | 'revoked' | string;
+  control_task_id?: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface AgentEvent {

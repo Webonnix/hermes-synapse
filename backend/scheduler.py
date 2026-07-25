@@ -147,7 +147,7 @@ async def run_timer(task: TimerTask):
             )
             await _send_telegram_alert(
                 task.chat_id,
-                f"🏛️ **ATTENTION, SIR**\n\n"
+                f"🏛️ **ATTENTION, ALBERT**\n\n"
                 f"Timer complete:\n"
                 f"• Event: **{task.label}**\n"
                 f"• Duration: {task.duration} sec\n"
@@ -255,7 +255,7 @@ async def run_alarm(task: AlarmTask):
 
             await _send_telegram_alert(
                 task.chat_id,
-                f"⏰ **ALARM, SIR**\n\n"
+                f"⏰ **ALARM, ALBERT**\n\n"
                 f"• Event: **{task.label}**\n"
                 f"• Trigger time: {target_time_str}\n"
                 f"• Status: ✅ Completed"
@@ -444,7 +444,7 @@ async def run_recurring_reminder(reminder: RecurringReminder):
                 )
                 await _send_telegram_alert(
                     reminder.chat_id,
-                    f"🔔 **REMINDER, SIR** (#{reminder.fire_count})\n\n"
+                    f"🔔 **REMINDER, ALBERT** (#{reminder.fire_count})\n\n"
                     f"• {reminder.label}\n"
                     f"• Repeat every: {hours_str}\n\n"
                     f"_Next trigger in {hours_str}._"

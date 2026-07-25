@@ -32,7 +32,8 @@ interface ChatTabProps {
   setInputValue: (val: string) => void;
   isSpeaking: boolean;
   setIsSpeaking: (val: boolean) => void;
-  micState: 'off' | 'listening' | 'capturing' | 'transcribing';
+  micState: 'off' | 'listening' | 'capturing' | 'transcribing' | 'error';
+  micErrorMessage?: string;
   micEnabled: boolean;
   onVoiceToggle: () => void;
   isTTSEnabled: boolean;
@@ -74,6 +75,7 @@ export function ChatTab({
   isSpeaking,
   setIsSpeaking,
   micState,
+  micErrorMessage,
   micEnabled,
   onVoiceToggle,
   isTTSEnabled,
@@ -206,7 +208,7 @@ export function ChatTab({
                   cursor: 'pointer'
                 }}
               >
-                <option value="jarvis" style={{ background: '#0b0f19', color: '#fff' }}>Jarvis (Main)</option>
+                <option value="jarvis" style={{ background: '#0b0f19', color: '#fff' }}>Vexa (Main)</option>
                 {subagents.map(a => (
                   <option key={a.id} value={a.id} style={{ background: '#0b0f19', color: '#fff' }}>
                     {a.name} ({a.agent_type === 'orchestrator' || a.agent_type === 'sub-orchestrator' ? 'Orchestrator' : 'Agent'})
@@ -240,6 +242,14 @@ export function ChatTab({
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span className="pulse-dot" style={{ width: 10, height: 10, background: 'var(--accent-violet)', boxShadow: '0 0 8px rgba(155, 136, 255, 0.65)' }} />
               <span style={{ fontSize: '0.75rem', color: 'var(--accent-violet)', fontFamily: 'var(--font-mono)' }}>STT</span>
+            </div>
+          )}
+          {micState === 'error' && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }} title={micErrorMessage}>
+              <span style={{ width: 10, height: 10, borderRadius: '50%', background: 'var(--danger, #ff5d8f)', boxShadow: '0 0 8px rgba(255, 93, 143, 0.55)' }} />
+              <span style={{ fontSize: '0.75rem', color: 'var(--danger, #ff5d8f)', fontFamily: 'var(--font-mono)', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {micErrorMessage || 'Не расслышала'}
+              </span>
             </div>
           )}
         </div>
@@ -512,7 +522,7 @@ export function ChatTab({
                             onClick={async (e) => {
                               e.stopPropagation();
                               setActiveMenu(null);
-                              if (window.confirm('Sir, are you sure you want to completely purge the history of the Main Terminal?')) {
+                              if (window.confirm('Albert, are you sure you want to completely purge the history of the Main Terminal?')) {
                                 try {
                                   const res = await fetch(`/api/history/dashboard`, { method: 'DELETE' });
                                   if (res.ok) {
@@ -822,7 +832,7 @@ export function ChatTab({
                   e.currentTarget.form?.requestSubmit();
                 }
               }}
-              placeholder={isUploading ? "Uploading file..." : "Enter command or request for Vexa, Sir..."}
+              placeholder={isUploading ? "Uploading file..." : "Enter command or request for Vexa, Albert..."}
               aria-label="Message input"
               style={styles.chatInput}
               className="form-input"

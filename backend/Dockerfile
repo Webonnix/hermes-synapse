@@ -16,6 +16,7 @@ RUN sed -Ei 's/Components: main$/Components: main non-free/' /etc/apt/sources.li
     npm \
     rhvoice \
     rhvoice-russian \
+    rhvoice-english \
     && rm -rf /var/lib/apt/lists/*
 
 # Install python dependencies directly
@@ -43,7 +44,9 @@ RUN pip install --no-cache-dir \
     "todoist-api-python>=2.1.3" \
     "pytest==8.3.5" \
     "pytest-asyncio==0.25.3" \
-    "faster-whisper>=1.1.0"
+    "faster-whisper>=1.1.0" \
+    "redis>=5.0.0" \
+    "matrix-nio>=0.24.0"
 
 # Git is a required read-only workspace capability for planning and verification.
 RUN apt-get update && apt-get install -y --no-install-recommends git \

@@ -57,7 +57,7 @@ export function ActivityTab({
           
           <div style={{ ...styles.logsList, maxHeight: 'calc(100vh - 290px)' }}>
             {activityLogs.length === 0 ? (
-              <div style={styles.emptyLogs}>Activity feed is empty. Core is idle or waiting for background scanning, Sir.</div>
+              <div style={styles.emptyLogs}>Activity feed is empty. Core is idle or waiting for background scanning, Albert.</div>
             ) : (
               activityLogs.map((log, index) => (
                 <div 

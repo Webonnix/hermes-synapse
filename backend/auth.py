@@ -1,7 +1,8 @@
 import time
 import secrets
+import hashlib
 import logging
-from typing import Dict, Set, Any
+from typing import Dict, Set, Any, Optional, Tuple
 
 logger = logging.getLogger("hermes.auth")
 
@@ -63,3 +64,21 @@ def destroy_session(token: str):
     if token in active_sessions:
         active_sessions.remove(token)
         logger.info(f"Session destroyed. Total active sessions: {len(active_sessions)}")
+
+# ─── USERNAME / PASSWORD LOGIN ─────────────────────────────────────────────
+# Single-admin credential, stored via database.get_setting/set_setting under
+# 'admin_username', 'admin_password_hash', 'admin_password_salt'. PBKDF2-HMAC
+# (stdlib only, no new dependency) with a per-install random salt.
+
+_PBKDF2_ITERATIONS = 260_000
+
+def hash_password(password: str, salt: Optional[str] = None) -> Tuple[str, str]:
+    """Returns (hash_hex, salt_hex) for a password, generating a salt if not given."""
+    salt_bytes = bytes.fromhex(salt) if salt else secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt_bytes, _PBKDF2_ITERATIONS)
+    return digest.hex(), salt_bytes.hex()
+
+def verify_password(password: str, password_hash: str, salt: str) -> bool:
+    """Constant-time comparison of a password against a stored PBKDF2 hash."""
+    candidate_hash, _ = hash_password(password, salt)
+    return secrets.compare_digest(candidate_hash, password_hash)

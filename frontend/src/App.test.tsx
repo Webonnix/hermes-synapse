@@ -89,6 +89,13 @@ describe('App Component', () => {
     render(<App />);
 
     await waitFor(() => {
+      expect(screen.getByText(/autonomous voice command center/i)).toBeInTheDocument();
+    });
+
+    const transcriptToggle = screen.getByRole('button', { name: /open a channel with an agent/i });
+    fireEvent.click(transcriptToggle);
+
+    await waitFor(() => {
       expect(screen.getByText(/communication link/i)).toBeInTheDocument();
     });
 
@@ -96,7 +103,7 @@ describe('App Component', () => {
     fireEvent.click(settingsBtn);
 
     await waitFor(() => {
-      expect(screen.getByText('Core Parameters')).toBeInTheDocument();
+      expect(screen.getByText('Model & Prompt')).toBeInTheDocument();
     });
   });
 });

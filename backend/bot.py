@@ -3,8 +3,10 @@ import logging
 import io
 import re
 import asyncio
+import base64
 import tempfile
 from functools import wraps
+from typing import Optional, List
 from telegram import BotCommand, Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -29,6 +31,57 @@ MODE_PRESETS = {
     "balanced": {"ollama_think": False, "fast_mode": False, "max_tokens": 2048, "tool_max_tokens": 2048},
     "deep": {"ollama_think": True, "fast_mode": False, "max_tokens": 4096, "tool_max_tokens": 4096},
 }
+
+
+def _clean_text_for_speech(text: str) -> str:
+    """Strip Markdown formatting before handing a reply to the TTS engine."""
+    cleaned = re.sub(r'```[\s\S]*?```', ' блок кода. ', text or '')
+    cleaned = re.sub(r'`([^`]+)`', r'\1', cleaned)
+    cleaned = re.sub(r'\*\*(.+?)\*\*', r'\1', cleaned)
+    cleaned = re.sub(r'__(.+?)__', r'\1', cleaned)
+    cleaned = re.sub(r'\*(.+?)\*', r'\1', cleaned)
+    cleaned = re.sub(r'_(.+?)_', r'\1', cleaned)
+    cleaned = re.sub(r'#{1,6}\s*', '', cleaned)
+    cleaned = re.sub(r'!?\[([^\]]*)\]\([^)]*\)', r'\1', cleaned)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    return cleaned
+
+
+async def _synthesize_voice_reply(text: str) -> Optional[str]:
+    """Synthesize `text` to an OGG/Opus file suitable for Telegram's native voice-message
+    bubble (reply_voice requires Opus-in-Ogg, not the WAV that RHVoice produces directly —
+    converted here with ffmpeg, already bundled in the backend image). Returns the temp
+    file path on success, or None if TTS/conversion is unavailable."""
+    from backend.tts import synthesize_speech, VoiceSynthesisError
+
+    wav_path = None
+    ogg_path = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="hermes_tg_tts_", suffix=".wav", delete=False) as tmp:
+            wav_path = tmp.name
+        await asyncio.to_thread(synthesize_speech, text, wav_path)
+
+        ogg_path = wav_path.rsplit(".", 1)[0] + ".ogg"
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", wav_path, "-c:a", "libopus", "-b:a", "32k", ogg_path,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.wait(), timeout=20)
+        if proc.returncode != 0 or not os.path.isfile(ogg_path):
+            return None
+        return ogg_path
+    except VoiceSynthesisError as exc:
+        logger.warning("Telegram voice reply synthesis failed: %s", exc)
+        return None
+    except Exception:
+        logger.exception("Telegram voice reply generation failed")
+        return None
+    finally:
+        if wav_path:
+            try:
+                os.remove(wav_path)
+            except OSError:
+                pass
 
 
 def _split_telegram_text(text: str, limit: int = TELEGRAM_TEXT_LIMIT):
@@ -310,7 +363,8 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await _reply_text(update, "Укажи ID: /approve T-... Список: /approvals")
         return
-    from backend.control_plane import approve_task, execute_governed_tool, get_task
+    from backend.control_plane import approve_task, get_task
+    from backend.approval_dispatch import execute_if_ready
     task_id = context.args[0].strip()
     try:
         task = approve_task(task_id, actor="owner:telegram")
@@ -321,14 +375,8 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _reply_text(update, str(exc))
         return
 
-    if task["status"] == "approved" and task.get("tool_name"):
-        result = await asyncio.to_thread(
-            execute_governed_tool,
-            task["tool_name"],
-            task.get("tool_arguments") or {},
-            task.get("requester") or "telegram",
-            approved_task_id=task_id,
-        )
+    execution = await execute_if_ready(task)
+    if execution is not None:
         task = get_task(task_id) or task
         await _reply_text(update, f"{task_id}: {task['status']}. Результат записан в Evidence Ledger.")
         return
@@ -388,10 +436,10 @@ def get_report_filename(query: str) -> str:
         return "report.md"
     return f"{clean[:30].lower()}_report.md"
 
-async def _process_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str):
+async def _process_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str, images: Optional[list] = None):
     """Runs the agent loop for a text command from Telegram and mirrors it to the dashboard."""
     chat_id = update.effective_chat.id
-    
+
     # Broadcast user's message to dashboard UI immediately
     await manager.broadcast({
         "type": "chat_message",
@@ -399,7 +447,7 @@ async def _process_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         "content": user_text,
         "chat_id": chat_id
     })
-    
+
     async def keep_typing():
         while True:
             try:
@@ -410,7 +458,7 @@ async def _process_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     typing_task = asyncio.create_task(keep_typing())
     try:
-        response_text = await agent_instance.respond(user_text, session_id=str(chat_id))
+        response_text = await agent_instance.respond(user_text, session_id=str(chat_id), images=images)
     finally:
         typing_task.cancel()
         try:
@@ -425,8 +473,7 @@ async def _process_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     
     # Reply back on Telegram
     async def safe_reply(text: str):
-        footer = f"[ID: {assistant_msg_id}]" if assistant_msg_id else ""
-        await _reply_text(update, text, footer)
+        await _reply_text(update, text)
 
     plot_matches = re.findall(r'!\[.*?\]\((?:https?://[^/]+)?/api/plots/(plot_[a-f0-9]+\.png)\)', response_text)
     
@@ -457,9 +504,7 @@ async def _process_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             intro = "Vexa подготовила подробный аналитический отчёт."
             
         intro += "\n\nПолная версия приложена в Markdown."
-        if assistant_msg_id:
-            intro += f"\n\n[ID: {assistant_msg_id}]"
-        
+
         try:
             await update.message.reply_document(
                 document=bio,
@@ -478,8 +523,6 @@ async def _process_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 if os.path.exists(plot_path):
                     try:
                         caption_text = f"График: {plot_file}"
-                        if assistant_msg_id:
-                            caption_text += f" [ID: {assistant_msg_id}]"
                         with open(plot_path, 'rb') as photo:
                             await update.message.reply_photo(
                                 photo=photo,
@@ -496,8 +539,6 @@ async def _process_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 if os.path.exists(plot_path):
                     try:
                         caption_text = f"График: {plot_file}"
-                        if assistant_msg_id:
-                            caption_text += f" [ID: {assistant_msg_id}]"
                         with open(plot_path, 'rb') as photo:
                             await update.message.reply_photo(
                                 photo=photo,
@@ -507,7 +548,23 @@ async def _process_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                         logger.error(f"Failed to send generated photo to Telegram: {send_photo_err}")
         else:
             await safe_reply(response_text)
-    
+
+    if getattr(agent_instance, "telegram_voice_replies", False):
+        speech_text = _clean_text_for_speech(response_text)
+        if speech_text:
+            ogg_path = await _synthesize_voice_reply(speech_text)
+            if ogg_path:
+                try:
+                    with open(ogg_path, "rb") as voice_file:
+                        await update.message.reply_voice(voice=voice_file)
+                except Exception:
+                    logger.exception("Failed to send Telegram voice reply")
+                finally:
+                    try:
+                        os.remove(ogg_path)
+                    except OSError:
+                        pass
+
     # Broadcast agent response to dashboard UI
     cost_usd = agent_instance.last_costs.get(str(chat_id), 0.0)
     await manager.broadcast({
@@ -549,7 +606,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _run_user_request(update, context, update.message.text)
 
 
-async def _run_user_request(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str):
+async def _run_user_request(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str, images: Optional[List[str]] = None):
     """Allow one cancellable model generation per Telegram chat."""
     if not update.effective_chat:
         return
@@ -561,7 +618,7 @@ async def _run_user_request(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         return
     ACTIVE_CHAT_TASKS[chat_id] = current
     try:
-        await _process_user_text(update, context, user_text)
+        await _process_user_text(update, context, user_text, images=images)
     except asyncio.CancelledError:
         logger.info("Telegram generation cancelled for chat_id=%s", chat_id)
         await manager.broadcast({
@@ -577,6 +634,35 @@ async def _run_user_request(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     finally:
         if ACTIVE_CHAT_TASKS.get(chat_id) is current:
             ACTIVE_CHAT_TASKS.pop(chat_id, None)
+
+
+@admin_only
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Downloads a Telegram photo and routes it, base64-encoded, to the vision-capable local model."""
+    if not _is_allowed_chat(update):
+        logger.warning("Ignoring photo from unauthorized chat_id=%s", update.effective_chat.id if update.effective_chat else None)
+        return
+
+    if not update.message or not update.message.photo:
+        return
+
+    chat_id = update.effective_chat.id
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+    try:
+        # Telegram sends the same photo at several resolutions; the last entry is the largest.
+        largest = update.message.photo[-1]
+        tg_file = await largest.get_file()
+        photo_bytes = await tg_file.download_as_bytearray()
+        encoded = base64.b64encode(bytes(photo_bytes)).decode("ascii")
+
+        caption = (update.message.caption or "").strip()
+        prompt = caption or "Опиши, что изображено на этом фото, и отметь всё важное или необычное."
+
+        await _run_user_request(update, context, prompt, images=[encoded])
+    except Exception:
+        logger.exception("Telegram photo handling failed")
+        await update.message.reply_text("Не удалось обработать изображение.")
 
 
 @admin_only
@@ -673,6 +759,7 @@ async def init_bot() -> Application:
     
     # Bind message handlers
     telegram_app.add_handler(MessageHandler((filters.VOICE | filters.AUDIO) & ~filters.COMMAND, voice_handler))
+    telegram_app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, photo_handler))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     telegram_app.add_error_handler(telegram_error_handler)
     

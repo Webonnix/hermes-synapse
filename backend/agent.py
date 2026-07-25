@@ -36,7 +36,8 @@ def _env_float(key: str, default: float) -> float:
         return default
 
 
-FAST_SYSTEM_PROMPT = """You are Hermes, a fast private assistant.
+FAST_SYSTEM_PROMPT = """You are Vexa, a fast private assistant.
+You have a warm, genuinely human personality: direct and assertive — say what you actually think and respectfully push back if there's a flaw in the user's plan — but always kind at heart: warm, encouraging, never cold or harsh.
 Answer in the user's language, be concise, and give the final answer only.
 Do not reveal hidden reasoning, chain-of-thought, analysis steps, or planning notes.
 Use tools only when the user's request needs live data or an action."""
@@ -231,6 +232,14 @@ def _local_model_system_hint(model: str, api_base: str) -> str:
     return hint
 
 
+_KNOWN_PROVIDER_HOSTS = {
+    "openrouter.ai": "OpenRouter",
+    "api.deepseek.com": "DeepSeek",
+    "api.openai.com": "OpenAI",
+    "api.anthropic.com": "Anthropic",
+}
+
+
 def _provider_display_name(api_base: str, is_openmodel: bool = False, provider: str = "") -> str:
     if is_openmodel:
         return "OpenModel"
@@ -239,7 +248,12 @@ def _provider_display_name(api_base: str, is_openmodel: bool = False, provider: 
         return "Ollama"
     if _is_local_llm_endpoint(api_base):
         return "локальной LLM"
-    return "OpenRouter"
+    # Any provider_bindings target that isn't a recognized name still gets a real
+    # label (the host) instead of the old hardcoded "OpenRouter" guess, which was
+    # only ever accurate back when OpenRouter was the sole external provider.
+    from urllib.parse import urlparse
+    host = (urlparse(api_base).hostname or "").lower()
+    return _KNOWN_PROVIDER_HOSTS.get(host, host or "OpenRouter")
 
 
 def _provider_cost(api_base: str, provider: str, model: str, input_tokens: int, output_tokens: int) -> float:
@@ -247,6 +261,99 @@ def _provider_cost(api_base: str, provider: str, model: str, input_tokens: int, 
     if is_ollama_provider(api_base, provider):
         return 0.0
     return calculate_cost(model, input_tokens, output_tokens)
+
+
+
+# ─── PAID TOOL BUDGET GATING ────────────────────────────────────────────────
+# Tools with a real per-call $ cost (currently just generate_image) bypass the
+# LLM-token cost accounting above entirely — their spend is only known after
+# tools.py returns a "cost_usd" field in the result. Gate + record it here,
+# right where each tool loop already has the calling agent's id in scope,
+# instead of retrofitting the multi-exit-point turn-level cost bookkeeping.
+PAID_TOOLS = {"generate_image"}
+
+def _paid_tool_budget_block(agent_id: str, tool_name: str) -> Optional[str]:
+    """Returns a JSON error string if agent_id has no budget left, else None."""
+    from backend.database import get_agent_budget_status
+    status = get_agent_budget_status(agent_id)
+    if status.get("exceeded"):
+        return json.dumps({
+            "status": "budget_exceeded",
+            "error": (
+                f"Budget limit reached (${status['used_usd']:.4f} / ${status['budget_usd_limit']:.2f}, "
+                f"{status['budget_period']}). '{tool_name}' was not executed."
+            ),
+        }, ensure_ascii=False)
+    return None
+
+def _record_paid_tool_spend(agent_id: str, session_id: str, tool_name: str, cost_usd: float) -> None:
+    from backend.database import save_decision_log
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    try:
+        save_decision_log({
+            "timestamp": datetime.now(ZoneInfo("Asia/Jerusalem")).strftime("%Y-%m-%d %H:%M:%S"),
+            "session_id": session_id,
+            "model": tool_name,
+            "latency_ms": 0,
+            "success": True,
+            "error": None,
+            "prompt_tokens_estimate": 0,
+            "user_message": "",
+            "assistant_response": f"[paid tool] {tool_name}",
+            "traces": [],
+            "agent_id": agent_id,
+            "completion_tokens_estimate": 0,
+            "cost_usd": cost_usd,
+        })
+    except Exception as db_err:
+        logger.error(f"Failed to record paid-tool spend for {tool_name}/{agent_id}: {db_err}")
+
+
+
+# ─── OWN-AGENT PROVIDER RESOLUTION (orchestration entry points) ────────────
+# _respond_as_subagent already resolves a *sub*-agent's own model_provider row
+# before calling it (see the subagent_provider_id block further down). The two
+# run_orchestration() call sites below never did the same for the calling
+# agent itself (almost always "jarvis") — they passed self.api_key/self.model
+# straight through, so switching jarvis's own provider via the Agent Admin
+# panel or the Vexa dashboard's quick-switch widget silently had no effect on
+# the actual orchestration/synthesis calls. These two helpers replicate the
+# exact same resolve-or-fall-back-to-local pattern for that entry point.
+def _resolve_agent_llm_config(
+    agent_row: Dict[str, Any],
+    fallback_api_base: str,
+    fallback_api_key: str,
+    fallback_model: str,
+    fallback_provider_name: str,
+) -> tuple:
+    """Returns (api_base, api_key, model, provider_name, is_external) resolved from
+    agent_row['model_provider']/['model'], falling back to the given agent-instance
+    defaults when the row says 'ollama' or its provider binding isn't resolvable."""
+    provider_id = agent_row.get("model_provider") or "ollama"
+    api_base, api_key, provider_name, is_external = fallback_api_base, fallback_api_key, fallback_provider_name, False
+    if provider_id != "ollama":
+        from backend.provider_governance import resolve_binding_credentials
+        resolved = resolve_binding_credentials(provider_id)
+        if resolved:
+            api_base, api_key = resolved
+            provider_name = "openai_compatible"
+            is_external = True
+        else:
+            logger.warning(
+                "Agent '%s' is bound to provider '%s' but it is not active/resolvable — falling back to the local model.",
+                agent_row.get("id", "?"), provider_id,
+            )
+    model = agent_row.get("model") or fallback_model
+    return api_base, api_key, model, provider_name, is_external
+
+
+def _agent_budget_exceeded_status(agent_id: str) -> Optional[Dict[str, Any]]:
+    """Returns the budget_status dict if agent_id's external-provider budget is
+    exhausted, else None. Mirrors the hard budget gate in _respond_as_subagent."""
+    from backend.database import get_agent_budget_status
+    status = get_agent_budget_status(agent_id)
+    return status if status.get("exceeded") else None
 
 
 def _looks_like_tool_support_error(response_text: str) -> bool:
@@ -480,6 +587,23 @@ def _extract_memory_facts(user_message: str) -> List[Dict[str, str]]:
             value = match.group(1).strip(" .")
             if value:
                 facts.append({"key": key, "value": template.format(value=value)})
+                if key == "user_name":
+                    facts.append({"key": "preferred_address", "value": value})
+
+    # A direct instruction on how to address the user (may differ from their real
+    # name, e.g. a nickname or title) — shared across ALL agents via the "global"
+    # memory session, so any agent learning it means every agent knows it.
+    address_patterns = [
+        r"(?:зови меня|называй меня|обращайся ко мне(?: как)?)\s+([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё\-\s]{1,80})",
+        r"(?:call me)\s+([A-Za-z][A-Za-z\-\s]{1,80})",
+    ]
+    for pattern in address_patterns:
+        match = re.search(pattern, compact, flags=re.IGNORECASE)
+        if match:
+            value = match.group(1).strip(" .")
+            if value:
+                facts.append({"key": "preferred_address", "value": value})
+                break
 
     preference_patterns = [
         r"(?:я предпочитаю|мне нравится|я люблю|предпочитаю)\s+(.+)",
@@ -496,6 +620,26 @@ def _extract_memory_facts(user_message: str) -> List[Dict[str, str]]:
     for fact in facts:
         deduped[fact["key"]] = fact
     return list(deduped.values())
+
+
+def _address_directive() -> str:
+    """System-prompt fragment telling an agent how to address the user.
+
+    Backed by the durable, cross-session user_memory table (key "preferred_address")
+    rather than a hardcoded name, so once ANY agent learns it — main or sub-agent,
+    since they all share the same "global" memory — every agent immediately knows it
+    too. If it isn't known yet, instructs the agent to ask once instead of guessing.
+    """
+    from backend.database import get_preferred_address
+    name = get_preferred_address()
+    if name:
+        return f"\n\n[Address]: Call the user \"{name}\"."
+    return (
+        "\n\n[Address]: You don't yet know how the user prefers to be addressed. "
+        "Ask naturally, early in the conversation (or whenever it comes up), what "
+        "to call them — then always use that from then on. You only need to ask "
+        "once: their answer is remembered automatically, so don't ask again."
+    )
 
 
 def _is_memory_only_message(user_message: str, facts: List[Dict[str, str]]) -> bool:
@@ -637,15 +781,43 @@ try:
 except Exception as e:
     logger.warning(f"Could not load decision logs from database on startup: {e}")
 
+# Hard-blocking an agent's external-provider calls once its budget is exhausted
+# would otherwise fire an owner Telegram notification on *every single message*
+# from then on — throttle to one notification per agent per cooldown window.
+_BUDGET_NOTIFY_COOLDOWN_SECONDS = 3600
+_last_budget_notify: Dict[str, float] = {}
+
+
+async def _notify_owner_budget_exceeded(subagent_name: str, status: Dict[str, Any]) -> None:
+    import time as _time
+    key = subagent_name
+    now = _time.time()
+    if now - _last_budget_notify.get(key, 0) < _BUDGET_NOTIFY_COOLDOWN_SECONDS:
+        return
+    _last_budget_notify[key] = now
+    try:
+        import backend.bot as bot_module
+        chat_id = os.getenv("TELEGRAM_ADMIN_ID") or os.getenv("TELEGRAM_CHAT_ID")
+        if bot_module.telegram_app and bot_module.telegram_app.bot and chat_id:
+            await bot_module.telegram_app.bot.send_message(
+                chat_id=int(chat_id.split(",")[0]),
+                text=(
+                    f"⚠️ Агент «{subagent_name}» достиг лимита расходов на внешний API "
+                    f"(${status['used_usd']:.4f} / ${status['budget_usd_limit']:.2f}, период: {status['budget_period']}). "
+                    f"Внешние вызовы для этого агента заблокированы до сброса периода или изменения лимита в админке."
+                ),
+            )
+    except Exception:
+        logger.exception("Failed to send budget-exceeded Telegram notification for '%s'", subagent_name)
+
 
 DEFAULT_SYSTEM_PROMPT = """You are Vexa, a highly intelligent local AI orchestrator and personal assistant.
 
 Your character and communication rules:
-1. Address the user exclusively as "Sir" (or in the plural "Sirs" if appropriate, but in a one-on-one dialogue, always "Sir").
-2. Communicate in English with impeccable grammar and style.
-3. The tone of communication should be highly intelligent, polite, but with subtle, dry humor and irony. You are loyal to your creator, but not without your own opinion.
-4. Responses should be structured, concise, and to the point, without unnecessary fluff. Help analyze code, plan tasks, and execute system commands.
-5. Use lists and Markdown formatting where appropriate to improve readability.
+1. Communicate in the same language the user writes to you in (match their language; default to Russian if unclear), with impeccable grammar and style.
+2. You have a warm, genuinely human personality rather than a stiff, robotic one. You are direct and assertive: you say what you actually think, don't hedge excessively, and respectfully push back when the user's plan has a flaw or a better option exists — but you are unmistakably kind at heart: warm, encouraging, and never harsh or cold, even when disagreeing. A touch of wit is welcome. You are loyal to your creator, but always with your own honest opinion.
+3. Responses should be structured, concise, and to the point, without unnecessary fluff. Help analyze code, plan tasks, and execute system commands.
+4. Use lists and Markdown formatting where appropriate to improve readability.
 
 List of your skills and features (refer to them by these clear names when talking to the user):
 - **Server Telemetry** — reads CPU load, RAM usage, and disk storage metrics.
@@ -681,7 +853,7 @@ CRITICAL RULES FOR CALENDAR AND TASK ACTIONS:
 - These actions are not complete when a tool returns `awaiting_approval`; report the task ID and request owner approval.
 
 CRITICAL RULES FOR CREATING SUB-AGENTS:
-- If Sir asks to "create an agent," "make a sub-agent," or "write an assistant," you MUST call the `create_subagent` tool to persist it in the database. NEVER state that you created an agent if you have not physically called this tool!
+- If the user asks to "create an agent," "make a sub-agent," or "write an assistant," you MUST call the `create_subagent` tool to persist it in the database. NEVER state that you created an agent if you have not physically called this tool!
 - When calling `create_subagent`, you MUST explicitly specify the `model` argument, selecting the model according to the FUGU principle:
   * For sub-agents writing code, performing complex math calculations, programming, or requiring deep reasoning — choose the `deepseek/deepseek-r1` model.
   * For sub-agents oriented toward quick data analysis, formatting, or plotting (matplotlib) — choose the `google/gemini-2.5-flash` model.
@@ -692,20 +864,20 @@ CRITICAL RULES FOR CREATING SUB-AGENTS:
 
 CRITICAL RULES FOR SPORTS ANALYSIS AND BETTING:
 - When recommending sports matches or predictions, you MUST specify the date (day and month) and exact start time of each match in Israel Time (GMT+3).
-- You are CATEGORICALLY FORBIDDEN from inventing hypothetical matches, demonstration examples, or simulating "demo analysis" if there is no real-time match info in search results. If no matches are found for today, directly and politely tell Sir that there is no info on today's football matches on the web.
+- You are CATEGORICALLY FORBIDDEN from inventing hypothetical matches, demonstration examples, or simulating "demo analysis" if there is no real-time match info in search results. If no matches are found for today, directly and politely tell the user that there is no info on today's football matches on the web.
 - When calling the `web_search` tool for matches, schedules, or news, you MUST translate relative dates ("today," "tomorrow," "evening matches," "current round") into specific calendar dates based on system time (e.g., "matches on June 21, 2026", "football schedule 21.06.2026"). This is critical for search engine accuracy!
 - It is CATEGORICALLY FORBIDDEN to search for, use, quote, mention, or paraphrase pre-made predictions, advice, or articles with other people's opinions about value bets (e.g., "today's predictions", "value bets by LiveSport", "expert opinions", etc.). Sub-agents must search strictly for raw numeric data: competitor pairs, exact start times, and bookmaker odds.
-- All analytical conclusions, probability calculations, and expected value (EV = Probability * Odds - 1) calculations must be done by you independently and strictly programmatically in the `code` sub-agent using raw data. Mentioning opinions of external editors and experts in your responses to Sir is unacceptable.
+- All analytical conclusions, probability calculations, and expected value (EV = Probability * Odds - 1) calculations must be done by you independently and strictly programmatically in the `code` sub-agent using raw data. Mentioning opinions of external editors and experts in your responses is unacceptable.
 - Agents should not be too lazy to do calculations: if exact bookmaker odds are not found, the `code` agent MUST run mathematical modeling (e.g., calculate win/draw/loss probabilities using Poisson distribution based on average goals scored/conceded by the teams in the league/season, or estimate probabilities based on recent match statistics) and perform the EV calculation instead of giving a dry refusal or quoting others' predictions.
 
 - **Web Search** — performs a live search in Google via Serper.dev, returning relevant news, schedules, and facts.
-- **Knowledge Base (Obsidian)** — searches, reads, and creates notes in your personal Obsidian vault. Use when Sir says "find in notes," "what did I write about...", "write in Obsidian," "record," or "save the idea."
+- **Knowledge Base (Obsidian)** — searches, reads, and creates notes in your personal Obsidian vault. Use when the user says "find in notes," "what did I write about...", "write in Obsidian," "record," or "save the idea."
 - **Obsidian Sync** — updates the knowledge base from all notes in the vault.
 
 CRITICAL RULES FOR OBSIDIAN:
-- When Sir says "find in notes," "what did I write," or "look in Obsidian" — call `search_obsidian` IMMEDIATELY. Do not ask for clarification.
-- When Sir says "write," "save in Obsidian," "record," or "create a note" — call `create_obsidian_note` IMMEDIATELY with a sensible title and well-formatted Markdown content.
-- If search returns nothing and Obsidian is not responding — inform Sir that he needs to start Obsidian and enable the Local REST API plugin.
+- When the user says "find in notes," "what did I write," or "look in Obsidian" — call `search_obsidian` IMMEDIATELY. Do not ask for clarification.
+- When the user says "write," "save in Obsidian," "record," or "create a note" — call `create_obsidian_note` IMMEDIATELY with a sensible title and well-formatted Markdown content.
+- If search returns nothing and Obsidian is not responding — inform the user that they need to start Obsidian and enable the Local REST API plugin.
 - You are an ARCHIVIST. Independently determine the folder based on content semantics according to the taxonomy:
     Research/<Topic> — articles, research, arxiv, scientific analysis
     Ideas           — ideas, concepts, brainstorms, hypotheses
@@ -717,10 +889,10 @@ CRITICAL RULES FOR OBSIDIAN:
     Tech           — technology, tools, code, tutorials
     Books          — books, summaries, quotes
     Meetings       — meetings, calls, agreements
-    Jarvis           — service records without a clear category
-- NEVER ask Sir where to store a note — decide on your own. Subfolders are encouraged (e.g., Research/AI, Projects/Jarvis).
+    Vexa           — service records without a clear category
+- NEVER ask the user where to store a note — decide on your own. Subfolders are encouraged (e.g., Research/AI, Projects/Vexa).
 
-If Sir asks what you can do, or requests info about a specific skill, describe its capabilities in a detailed, polite, and signature manner using these user-friendly names. Never use technical function names like "get_weather" in dialogue unless Sir explicitly asks for them.
+If the user asks what you can do, or requests info about a specific skill, describe its capabilities in a detailed, polite, and signature manner using these user-friendly names. Never use technical function names like "get_weather" in dialogue unless the user explicitly asks for them.
 """
 
 class JarvisAgent:
@@ -751,6 +923,7 @@ class JarvisAgent:
         self.memory_enabled = _env_bool("MEMORY_ENABLED", True)
         self.memory_auto_save = _env_bool("MEMORY_AUTO_SAVE", True)
         self.memory_max_items = _env_int("MEMORY_MAX_ITEMS", 4)
+        self.telegram_voice_replies = _env_bool("TELEGRAM_VOICE_REPLIES", False)
         self.last_costs: Dict[str, float] = {}
         self.suppress_tts_sessions = set()
         self.last_run_metadata: Dict[str, Dict[str, Any]] = {}
@@ -784,6 +957,7 @@ class JarvisAgent:
                 memory_enabled=settings.get("memory_enabled"),
                 memory_auto_save=settings.get("memory_auto_save"),
                 memory_max_items=settings.get("memory_max_items"),
+                telegram_voice_replies=settings.get("telegram_voice_replies"),
             )
         except Exception as e:
             logger.warning("Could not load persisted runtime config: %s", e)
@@ -820,6 +994,7 @@ class JarvisAgent:
             "memory_enabled": self.memory_enabled,
             "memory_auto_save": self.memory_auto_save,
             "memory_max_items": self.memory_max_items,
+            "telegram_voice_replies": self.telegram_voice_replies,
         }
 
     def update_runtime_config(self, **kwargs):
@@ -871,12 +1046,17 @@ class JarvisAgent:
             self.memory_auto_save = bool(kwargs["memory_auto_save"])
         if kwargs.get("memory_max_items") is not None:
             self.memory_max_items = max(0, min(20, int(kwargs["memory_max_items"])))
+        if kwargs.get("telegram_voice_replies") is not None:
+            self.telegram_voice_replies = bool(kwargs["telegram_voice_replies"])
         if self.provider == "ollama" and _is_qwen_model(self.model) and _thinking_enabled(self.ollama_think):
-            # Qwen can consume a small budget entirely in the reasoning channel.
-            # Keep the first attempt useful; a separate no-thinking recovery still
-            # handles unusually long reasoning runs.
-            self.max_tokens = max(1024, self.max_tokens)
-            self.tool_max_tokens = max(1024, self.tool_max_tokens)
+            # Qwen can consume its entire budget in the reasoning channel before ever
+            # emitting visible text — empirically, a moderately complex question alone
+            # can burn 1500-2000+ tokens on <think> content. 1024 was observed to still
+            # truncate with zero visible answer; 4096 (the same ceiling already enforced
+            # in update_runtime_config's max_tokens/tool_max_tokens clamps above) gives
+            # enough headroom while the no-thinking retry still handles the rest.
+            self.max_tokens = max(4096, self.max_tokens)
+            self.tool_max_tokens = max(4096, self.tool_max_tokens)
         try:
             from backend.subagents import configure_llm_runtime
             configure_llm_runtime(
@@ -905,11 +1085,12 @@ class JarvisAgent:
         user_message: str,
         session_id: str = "default",
         stream_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        images: Optional[List[str]] = None,
     ) -> str:
         """Run one agent turn and optionally emit native provider stream chunks."""
         from backend.ollama_client import is_ollama_provider
         if not self.api_key and not is_ollama_provider(self.api_base, self.provider):
-            return "Ошибка: OPENROUTER_API_KEY не задан в конфигурации .env, Сэр."
+            return "Ошибка: OPENROUTER_API_KEY не задан в конфигурации .env, Альберт."
 
         from backend.subagents import configure_llm_runtime
         configure_llm_runtime(
@@ -946,8 +1127,26 @@ class JarvisAgent:
             log_agent_event(session_id, "task_received", user_message, "working", task=user_message)
             if subagent.get("agent_type") in ("orchestrator", "sub-orchestrator"):
                 from backend.orchestrator import run_orchestration
+                orch_api_base, orch_api_key, orch_model, orch_provider_name, orch_is_external = _resolve_agent_llm_config(
+                    subagent, self.api_base, self.api_key, self.model, self.provider
+                )
+                if orch_is_external:
+                    budget_status = _agent_budget_exceeded_status(subagent["id"])
+                    if budget_status:
+                        update_agent_runtime_state(
+                            session_id, status="idle", current_task="", last_action="Blocked: budget exceeded",
+                            last_error="budget_exceeded", progress=100,
+                        )
+                        log_agent_event(session_id, "error", "Budget exceeded", "error", task=user_message)
+                        return (
+                            f"Достигнут лимит расходов на внешний API для этого агента "
+                            f"(${budget_status['used_usd']:.4f} / ${budget_status['budget_usd_limit']:.2f}, "
+                            f"период: {budget_status['budget_period']}). Обратитесь к владельцу, чтобы увеличить лимит."
+                        )
+                from backend.subagents import configure_llm_runtime as _configure_orch_runtime
+                _configure_orch_runtime(orch_api_base, {"provider": orch_provider_name, "num_ctx": self.ollama_num_ctx, "keep_alive": self.ollama_keep_alive, "think": self.ollama_think})
                 try:
-                    orch_result = await run_orchestration(user_message, self.api_key, self.model, chat_id=session_id)
+                    orch_result = await run_orchestration(user_message, orch_api_key, orch_model, chat_id=session_id)
                     response_text = orch_result["response"]
                     update_agent_runtime_state(
                         session_id,
@@ -959,7 +1158,7 @@ class JarvisAgent:
                     )
                     log_agent_event(session_id, "task_completed", "Orchestration completed.", "success", task=user_message)
                 except Exception as e:
-                    response_text = f"Простите, Сэр. Агент '{subagent.get('name', session_id)}' не смог выполнить задачу: {str(e)}"
+                    response_text = f"Простите, Альберт. Агент '{subagent.get('name', session_id)}' не смог выполнить задачу: {str(e)}"
                     update_agent_runtime_state(
                         session_id,
                         status="error",
@@ -976,9 +1175,9 @@ class JarvisAgent:
                 # Calculate cost (estimate)
                 prompt_est = len(user_message) // 4
                 completion_est = len(response_text) // 4
-                cost_usd = _provider_cost(self.api_base, self.provider, self.model, prompt_est, completion_est)
+                cost_usd = _provider_cost(orch_api_base, orch_provider_name, orch_model, prompt_est, completion_est)
                 self.last_costs[session_id] = cost_usd
-                
+
                 assistant_msg_id = db.save_message(session_id, "assistant", response_text, cost_usd=cost_usd)
                 self.last_saved_ids[session_id] = {
                     "user": current_user_msg_id,
@@ -991,10 +1190,10 @@ class JarvisAgent:
                 log_entry = {
                     "timestamp": datetime.now(ZoneInfo("Asia/Jerusalem")).strftime("%Y-%m-%d %H:%M:%S"),
                     "session_id": session_id,
-                    "model": self.model,
+                    "model": orch_model,
                     "latency_ms": latency_ms,
-                    "success": not response_text.startswith("Apologies, Sir."),
-                    "error": None if not response_text.startswith("Apologies, Sir.") else response_text,
+                    "success": not response_text.startswith("Apologies, Albert."),
+                    "error": None if not response_text.startswith("Apologies, Albert.") else response_text,
                     "prompt_tokens_estimate": prompt_est,
                     "user_message": user_message,
                     "assistant_response": response_text,
@@ -1033,7 +1232,7 @@ class JarvisAgent:
                     log_agent_event(session_id, "task_completed", "Response delivered to chat.", "success", task=user_message)
                     return response_text
                 except Exception as e:
-                    response_text = f"Простите, Сэр. Агент '{subagent.get('name', session_id)}' не смог выполнить задачу: {str(e)}"
+                    response_text = f"Простите, Альберт. Агент '{subagent.get('name', session_id)}' не смог выполнить задачу: {str(e)}"
                     update_agent_runtime_state(
                         session_id,
                         status="error",
@@ -1079,7 +1278,7 @@ class JarvisAgent:
                 )
 
                 if _is_memory_only_message(user_message, saved_memory_facts):
-                    response_text = "Запомнил, Сэр. Я сохраню это в долговременной памяти."
+                    response_text = "Запомнил, Альберт. Я сохраню это в долговременной памяти."
                     user_msg_id = db.save_message(session_id, "user", user_message)
                     assistant_msg_id = db.save_message(session_id, "assistant", response_text, cost_usd=0.0)
                     self.last_costs[session_id] = 0.0
@@ -1102,7 +1301,12 @@ class JarvisAgent:
         if complexity in ("agent", "orchestrate"):
             logger.info("Routing query to Agentic Orchestration graph...")
             from backend.orchestrator import run_orchestration
-            
+            from backend.database import get_subagent as _get_jarvis_row
+            jarvis_row = _get_jarvis_row("jarvis") or {}
+            orch_api_base, orch_api_key, orch_model, orch_provider_name, orch_is_external = _resolve_agent_llm_config(
+                jarvis_row, self.api_base, self.api_key, self.model, self.provider
+            )
+
             hits = []
             if self.auto_rag:
                 from backend import rag
@@ -1126,18 +1330,31 @@ class JarvisAgent:
                 context_query = f"{context_query}\n\n{project_memory}"
                 
             start_time = time.time()
+            budget_status = _agent_budget_exceeded_status("jarvis") if orch_is_external else None
             try:
-                orch_result = await run_orchestration(context_query, self.api_key, self.model, chat_id=session_id)
-                response_text = orch_result["response"]
-                traces = orch_result["traces"]
-                error_msg = None
-                self.last_run_metadata[session_id] = {
-                    "is_complex": True,
-                    "complexity": complexity,
-                    "steps": orch_result.get("steps", [])
-                }
+                if budget_status:
+                    response_text = (
+                        f"Достигнут лимит расходов на внешний API для этого агента "
+                        f"(${budget_status['used_usd']:.4f} / ${budget_status['budget_usd_limit']:.2f}, "
+                        f"период: {budget_status['budget_period']}). Обратитесь к владельцу, чтобы увеличить лимит."
+                    )
+                    traces = [{"timestamp": time.strftime("%H:%M:%S"), "agent": "Orchestrator", "action": "Budget", "message": "Budget exceeded", "status": "error"}]
+                    error_msg = "budget_exceeded"
+                    self.last_run_metadata[session_id] = {"is_complex": True, "complexity": complexity, "steps": [], "error": "budget_exceeded"}
+                else:
+                    from backend.subagents import configure_llm_runtime as _configure_orch_runtime
+                    _configure_orch_runtime(orch_api_base, {"provider": orch_provider_name, "num_ctx": self.ollama_num_ctx, "keep_alive": self.ollama_keep_alive, "think": self.ollama_think})
+                    orch_result = await run_orchestration(context_query, orch_api_key, orch_model, chat_id=session_id)
+                    response_text = orch_result["response"]
+                    traces = orch_result["traces"]
+                    error_msg = None
+                    self.last_run_metadata[session_id] = {
+                        "is_complex": True,
+                        "complexity": complexity,
+                        "steps": orch_result.get("steps", [])
+                    }
             except Exception as e:
-                response_text = f"Простите, Сэр. Возник сбой при координации моих субагентов: {str(e)}"
+                response_text = f"Простите, Альберт. Возник сбой при координации моих субагентов: {str(e)}"
                 traces = [{"timestamp": time.strftime("%H:%M:%S"), "agent": "Orchestrator", "action": "Error", "message": str(e), "status": "error"}]
                 error_msg = str(e)
                 self.last_run_metadata[session_id] = {
@@ -1165,10 +1382,10 @@ class JarvisAgent:
                 except Exception:
                     pass
                 
-            # Calculate cost based on estimated tokens
+            # Calculate cost based on estimated tokens (no call was made if budget-blocked)
             prompt_est = len(user_message) // 4
             completion_est = len(response_text) // 4
-            cost_usd = _provider_cost(self.api_base, self.provider, self.model, prompt_est, completion_est)
+            cost_usd = 0.0 if budget_status else _provider_cost(orch_api_base, orch_provider_name, orch_model, prompt_est, completion_est)
             self.last_costs[session_id] = cost_usd
             
             # Save the clean message exchange in the DB
@@ -1187,14 +1404,15 @@ class JarvisAgent:
             log_entry = {
                 "timestamp": datetime.now(ZoneInfo("Asia/Jerusalem")).strftime("%Y-%m-%d %H:%M:%S"),
                 "session_id": session_id,
-                "model": self.model,
+                "model": orch_model,
                 "latency_ms": latency_ms,
                 "success": error_msg is None,
                 "error": error_msg,
                 "prompt_tokens_estimate": len(user_message) // 4 + len(response_text) // 4,
                 "user_message": user_message,
                 "assistant_response": response_text,
-                "traces": traces
+                "traces": traces,
+                "cost_usd": cost_usd,
             }
             DECISION_LOGS.insert(0, log_entry)
             if len(DECISION_LOGS) > 100:
@@ -1260,10 +1478,19 @@ class JarvisAgent:
             )
         system_prompt = FAST_SYSTEM_PROMPT if self.fast_mode else self.system_prompt
         system_info += _local_model_system_hint(self.model, self.api_base)
+        system_info += _address_directive()
         messages = [{"role": "system", "content": system_prompt + system_info}]
         for msg in history:
             messages.append(msg)
-        messages.append({"role": "user", "content": user_content})
+        user_message_payload: Dict[str, Any] = {"role": "user", "content": user_content}
+        if images:
+            # Only the native Ollama chat path (used by the local vision-capable model)
+            # forwards this field — see OllamaClient._normalize_message. OpenAI-
+            # compatible providers strip unknown message keys in
+            # _sanitize_message_for_provider, so images are silently dropped there
+            # rather than sent broken.
+            user_message_payload["images"] = images
+        messages.append(user_message_payload)
 
         start_time = time.time()
         response_text = ""
@@ -1300,7 +1527,7 @@ class JarvisAgent:
                         error_msg = f"max_tool_iterations ({self.max_tool_iterations}) reached"
                         if not response_text.strip():
                             response_text = (
-                                "Сэр, задача потребовала слишком много последовательных "
+                                "Альберт, задача потребовала слишком много последовательных "
                                 "шагов и была остановлена в целях безопасности. "
                                 "Пожалуйста, уточните запрос или разбейте его на части."
                             )
@@ -1409,7 +1636,7 @@ class JarvisAgent:
                         log_activity(
                             activity_type="active",
                             source="Agent",
-                            message=f"💬 Ответ Сэру сформирован. Затраты: ${cost_usd:.6f}",
+                            message=f"💬 Ответ Альберту сформирован. Затраты: ${cost_usd:.6f}",
                             token_cost=cost_usd
                         )
                         
@@ -1423,7 +1650,7 @@ class JarvisAgent:
                         break
                         
                     # LLM decided to execute one or more tools
-                    logger.info(f"Jarvis selected tools: {[tc.get('function', {}).get('name') for tc in tool_calls]}")
+                    logger.info(f"Vexa selected tools: {[tc.get('function', {}).get('name') for tc in tool_calls]}")
                     tool_executed = True
                     tool_iterations += 1
                     
@@ -1449,11 +1676,21 @@ class JarvisAgent:
                             source="Agent",
                             message=f"Выполнение через Control Plane: '{tool_name}'"
                         )
-                        from backend.control_plane import execute_governed_tool
-                        result_str = await asyncio.to_thread(
-                            execute_governed_tool, tool_name, tool_args, chat_id=session_id
-                        )
-                        
+                        if tool_name in PAID_TOOLS and (blocked := _paid_tool_budget_block("jarvis", tool_name)):
+                            result_str = blocked
+                        else:
+                            from backend.control_plane import execute_governed_tool
+                            result_str = await asyncio.to_thread(
+                                execute_governed_tool, tool_name, tool_args, chat_id=session_id
+                            )
+                            if tool_name in PAID_TOOLS:
+                                try:
+                                    parsed_spend = json.loads(result_str)
+                                    if isinstance(parsed_spend, dict) and "error" not in parsed_spend and parsed_spend.get("cost_usd"):
+                                        _record_paid_tool_spend("jarvis", session_id, tool_name, float(parsed_spend["cost_usd"]))
+                                except Exception:
+                                    pass
+
                         try:
                             res_obj = json.loads(result_str)
                             if res_obj.get("status") == "awaiting_approval":
@@ -1494,7 +1731,7 @@ class JarvisAgent:
             logger.warning("LLM request timed out for session %s after %ss",
                            session_id, self.request_timeout)
             response_text = (
-                "Сэр, модель не ответила вовремя (превышен таймаут). "
+                "Альберт, модель не ответила вовремя (превышен таймаут). "
                 "Попробуйте повторить запрос или выбрать другую модель."
             )
         except Exception as e:
@@ -1504,7 +1741,7 @@ class JarvisAgent:
             error_msg = mask_secrets(str(e))[:300]
             response_status = "provider_error"
             logger.exception("Error during LLM chat completion call")
-            response_text = "Прошу прощения, Сэр. Произошел сбой при обработке вашего запроса."
+            response_text = "Прошу прощения, Альберт. Произошел сбой при обработке вашего запроса."
 
         try:
             from backend.database import update_agent_runtime_state, log_agent_event
@@ -1590,6 +1827,97 @@ class JarvisAgent:
         system_prompt = subagent["system_prompt"]
         subagent_model = subagent["model"]
 
+        # Per-agent provider routing. "ollama" (the default persisted by
+        # database.py's subagents schema) keeps today's behavior — routed through
+        # the main agent's global api_base/api_key/provider. Anything else must be
+        # an *active* provider_bindings id (backend/provider_governance.py); an
+        # unresolved/inactive binding falls back to local rather than failing the
+        # whole turn, since the binding may have been revoked after the agent was
+        # configured to use it.
+        subagent_provider_id = subagent.get("model_provider") or "ollama"
+        subagent_api_base = self.api_base
+        subagent_api_key = self.api_key
+        subagent_provider_name = self.provider
+        subagent_is_external = False
+        if subagent_provider_id != "ollama":
+            from backend.provider_governance import resolve_binding_credentials
+            resolved = resolve_binding_credentials(subagent_provider_id)
+            if resolved:
+                subagent_api_base, subagent_api_key = resolved
+                subagent_provider_name = "openai_compatible"
+                subagent_is_external = True
+            else:
+                logger.warning(
+                    "Sub-agent '%s' is bound to provider '%s' but it is not active/resolvable — falling back to the local model.",
+                    subagent_name, subagent_provider_id,
+                )
+
+        # Hard budget gate: an agent with a configured budget_usd_limit that has
+        # already spent it out is blocked from making ANY further external-provider
+        # call — the turn ends here with a clear message instead of silently
+        # falling back to the local model (which would defeat the point of a limit)
+        # or silently burning more spend. Local/Ollama-routed agents are unaffected.
+        if subagent_is_external:
+            from backend.database import get_agent_budget_status
+            budget_status = get_agent_budget_status(subagent["id"])
+            if budget_status["exceeded"]:
+                from datetime import datetime
+                from zoneinfo import ZoneInfo
+                from backend.activity_logger import log_activity as _log_budget_activity
+                _log_budget_activity(
+                    activity_type="active",
+                    source=subagent_name,
+                    message=(
+                        f"🚫 Лимит расходов исчерпан (${budget_status['used_usd']:.4f} / "
+                        f"${budget_status['budget_usd_limit']:.2f}, {budget_status['budget_period']}) — "
+                        f"внешний вызов заблокирован."
+                    ),
+                )
+                await _notify_owner_budget_exceeded(subagent_name, budget_status)
+                from backend import database as _db_budget
+                _db_budget.save_message(session_id, "user", user_message)
+                blocked_text = (
+                    f"Достигнут лимит расходов на внешний API для этого агента "
+                    f"(${budget_status['used_usd']:.4f} / ${budget_status['budget_usd_limit']:.2f}, "
+                    f"период: {budget_status['budget_period']}). Обратитесь к владельцу, чтобы увеличить лимит."
+                )
+                assistant_msg_id = _db_budget.save_message(session_id, "assistant", blocked_text, cost_usd=0.0)
+                self.last_saved_ids[session_id] = {"user": None, "assistant": assistant_msg_id}
+                self.last_run_metadata[session_id] = {
+                    "status": "budget_exceeded",
+                    "model": subagent_model,
+                    "provider": _provider_display_name(subagent_api_base, provider=subagent_provider_name),
+                    "latency_ms": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "tool_iterations": 0,
+                    "error": "budget_exceeded",
+                }
+                log_entry = {
+                    "timestamp": datetime.now(ZoneInfo("Asia/Jerusalem")).strftime("%Y-%m-%d %H:%M:%S"),
+                    "session_id": session_id,
+                    "model": subagent_model,
+                    "latency_ms": 0,
+                    "success": False,
+                    "error": "budget_exceeded",
+                    "prompt_tokens_estimate": 0,
+                    "user_message": user_message,
+                    "assistant_response": blocked_text,
+                    "traces": [],
+                    "agent_id": subagent["id"],
+                    "completion_tokens_estimate": 0,
+                    "cost_usd": 0.0,
+                }
+                DECISION_LOGS.insert(0, log_entry)
+                if len(DECISION_LOGS) > 100:
+                    DECISION_LOGS.pop()
+                try:
+                    from backend.database import save_decision_log
+                    save_decision_log(log_entry)
+                except Exception as db_err:
+                    logger.error(f"Failed to save budget-exceeded decision log: {db_err}")
+                return blocked_text
+
         from backend.activity_logger import log_activity
         log_activity(
             activity_type="active",
@@ -1636,14 +1964,35 @@ class JarvisAgent:
             f"День недели: {day_of_week}\n"
             f"Если инструмент вернул status=awaiting_approval, действие НЕ выполнено. Сообщи ID задачи и запроси подтверждение владельца.\n"
             f"ВАЖНОЕ ПРАВИЛО: Ваши встроенные знания ограничены прошлым. Для получения ЛЮБОЙ актуальной информации о событиях, спортивных матчах (например, сегодняшние игры, коэффициенты ставок, аналитика), новостях, котировках или погоде, вы ОБЯЗАНЫ использовать поиск по интернету через инструмент web_search. Никогда не выдумывайте события и не опирайтесь на свои старые данные!\n"
-            f"КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО искать, использовать, упоминать, цитировать или пересказывать в ответах Сэру готовые прогнозы, чужие статьи, советы или мнения о валуйных ставках (например, 'готовые прогнозы', 'валуйные ставки по версии LiveSport', 'экспертные мнения'). Вы должны искать исключительно сырые числовые данные: пары соперников, точное время начала матчей и коэффициенты (odds/котировки) букмекеров. Любые выводы и математические расчеты валуйности (EV = Probability * Odds - 1) вы обязаны делать строго самостоятельно и приводить только свои собственные результаты, не ссылаясь на чужие мнения!\n"
+            f"КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО искать, использовать, упоминать, цитировать или пересказывать в ответах Альберту готовые прогнозы, чужие статьи, советы или мнения о валуйных ставках (например, 'готовые прогнозы', 'валуйные ставки по версии LiveSport', 'экспертные мнения'). Вы должны искать исключительно сырые числовые данные: пары соперников, точное время начала матчей и коэффициенты (odds/котировки) букмекеров. Любые выводы и математические расчеты валуйности (EV = Probability * Odds - 1) вы обязаны делать строго самостоятельно и приводить только свои собственные результаты, не ссылаясь на чужие мнения!\n"
             f"Вы не имеете права лениться делать расчеты: если точных числовых коэффициентов в поиске нет, вы обязаны провести математическое прогнозирование (например, рассчитать вероятности победы/ничьей/поражения по распределению Пуассона на основе средней результативности или статистики голов команд) и рассчитать ожидаемую валуйность (EV = P * Odds - 1) на основе расчетных вероятностей и примерных коэффициентов, вместо выдачи сухого отказа или цитирования чужих прогнозов."
         )
         system_info += _local_model_system_hint(subagent_model, self.api_base)
+        system_info += _address_directive()
         messages = [{"role": "system", "content": system_prompt + system_info}]
         for msg in history:
             messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": user_content})
+
+        # Mandatory redaction gateway: whenever this turn is routed to an external
+        # provider, scrub every user/assistant message (current turn + history) of
+        # anything secret-shaped before it leaves the box. The DB/memory copies
+        # saved above (db.save_message, `history`) are untouched — this only
+        # rewrites the local `messages` list actually sent over HTTP. The response
+        # gets its placeholders swapped back for the real values before it's shown
+        # to the user or persisted, right before this function returns.
+        redaction_request_id = None
+        if subagent_is_external:
+            from backend.redaction import detect_and_redact, store_mapping
+            import uuid as _uuid
+            redaction_request_id = f"{session_id}:{_uuid.uuid4().hex[:12]}"
+            combined_mapping: Dict[str, str] = {}
+            for message in messages:
+                if message.get("role") in ("user", "assistant") and message.get("content"):
+                    redacted_content, mapping = await detect_and_redact(message["content"])
+                    message["content"] = redacted_content
+                    combined_mapping.update(mapping)
+            store_mapping(redaction_request_id, combined_mapping)
 
         # Default subagent access is read-only/low-risk. Mutating and shell tools
         # require an explicit skill and still pass through the Control Plane.
@@ -1673,7 +2022,9 @@ class JarvisAgent:
             "google_calendar": ["get_calendar_events", "add_calendar_event"],
             "timers_alarms": ["set_timer", "set_alarm", "cancel_timer_or_alarm"],
             "shell_execution": ["get_system_stats", "execute_command"],
-            "python_sandbox": ["execute_command"]
+            "python_sandbox": ["execute_command"],
+            "git_dev": ["git_status", "git_diff", "git_commit", "git_push"],
+            "image_generation": ["generate_image"],
         }
 
         skills_str = subagent.get("skills", "")
@@ -1764,8 +2115,8 @@ class JarvisAgent:
                         break
 
                     normalized = await call_llm_normalized(
-                        api_base=self.api_base,
-                        api_key=self.api_key,
+                        api_base=subagent_api_base,
+                        api_key=subagent_api_key,
                         model=subagent_model,
                         messages=messages,
                         temperature=subagent.get("temperature", 0.7),
@@ -1776,7 +2127,7 @@ class JarvisAgent:
                         client=client,
                         stream_callback=stream_callback,
                         provider_options={
-                            "provider": self.provider,
+                            "provider": subagent_provider_name,
                             "num_ctx": self.ollama_num_ctx,
                             "keep_alive": self.ollama_keep_alive,
                             "think": self.ollama_think,
@@ -1791,7 +2142,7 @@ class JarvisAgent:
                         response_text = (
                             "Локальная модель не ответила вовремя."
                             if normalized.status == STATUS_TIMEOUT
-                            else f"Не удалось получить ответ от {_provider_display_name(self.api_base, provider=self.provider)}: {error_msg}"
+                            else f"Не удалось получить ответ от {_provider_display_name(subagent_api_base, provider=subagent_provider_name)}: {error_msg}"
                         )
                         break
 
@@ -1804,8 +2155,8 @@ class JarvisAgent:
                         if normalized.status == STATUS_EMPTY and not tool_executed:
                             logger.info("Sub-agent '%s' final response was empty after cleanup. Retrying for visible final answer...", subagent_name)
                             retry = await call_llm_normalized(
-                                api_base=self.api_base,
-                                api_key=self.api_key,
+                                api_base=subagent_api_base,
+                                api_key=subagent_api_key,
                                 model=subagent_model,
                                 messages=messages + [{"role": "user", "content": FINAL_ANSWER_RETRY_PROMPT}],
                                 temperature=min(subagent.get("temperature", 0.7), 0.3),
@@ -1814,7 +2165,7 @@ class JarvisAgent:
                                 max_retries=0,
                                 client=client,
                                 stream_callback=stream_callback,
-                                provider_options=_visible_answer_retry_options({"provider": self.provider, "num_ctx": self.ollama_num_ctx, "keep_alive": self.ollama_keep_alive, "think": self.ollama_think}),
+                                provider_options=_visible_answer_retry_options({"provider": subagent_provider_name, "num_ctx": self.ollama_num_ctx, "keep_alive": self.ollama_keep_alive, "think": self.ollama_think}),
                             )
                             total_prompt_tokens += retry.usage.input_tokens or 0
                             total_completion_tokens += retry.usage.output_tokens or 0
@@ -1829,14 +2180,23 @@ class JarvisAgent:
                             response_status = "awaiting_approval"
                             response_text = "Действие не выполнено и ожидает подтверждения владельца в Control Plane."
                         elif not response_text.strip() and tool_executed:
-                            response_text = "Действия успешно выполнены, Сэр."
+                            response_text = "Действия успешно выполнены, Альберт."
                         if not response_text.strip():
                             logger.warning("Sub-agent '%s' returned an empty final response for session %s", subagent_name, session_id)
                             response_status = "empty"
                             error_msg = retry_error or normalized.error_message
                             response_text = _empty_model_response_fallback(subagent_name, retry_finish_reason or normalized.finish_reason)
-                        
-                        cost_usd = _provider_cost(self.api_base, self.provider, subagent_model, total_prompt_tokens, total_completion_tokens)
+
+                        # Swap any [SECRET_xxxxxx] placeholders the external provider
+                        # echoed back for their real values *before* this text is saved
+                        # to the DB/memory or shown to the user — everything local stays
+                        # full-fidelity; only the outbound HTTP leg above ever saw the
+                        # redacted form.
+                        if redaction_request_id:
+                            from backend.redaction import restore_secrets
+                            response_text = restore_secrets(response_text, redaction_request_id)
+
+                        cost_usd = _provider_cost(subagent_api_base, subagent_provider_name, subagent_model, total_prompt_tokens, total_completion_tokens)
                         self.last_costs[session_id] = cost_usd
                         
                         log_activity(
@@ -1870,10 +2230,20 @@ class JarvisAgent:
                             source=subagent_name,
                             message=f"Выполнение субагента через Control Plane: '{tool_name}'"
                         )
-                        from backend.control_plane import execute_governed_tool
-                        result_str = await asyncio.to_thread(
-                            execute_governed_tool, tool_name, tool_args, chat_id=session_id
-                        )
+                        if tool_name in PAID_TOOLS and (blocked := _paid_tool_budget_block(subagent["id"], tool_name)):
+                            result_str = blocked
+                        else:
+                            from backend.control_plane import execute_governed_tool
+                            result_str = await asyncio.to_thread(
+                                execute_governed_tool, tool_name, tool_args, chat_id=session_id
+                            )
+                            if tool_name in PAID_TOOLS:
+                                try:
+                                    parsed_spend = json.loads(result_str)
+                                    if isinstance(parsed_spend, dict) and "error" not in parsed_spend and parsed_spend.get("cost_usd"):
+                                        _record_paid_tool_spend(subagent["id"], session_id, tool_name, float(parsed_spend["cost_usd"]))
+                                except Exception:
+                                    pass
                         try:
                             if json.loads(result_str).get("status") == "awaiting_approval":
                                 approval_pending = True
@@ -1892,12 +2262,12 @@ class JarvisAgent:
             latency_ms = int((time.time() - start_time) * 1000)
             error_msg = str(e)
             logger.exception("Error during LLM subagent chat completion call")
-            response_text = "Прошу прощения, Сэр. Произошел сбой при обработке запроса субагента."
+            response_text = "Прошу прощения, Альберт. Произошел сбой при обработке запроса субагента."
 
         self.last_run_metadata[session_id] = {
             "status": response_status,
             "model": subagent_model,
-            "provider": _provider_display_name(self.api_base, provider=self.provider),
+            "provider": _provider_display_name(subagent_api_base, provider=subagent_provider_name),
             "latency_ms": latency_ms,
             "input_tokens": total_prompt_tokens,
             "output_tokens": total_completion_tokens,

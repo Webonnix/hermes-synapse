@@ -47,6 +47,7 @@ services:
       - VOICE_TTS_PROVIDER=${VOICE_TTS_PROVIDER:-rhvoice}
       - VOICE_TTS_RHVOICE_BINARY=${VOICE_TTS_RHVOICE_BINARY:-RHVoice-test}
       - VOICE_TTS_VOICE=${VOICE_TTS_VOICE:-anna}
+      - VOICE_TTS_VOICE_EN=${VOICE_TTS_VOICE_EN:-slt}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

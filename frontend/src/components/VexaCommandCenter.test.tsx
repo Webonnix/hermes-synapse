@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentModel, ChatMessage } from '../types';
 import { VexaCommandCenter } from './VexaCommandCenter';
@@ -34,22 +34,33 @@ describe('VexaCommandCenter', () => {
     }));
   });
 
-  it('shows live orchestration state and sends typed commands', () => {
+  it('shows live orchestration state and sends typed commands', async () => {
     const onCommand = vi.fn().mockReturnValue(true);
-    render(
-      <VexaCommandCenter
-        agents={agents}
-        messages={messages}
-        isConnected
-        isGenerating={false}
-        isSpeaking={false}
-        micState="off"
-        onVoiceToggle={vi.fn()}
-        onCommand={onCommand}
-        onStop={vi.fn()}
-        language="ru"
-      />,
-    );
+    // The energy-core scene loads via a lazy import (Suspense); await act() flushes that
+    // microtask so the resulting state update happens inside React's test harness.
+    await act(async () => {
+      render(
+        <VexaCommandCenter
+          agents={agents}
+          messages={messages}
+          isConnected
+          isGenerating={false}
+          isSpeaking={false}
+          micState="off"
+          onVoiceToggle={vi.fn()}
+          onCommand={onCommand}
+          onStop={vi.fn()}
+          language="ru"
+          micStreamRef={{ current: null }}
+          ttsAudioElRef={{ current: null }}
+          onOpenAgentChat={vi.fn()}
+          chatSessions={[]}
+          currentChatId="dashboard"
+          getSessionLabel={(id) => id}
+          onCreateSession={vi.fn()}
+        />,
+      );
+    });
 
     expect(screen.getByText('Готова к команде')).toBeInTheDocument();
     expect(screen.getByText('Проверка завершена. Ошибок нет.')).toBeInTheDocument();
@@ -60,25 +71,67 @@ describe('VexaCommandCenter', () => {
     expect(onCommand).toHaveBeenCalledWith('Запусти тесты');
   });
 
-  it('starts voice capture and exposes active agents', () => {
+  it('starts voice capture and exposes active agents', async () => {
     const onVoiceToggle = vi.fn();
-    render(
-      <VexaCommandCenter
-        agents={agents}
-        messages={messages}
-        isConnected
-        isGenerating={false}
-        isSpeaking={false}
-        micState="off"
-        onVoiceToggle={onVoiceToggle}
-        onCommand={vi.fn().mockReturnValue(true)}
-        onStop={vi.fn()}
-        language="ru"
-      />,
-    );
+    await act(async () => {
+      render(
+        <VexaCommandCenter
+          agents={agents}
+          messages={messages}
+          isConnected
+          isGenerating={false}
+          isSpeaking={false}
+          micState="off"
+          onVoiceToggle={onVoiceToggle}
+          onCommand={vi.fn().mockReturnValue(true)}
+          onStop={vi.fn()}
+          language="ru"
+          micStreamRef={{ current: null }}
+          ttsAudioElRef={{ current: null }}
+          onOpenAgentChat={vi.fn()}
+          chatSessions={[]}
+          currentChatId="dashboard"
+          getSessionLabel={(id) => id}
+          onCreateSession={vi.fn()}
+        />,
+      );
+    });
 
     fireEvent.click(screen.getByRole('button', { name: 'Начать голосовую команду' }));
     expect(onVoiceToggle).toHaveBeenCalledOnce();
     expect(screen.getByText('Research Agent')).toBeInTheDocument();
+  });
+
+  it('opens the agent channel window from the mesh panel and from an agent row', async () => {
+    const onOpenAgentChat = vi.fn();
+    await act(async () => {
+      render(
+        <VexaCommandCenter
+          agents={agents}
+          messages={messages}
+          isConnected
+          isGenerating={false}
+          isSpeaking={false}
+          micState="off"
+          onVoiceToggle={vi.fn()}
+          onCommand={vi.fn().mockReturnValue(true)}
+          onStop={vi.fn()}
+          language="ru"
+          micStreamRef={{ current: null }}
+          ttsAudioElRef={{ current: null }}
+          onOpenAgentChat={onOpenAgentChat}
+          chatSessions={[]}
+          currentChatId="dashboard"
+          getSessionLabel={(id) => id}
+          onCreateSession={vi.fn()}
+        />,
+      );
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Открыть канал с агентом' }));
+    expect(onOpenAgentChat).toHaveBeenLastCalledWith();
+
+    fireEvent.click(screen.getByRole('button', { name: /Research Agent/ }));
+    expect(onOpenAgentChat).toHaveBeenLastCalledWith('research');
   });
 });

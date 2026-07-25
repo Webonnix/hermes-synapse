@@ -20,6 +20,15 @@ from backend.websocket_manager import manager
 class AuthVerifyRequest(BaseModel):
     code: str
 
+class AuthLoginRequest(BaseModel):
+    username: str
+    password: str
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str | None = None
+    new_username: str
+    new_password: str
+
 class ConfigUpdate(BaseModel):
     system_prompt: str | None = None
     model: str | None = None
@@ -32,6 +41,7 @@ class ConfigUpdate(BaseModel):
     memory_enabled: bool | None = None
     memory_auto_save: bool | None = None
     memory_max_items: int | None = None
+    telegram_voice_replies: bool | None = None
     provider: str | None = None
     api_base: str | None = None
     ollama_base_url: str | None = None
@@ -68,6 +78,9 @@ class SubagentUpdate(BaseModel):
     model_provider: str = "ollama"
     model_type: str = "local"
     model_params: dict = {}
+    budget_usd_limit: Optional[float] = None
+    budget_period: str = "monthly"
+    tier_id: Optional[str] = None
 
 class SubagentPosition(BaseModel):
     id: str
@@ -211,7 +224,13 @@ async def lifespan(app: FastAPI):
     price_monitor.start()
     
     bot_app = await init_bot()
-    
+
+    from backend import agent_bot
+    await agent_bot.manager.start_all_active()
+
+    from backend import agent_matrix_bot
+    await agent_matrix_bot.manager.start_all_active()
+
     # Background Obsidian vault sync (non-blocking)
     async def _obsidian_startup_sync():
         try:
@@ -244,7 +263,11 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_bcm_session_scheduler_task())
 
     yield
-    # Shutdown: Stop Telegram bot
+    # Shutdown: Stop Telegram bots
+    from backend import agent_bot
+    await agent_bot.manager.stop_all()
+    from backend import agent_matrix_bot
+    await agent_matrix_bot.manager.stop_all()
     await shutdown_bot()
     
     # Stop price alert monitor background task
@@ -259,8 +282,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Hermes Jarvis Backend",
-    description="Backend services for the Jarvis AI Personal Assistant",
+    title="Hermes Vexa Backend",
+    description="Backend services for the Vexa AI Personal Assistant",
     lifespan=lifespan
 )
 
@@ -284,7 +307,8 @@ async def auth_middleware(request: Request, call_next):
         "/health/ready",
         "/api/auth/request-code",
         "/api/auth/verify-code",
-    ) or path.startswith("/api/plots/"):
+        "/api/auth/login",
+    ) or path.startswith("/api/plots/") or path.startswith("/api/generated-images/"):
         return await call_next(request)
         
     # Apply auth only to API routes
@@ -315,7 +339,7 @@ async def request_code():
         
     msg = (
         f"🏛️ **Hermes Authorization Request**\n\n"
-        f"Sir, an entry request to the web dashboard was detected.\n"
+        f"Albert, an entry request to the web dashboard was detected.\n"
         f"Your one-time access code is:\n\n"
         f"`{code}`\n\n"
         f"This code is valid for 5 minutes."
@@ -344,7 +368,48 @@ async def verify_code(req: AuthVerifyRequest):
         return {"status": "success", "token": token}
     else:
         from fastapi import HTTPException
-        raise HTTPException(status_code=401, detail="Invalid or expired access code, Sir.")
+        raise HTTPException(status_code=401, detail="Invalid or expired access code, Albert.")
+
+@app.post("/api/auth/login")
+async def login(req: AuthLoginRequest):
+    from backend.auth import verify_password, create_session
+    from backend import database as db
+
+    stored_username = db.get_setting("admin_username")
+    stored_hash = db.get_setting("admin_password_hash")
+    stored_salt = db.get_setting("admin_password_salt")
+
+    if not stored_username or not stored_hash or not stored_salt:
+        raise HTTPException(status_code=401, detail="Password login is not set up yet. Sign in via Telegram and set a password in Config.")
+
+    if req.username.strip() != stored_username or not verify_password(req.password, stored_hash, stored_salt):
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+
+    token = create_session()
+    return {"status": "success", "token": token}
+
+@app.post("/api/auth/change-password")
+async def change_password(req: ChangePasswordRequest):
+    from backend.auth import hash_password, verify_password
+    from backend import database as db
+
+    if not req.new_username.strip() or not req.new_password:
+        raise HTTPException(status_code=400, detail="Username and password are required.")
+    if len(req.new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+
+    stored_hash = db.get_setting("admin_password_hash")
+    stored_salt = db.get_setting("admin_password_salt")
+    if stored_hash and stored_salt:
+        # A password is already configured — require the current one to change it.
+        if not req.current_password or not verify_password(req.current_password, stored_hash, stored_salt):
+            raise HTTPException(status_code=401, detail="Current password is incorrect.")
+
+    new_hash, new_salt = hash_password(req.new_password)
+    db.set_setting("admin_username", req.new_username.strip())
+    db.set_setting("admin_password_hash", new_hash)
+    db.set_setting("admin_password_salt", new_salt)
+    return {"status": "success"}
 
 from fastapi.staticfiles import StaticFiles
 import os
@@ -352,6 +417,10 @@ import os
 plots_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "plots")
 os.makedirs(plots_dir, exist_ok=True)
 app.mount("/api/plots", StaticFiles(directory=plots_dir), name="plots")
+
+generated_images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "generated_images")
+os.makedirs(generated_images_dir, exist_ok=True)
+app.mount("/api/generated-images", StaticFiles(directory=generated_images_dir), name="generated_images")
 
 
 # Enable CORS for frontend dashboard
@@ -430,6 +499,54 @@ async def get_status():
         "logs_count": len(DECISION_LOGS)
     }
 
+# Whitelist of secrets the dashboard is allowed to store — everything used by
+# tools.py's _env() calls, plus the main LLM fallback provider. Editing this
+# list is the only way to expose a new key in the Settings → API Keys tab;
+# POST /api/settings/api-keys rejects any key_name not in this set.
+KNOWN_API_KEYS = [
+    {"key_name": "STABILITY_API_KEY", "label": "Stability AI", "description": "Платная генерация изображений (tool generate_image).", "category": "Инструменты"},
+    {"key_name": "SERPER_API_KEY", "label": "Serper", "description": "Веб-поиск, новости, футбольная аналитика.", "category": "Инструменты"},
+    {"key_name": "OPENWEATHERMAP_API_KEY", "label": "OpenWeatherMap", "description": "Реальная погода вместо заглушки.", "category": "Инструменты"},
+    {"key_name": "TODOIST_API_TOKEN", "label": "Todoist", "description": "Синхронизация задач для Daily Planner.", "category": "Инструменты"},
+    {"key_name": "OBSIDIAN_API_KEY", "label": "Obsidian", "description": "Доступ к Obsidian Local REST API (skill obsidian_rag).", "category": "Интеграции"},
+    {"key_name": "GITEA_TOKEN", "label": "Gitea", "description": "Доступ агентов к dev-репозиторию (skill git_dev).", "category": "Интеграции"},
+    {"key_name": "OPENROUTER_API_KEY", "label": "OpenRouter", "description": "Облачный провайдер для основной модели, если выбран OpenRouter.", "category": "LLM"},
+]
+_KNOWN_API_KEY_NAMES = {entry["key_name"] for entry in KNOWN_API_KEYS}
+
+class ApiKeyUpdate(BaseModel):
+    key_name: str
+    value: str
+
+@app.get("/api/settings/api-keys")
+async def list_api_keys():
+    from backend import database as db
+    configured = set(db.list_configured_api_keys())
+    return {
+        "keys": [
+            {**entry, "configured": entry["key_name"] in configured or bool(os.getenv(entry["key_name"], "").strip())}
+            for entry in KNOWN_API_KEYS
+        ]
+    }
+
+@app.post("/api/settings/api-keys")
+async def save_api_key(update: ApiKeyUpdate):
+    from backend import database as db
+    if update.key_name not in _KNOWN_API_KEY_NAMES:
+        raise HTTPException(status_code=400, detail=f"Unknown key: {update.key_name}")
+    if not update.value.strip():
+        raise HTTPException(status_code=400, detail="Value is required.")
+    db.set_api_key(update.key_name, update.value.strip())
+    return {"status": "success"}
+
+@app.delete("/api/settings/api-keys/{key_name}")
+async def remove_api_key(key_name: str):
+    from backend import database as db
+    if key_name not in _KNOWN_API_KEY_NAMES:
+        raise HTTPException(status_code=400, detail=f"Unknown key: {key_name}")
+    db.delete_api_key(key_name)
+    return {"status": "success"}
+
 @app.get("/api/config")
 async def get_config():
     return agent_instance.get_runtime_config()
@@ -499,6 +616,7 @@ async def update_config(update: ConfigUpdate):
         memory_enabled=update.memory_enabled,
         memory_auto_save=update.memory_auto_save,
         memory_max_items=update.memory_max_items,
+        telegram_voice_replies=update.telegram_voice_replies,
     )
     config = agent_instance.get_runtime_config()
     _models_cache["data"] = None
@@ -802,6 +920,9 @@ async def save_subagent_api(subagent: SubagentUpdate):
         subagent.model_provider,
         subagent.model_type,
         subagent.model_params,
+        subagent.budget_usd_limit,
+        subagent.budget_period,
+        subagent.tier_id,
     )
     return {"status": "success", "id": clean_id}
 
@@ -813,11 +934,6 @@ async def save_agent_api(subagent: SubagentUpdate):
 async def get_agent_events_api(agent_id: str, limit: int = 50):
     from backend.database import get_agent_events
     return get_agent_events(agent_id, limit=limit)
-
-@app.get("/api/office/state")
-async def get_office_state_api():
-    from backend.database import get_agent_office_state
-    return get_agent_office_state()
 
 @app.get("/api/autonomy/summary")
 async def get_autonomy_summary_api():
@@ -894,7 +1010,8 @@ async def get_control_plane_events_api(limit: int = 100):
 
 @app.post("/api/control-plane/tasks/{task_id}/approve")
 async def approve_control_plane_task_api(task_id: str):
-    from backend.control_plane import approve_task, execute_governed_tool
+    from backend.control_plane import approve_task, get_task
+    from backend.approval_dispatch import execute_if_ready
     try:
         task = approve_task(task_id, actor="owner:web")
     except KeyError:
@@ -902,28 +1019,8 @@ async def approve_control_plane_task_api(task_id: str):
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
-    execution = None
-    if task["status"] == "approved":
-        try:
-            from backend.autonomy import get_capability_proposal, execute_approved_capability
-            from backend.mcp_governance import get_connection_proposal, execute_approved_connection
-
-            if get_capability_proposal(control_task_id=task_id):
-                execution = await asyncio.to_thread(execute_approved_capability, task_id)
-            elif get_connection_proposal(task_id):
-                execution = await execute_approved_connection(task_id)
-            elif task.get("tool_name"):
-                execution = await asyncio.to_thread(
-                    execute_governed_tool,
-                    task["tool_name"],
-                    task.get("tool_arguments") or {},
-                    task.get("requester") or "control-plane",
-                    approved_task_id=task_id,
-                )
-        except Exception as exc:
-            logger.error("Approved Control Plane task %s failed: %s", task_id, exc)
-            execution = {"status": "failed", "error": str(exc)}
-        from backend.control_plane import get_task
+    execution = await execute_if_ready(task)
+    if execution is not None:
         task = get_task(task_id) or task
     return {"status": task["status"], "task": task, "execution": execution}
 
@@ -1199,6 +1296,12 @@ class MCPServerConfig(BaseModel):
     args: list = Field(default_factory=list)
     env: dict = Field(default_factory=dict)
 
+class ProviderBindingRequest(BaseModel):
+    name: str
+    provider_type: str = "openai_compatible"
+    api_base: str
+    api_key: str
+
 @app.get("/api/mcp/servers")
 async def get_mcp_servers():
     """Returns current MCP server configs and live connection status."""
@@ -1262,6 +1365,223 @@ async def delete_mcp_server(name: str):
         for t in dead:
             mcp_tool_to_server.pop(t, None)
     return {"status": "success", "name": name}
+
+@app.get("/api/providers")
+async def list_providers_api():
+    """Lists external provider bindings agents can be assigned to (never returns secrets)."""
+    from backend.provider_governance import list_bindings
+    return await asyncio.to_thread(list_bindings)
+
+@app.post("/api/providers")
+async def add_provider_api(binding: ProviderBindingRequest):
+    """Validate a provider binding and create a single-confirmation (R3) approval proposal."""
+    from backend.provider_governance import create_binding_proposal
+    try:
+        proposal = await asyncio.to_thread(
+            create_binding_proposal,
+            binding.name,
+            binding.provider_type,
+            binding.api_base,
+            binding.api_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "status": proposal["status"],
+        "binding_id": proposal["id"],
+        "task_id": proposal["control_task_id"],
+        "risk_class": "R3",
+        "message": "Binding validated. One owner approval is required before it can be used.",
+    }
+
+@app.delete("/api/providers/{binding_id}")
+async def delete_provider_api(binding_id: str):
+    """Revokes a provider binding and deletes its stored API key."""
+    from backend.provider_governance import revoke_binding
+    try:
+        await asyncio.to_thread(revoke_binding, binding_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Binding not found")
+    return {"status": "success", "id": binding_id}
+
+
+# ── Agent budgets, tiers, and per-agent messenger bindings ──────────────────
+
+class AgentBudgetRequest(BaseModel):
+    budget_usd_limit: Optional[float] = None
+    budget_period: str = "monthly"
+
+class AgentTierRequest(BaseModel):
+    name: str
+    description: str = ""
+    budget_usd_limit_default: Optional[float] = None
+    budget_period_default: str = "monthly"
+    allow_external_provider: bool = True
+    allow_messenger: bool = True
+    is_active: bool = True
+
+class AgentTelegramBindingRequest(BaseModel):
+    bot_token: str
+    allowed_chat_ids: List[str] = Field(default_factory=list)
+
+class AgentMatrixBindingRequest(BaseModel):
+    homeserver_url: str
+    user_id: str
+    password: str = ""
+    access_token: str = ""
+    allowed_room_ids: List[str] = Field(default_factory=list)
+
+
+@app.get("/api/agents/{agent_id}/usage")
+async def get_agent_usage_api(agent_id: str):
+    """Current spend vs. configured budget for one agent (see billing plan)."""
+    from backend.database import get_agent_budget_status
+    return await asyncio.to_thread(get_agent_budget_status, agent_id)
+
+@app.put("/api/agents/{agent_id}/budget")
+async def set_agent_budget_api(agent_id: str, payload: AgentBudgetRequest):
+    from backend.database import get_subagent, save_subagent
+    subagent = await asyncio.to_thread(get_subagent, agent_id)
+    if not subagent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if payload.budget_period not in ("monthly", "lifetime"):
+        raise HTTPException(status_code=400, detail="budget_period must be 'monthly' or 'lifetime'")
+    await asyncio.to_thread(
+        save_subagent,
+        subagent["id"], subagent["name"], subagent["system_prompt"], subagent["model"],
+        subagent["agent_type"], subagent["parent_id"], subagent["skills"], subagent["x"], subagent["y"],
+        subagent["temperature"], subagent["role"], subagent["status"], subagent["is_enabled"],
+        subagent["model_provider"], subagent["model_type"], subagent["model_params"],
+        payload.budget_usd_limit, payload.budget_period, subagent.get("tier_id"),
+    )
+    return {"status": "success", "id": agent_id}
+
+
+@app.get("/api/agent-tiers")
+async def list_agent_tiers_api():
+    from backend.agent_tiers import list_tiers
+    return await asyncio.to_thread(list_tiers)
+
+@app.post("/api/agent-tiers")
+async def create_agent_tier_api(tier: AgentTierRequest):
+    from backend.agent_tiers import create_tier
+    try:
+        return await asyncio.to_thread(
+            create_tier, tier.name, tier.description, tier.budget_usd_limit_default,
+            tier.budget_period_default, tier.allow_external_provider, tier.allow_messenger, tier.is_active,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+@app.put("/api/agent-tiers/{tier_id}")
+async def update_agent_tier_api(tier_id: str, tier: AgentTierRequest):
+    from backend.agent_tiers import update_tier
+    try:
+        return await asyncio.to_thread(
+            update_tier, tier_id,
+            name=tier.name, description=tier.description,
+            budget_usd_limit_default=tier.budget_usd_limit_default, budget_period_default=tier.budget_period_default,
+            allow_external_provider=tier.allow_external_provider, allow_messenger=tier.allow_messenger,
+            is_active=tier.is_active,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Tier not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+@app.delete("/api/agent-tiers/{tier_id}")
+async def delete_agent_tier_api(tier_id: str):
+    from backend.agent_tiers import delete_tier
+    await asyncio.to_thread(delete_tier, tier_id)
+    return {"status": "success", "id": tier_id}
+
+
+@app.get("/api/agents/{agent_id}/telegram")
+async def list_agent_telegram_bindings_api(agent_id: str):
+    from backend.agent_messenger_governance import list_telegram_bindings
+    return await asyncio.to_thread(list_telegram_bindings, agent_id)
+
+@app.post("/api/agents/{agent_id}/telegram")
+async def create_agent_telegram_binding_api(agent_id: str, payload: AgentTelegramBindingRequest):
+    """Validates a BotFather token and creates a single-confirmation (R3) approval proposal."""
+    from backend.agent_messenger_governance import create_telegram_binding_proposal
+    try:
+        proposal = await asyncio.to_thread(
+            create_telegram_binding_proposal, agent_id, payload.bot_token, payload.allowed_chat_ids
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "status": proposal["status"],
+        "binding_id": proposal["id"],
+        "bot_username": proposal["bot_username"],
+        "task_id": proposal["control_task_id"],
+        "risk_class": "R3",
+        "message": "Bot token validated. One owner approval is required before the bot goes live.",
+    }
+
+@app.delete("/api/agents/telegram/{binding_id}")
+async def delete_agent_telegram_binding_api(binding_id: str):
+    from backend.agent_messenger_governance import revoke_telegram_binding
+    try:
+        await revoke_telegram_binding(binding_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Binding not found")
+    return {"status": "success", "id": binding_id}
+
+
+@app.get("/api/agents/{agent_id}/matrix")
+async def list_agent_matrix_bindings_api(agent_id: str):
+    from backend.agent_messenger_governance import list_matrix_bindings
+    return await asyncio.to_thread(list_matrix_bindings, agent_id)
+
+@app.post("/api/agents/{agent_id}/matrix")
+async def create_agent_matrix_binding_api(agent_id: str, payload: AgentMatrixBindingRequest):
+    """Validates a Matrix login (or access token) and creates a single-confirmation (R3) approval proposal."""
+    from backend.agent_messenger_governance import create_matrix_binding_proposal
+    try:
+        proposal = await asyncio.to_thread(
+            create_matrix_binding_proposal,
+            agent_id, payload.homeserver_url, payload.user_id,
+            payload.password, payload.access_token, payload.allowed_room_ids,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "status": proposal["status"],
+        "binding_id": proposal["id"],
+        "matrix_user_id": proposal["bot_username"],
+        "task_id": proposal["control_task_id"],
+        "risk_class": "R3",
+        "message": "Matrix credential validated. One owner approval is required before it goes live.",
+    }
+
+@app.delete("/api/agents/matrix/{binding_id}")
+async def delete_agent_matrix_binding_api(binding_id: str):
+    from backend.agent_messenger_governance import revoke_matrix_binding
+    try:
+        await revoke_matrix_binding(binding_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Binding not found")
+    return {"status": "success", "id": binding_id}
+
+
+@app.get("/api/messenger-bindings")
+async def list_all_messenger_bindings_api():
+    """Cross-agent, cross-platform view of every messenger binding — powers the
+    central 'Каналы связи' admin page rather than each agent's own edit form."""
+    from backend.agent_messenger_governance import list_telegram_bindings, list_matrix_bindings
+    from backend.database import get_all_subagents
+
+    names = {a["id"]: a["name"] for a in await asyncio.to_thread(get_all_subagents)}
+    telegram = await asyncio.to_thread(list_telegram_bindings)
+    matrix = await asyncio.to_thread(list_matrix_bindings)
+    bindings = telegram + matrix
+    for binding in bindings:
+        binding["agent_name"] = names.get(binding["subagent_id"], binding["subagent_id"])
+    bindings.sort(key=lambda b: b.get("created_at", ""), reverse=True)
+    return bindings
+
 
 @app.get("/api/system/stats")
 async def get_system_stats_api():
@@ -1436,7 +1756,7 @@ async def rename_history_session(session_id: str, payload: RenameSessionPayload)
 class ObsidianNoteCreate(BaseModel):
     title: str
     content: str
-    folder: str = "Jarvis"
+    folder: str = "Vexa"
 
 @app.get("/api/obsidian/status")
 async def obsidian_status():
@@ -1565,7 +1885,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     await manager.broadcast({
                         "type": "chat_message",
                         "role": "user",
-                        "content": display_text,
+                        "content": user_text,
                         "chat_id": chat_id
                     })
                     # Call agent

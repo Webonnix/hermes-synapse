@@ -517,11 +517,11 @@ class AnalystAgent:
         
         prompt = (
             f"Напишите Python скрипт с использованием pandas, numpy и matplotlib, который считывает данные из таблицы и строит график.\n"
-            f"Указания Сэра: \"{instructions}\"\n\n"
+            f"Указания Альберта: \"{instructions}\"\n\n"
             f"ВАЖНОЕ ПРАВИЛО: Все загруженные пользователем файлы CSV и Excel сохраняются в папке '/app/backend/data/uploads/'.\n"
             f"Если в указаниях написано 'считай sales.csv', ваш скрипт должен прочитать файл из '/app/backend/data/uploads/sales.csv' с помощью pd.read_csv() (или pd.read_excel() для Excel).\n\n"
             f"КРИТИЧЕСКОЕ ТРЕБОВАНИЕ: Скрипт ОБЯЗАТЕЛЬНО должен сохранять сгенерированный график в файл по пути: '{plot_path}' с помощью plt.savefig('{plot_path}').\n"
-            f"Используйте plt.style.use('dark_background') для красивого темного оформления графика (под стиль Jarvis!).\n"
+            f"Используйте plt.style.use('dark_background') для красивого темного оформления графика (под стиль Vexa!).\n"
             f"Убедитесь, что вы импортировали matplotlib.pyplot as plt и pandas as pd. Не вызывайте plt.show(), только plt.savefig()."
         )
         

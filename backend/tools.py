@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import asyncio
+import uuid
 import httpx
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
@@ -11,9 +12,17 @@ logger = logging.getLogger("hermes.tools")
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def _env(key: str) -> Optional[str]:
-    """Read env var; return None if missing or empty placeholder."""
+    """Read a secret: env var first (server .env), falling back to a
+    dashboard-configured value in the api_keys table (Config → API Keys)."""
     val = os.getenv(key, "").strip()
-    return val if val and not val.startswith("your_") else None
+    if val and not val.startswith("your_"):
+        return val
+    try:
+        from backend.database import get_api_key
+        db_val = (get_api_key(key) or "").strip()
+        return db_val or None
+    except Exception:
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -378,7 +387,7 @@ def set_timer(label: str, duration_seconds: int, chat_id: str) -> str:
     if duration_seconds > 3600:
         return json.dumps({
             "status": "failed",
-            "error": "Превышен максимальный лимит. Сэр, таймер нельзя установить более чем на 1 час (3600 секунд)."
+            "error": "Превышен максимальный лимит. Альберт, таймер нельзя установить более чем на 1 час (3600 секунд)."
         }, ensure_ascii=False)
     try:
         from backend.scheduler import add_timer
@@ -914,6 +923,22 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "generate_image",
+            "description": "Генерирует изображение по текстовому описанию через платный сервис Stability AI и возвращает URL картинки. Каждый вызов стоит реальные деньги и списывается с бюджета агента.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "Подробное описание желаемого изображения на английском языке"},
+                    "aspect_ratio": {"type": "string", "description": "Соотношение сторон: 1:1, 16:9, 9:16, 3:2, 2:3, 4:5, 5:4, 21:9 или 9:21. По умолчанию 1:1."},
+                    "style_preset": {"type": "string", "description": "Необязательный стиль, например: photographic, digital-art, cinematic, anime, line-art"}
+                },
+                "required": ["prompt"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "web_search",
             "description": "Выполняет поиск в Интернете в реальном времени, возвращая последние новости, статьи или факты.",
             "parameters": {
@@ -994,10 +1019,10 @@ TOOLS_SCHEMA = [
                     "subagent_id": {"type": "string", "description": "Уникальный латинский идентификатор (slug), например: 'sports_betting', 'french_tutor'"},
                     "name": {"type": "string", "description": "Понятное имя агента, например: 'Аналитик Спортивных Ставок'"},
                     "system_prompt": {"type": "string", "description": "Детальные инструкции (системный промпт), определяющие характер, тон и правила работы сабагента."},
-                    "model": {"type": "string", "description": "Модель ИИ для работы сабагента. По умолчанию используется deepseek/deepseek-v4-flash."},
+                    "model": {"type": "string", "description": "Модель ИИ для работы сабагента. По умолчанию используется локальная модель (LLM_MODEL)."},
                     "role": {"type": "string", "description": "Роль агента в ИИ-офисе, например Researcher, Engineer, Analyst, Planner."},
-                    "model_type": {"type": "string", "description": "Тип модели: external или local."},
-                    "model_provider": {"type": "string", "description": "Провайдер модели, например openrouter, openai, anthropic, ollama, local."}
+                    "model_type": {"type": "string", "description": "Тип модели: local (по умолчанию) или external. Не указывай external, если не уверен, что нужен именно внешний провайдер."},
+                    "model_provider": {"type": "string", "description": "Провайдер модели. По умолчанию 'ollama' (локально). Указывай другое значение только если явно нужен внешний провайдер — и тогда используй id реальной активной привязки из /api/providers, а не название вроде 'openrouter'."}
                 },
                 "required": ["subagent_id", "name", "system_prompt"]
             }
@@ -1117,10 +1142,48 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "git_status",
+            "description": "Показывает статус рабочей копии git-репозитория для разработки (backend/data/dev-repo, отдельный от read-only /workspace).",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_diff",
+            "description": "Показывает несохранённые и подготовленные изменения в git-репозитории для разработки.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_commit",
+            "description": "Добавляет все изменения и коммитит их в git-репозиторий для разработки.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "Сообщение коммита."}
+                },
+                "required": ["message"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_push",
+            "description": "Отправляет закоммиченные изменения в git-репозиторий для разработки на удалённый Gitea-сервер.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_obsidian",
             "description": (
                 "Семантический поиск по заметкам Obsidian через базу знаний (RAG). "
-                "Используйте когда Сэр спрашивает ‘найди в заметках’, ‘что я писал о...’ или ‘посмотри в Obsidian’."
+                "Используйте когда Альберт спрашивает ‘найди в заметках’, ‘что я писал о...’ или ‘посмотри в Obsidian’."
             ),
             "parameters": {
                 "type": "object",
@@ -1150,7 +1213,7 @@ TOOLS_SCHEMA = [
         "function": {
             "name": "create_obsidian_note",
             "description": (
-                "Создать новую заметку в Obsidian. Используйте когда Сэр говорит 'запиши в Obsidian', 'сохрани заметку', 'зафиксируй' и т.п.\n"
+                "Создать новую заметку в Obsidian. Используйте когда Альберт говорит 'запиши в Obsidian', 'сохрани заметку', 'зафиксируй' и т.п.\n"
                 "ВАЖНО: Вы — архивариус. Самостоятельно определяйте папку по смыслу контента, используя следующую таксономию:\n"
                 "  Research/<Тема> — научные статьи, исследования, arxiv, анализ\n"
                 "  Ideas — идеи, концепции, brainstorm\n"
@@ -1162,8 +1225,8 @@ TOOLS_SCHEMA = [
                 "  Tech — технологии, инструменты, туториалы, код\n"
                 "  Books — книги, конспекты, цитаты\n"
                 "  Meetings — встречи, звонки, договорённости\n"
-                "  Jarvis — служебные заметки от Jarvis без чёткой категории\n"
-                "Выбирайте папку автоматически — НЕ спрашивайте Сэра. Можно создавать подпапки, например Research/AI или Projects/Jarvis."
+                "  Vexa — служебные заметки от Vexa без чёткой категории\n"
+                "Выбирайте папку автоматически — НЕ спрашивайте Альберта. Можно создавать подпапки, например Research/AI или Projects/Vexa."
             ),
             "parameters": {
                 "type": "object",
@@ -1181,7 +1244,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "sync_obsidian_vault",
-            "description": "Полная синхронизация хранилища Obsidian в базу знаний (векторную БД). Используйте если Сэр добавил новые заметки и хочет обновить базу знаний.",
+            "description": "Полная синхронизация хранилища Obsidian в базу знаний (векторную БД). Используйте если Альберт добавил новые заметки и хочет обновить базу знаний.",
             "parameters": {"type": "object", "properties": {}}
         }
     }
@@ -1202,6 +1265,77 @@ try:
             })
 except Exception as e:
     pass
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# IMAGE GENERATION — Stability AI (paid, no mock fallback: a fake image URL would
+# be worse than a clear error, and cost accounting only fires on a real success)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+IMAGE_GENERATION_COST_USD = 0.03  # approx. "Stable Image Core" pricing (3 credits @ $0.01/credit)
+_VALID_IMAGE_ASPECT_RATIOS = {"1:1", "16:9", "9:16", "3:2", "2:3", "4:5", "5:4", "21:9", "9:21"}
+
+async def _call_stability_image_api(prompt: str, aspect_ratio: str, style_preset: Optional[str]) -> httpx.Response:
+    api_key = _env("STABILITY_API_KEY")
+    if not api_key:
+        raise RuntimeError("STABILITY_API_KEY is not configured on the backend — image generation is unavailable.")
+    url = "https://api.stability.ai/v2beta/stable-image/generate/core"
+    data: Dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio, "output_format": "png"}
+    if style_preset:
+        data["style_preset"] = style_preset
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        # Stability's v2beta image endpoints require multipart/form-data even
+        # with no file fields — an empty `files` dict makes httpx encode it that way.
+        return await client.post(
+            url,
+            headers={"authorization": f"Bearer {api_key}", "accept": "image/*"},
+            data=data,
+            files={"none": (None, "")},
+        )
+
+def generate_image(prompt: str, aspect_ratio: str = "1:1", style_preset: str = "") -> str:
+    """Generates an image from a text prompt via Stability AI, saves it locally, and returns its URL + cost."""
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return json.dumps({"error": "prompt is required."}, ensure_ascii=False)
+    if aspect_ratio not in _VALID_IMAGE_ASPECT_RATIOS:
+        aspect_ratio = "1:1"
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                future = pool.submit(asyncio.run, _call_stability_image_api(prompt, aspect_ratio, style_preset or None))
+                response = future.result(timeout=65)
+        else:
+            response = loop.run_until_complete(_call_stability_image_api(prompt, aspect_ratio, style_preset or None))
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Stability AI request failed: {e}")
+        return json.dumps({"error": f"Image generation request failed: {e}"}, ensure_ascii=False)
+
+    if response.status_code != 200:
+        try:
+            detail = response.json()
+        except Exception:
+            detail = response.text[:300]
+        return json.dumps({"error": f"Stability AI returned {response.status_code}: {detail}"}, ensure_ascii=False)
+
+    images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "generated_images")
+    os.makedirs(images_dir, exist_ok=True)
+    filename = f"{uuid.uuid4().hex}.png"
+    with open(os.path.join(images_dir, filename), "wb") as f:
+        f.write(response.content)
+
+    return json.dumps({
+        "image_url": f"/api/generated-images/{filename}",
+        "prompt": prompt,
+        "aspect_ratio": aspect_ratio,
+        "provider": "stability_ai",
+        "cost_usd": IMAGE_GENERATION_COST_USD,
+    }, ensure_ascii=False)
+
 
 async def _scrape_ddg(query: str) -> str:
     url = "https://html.duckduckgo.com/html/"
@@ -1370,7 +1504,7 @@ def _get_local_repo() -> Optional[str]:
 def get_github_summary(repo_name: Optional[str] = None, request_type: str = "all") -> str:
     repo = repo_name or _get_local_repo() or "pauloberezini/jarvis"
     token = _env("GITHUB_TOKEN")
-    headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "Jarvis-Assistant"}
+    headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "Vexa-Assistant"}
     if token:
         headers["Authorization"] = f"token {token}"
     
@@ -1602,7 +1736,7 @@ def read_obsidian_note(note_path: str) -> str:
     return json.dumps({"path": note_path, "content": content}, ensure_ascii=False)
 
 
-def create_obsidian_note(title: str, content: str, folder: str = "Jarvis", source: str = "") -> str:
+def create_obsidian_note(title: str, content: str, folder: str = "Vexa", source: str = "") -> str:
     """Create a new note in the Obsidian vault under the specified folder."""
     import re
     # Sanitize filename
@@ -1627,7 +1761,7 @@ def create_obsidian_note(title: str, content: str, folder: str = "Jarvis", sourc
     frontmatter = (
         f"---\n"
         f"created: {created_ts}\n"
-        f"created_by: Jarvis\n"
+        f"created_by: Vexa\n"
         f"{source_line}"
         f"tags:\n{tags_yaml}\n"
         f"{aliases_line}"
@@ -1680,6 +1814,65 @@ def execute_command(command: str) -> str:
         return json.dumps({"error": "Command timed out after 15 seconds."}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"error": f"Failed to execute command: {e}"}, ensure_ascii=False)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GIT DEV REPOSITORY — narrow, reversible git operations scoped to a dedicated
+# read-write clone (backend/data/dev-repo, backed by a Gitea container). Never
+# touches the read-only /workspace project mount. Unlike execute_command (R4, two
+# owner approvals), these are classified R2 in control_plane.py — a single commit
+# or push here is small-blast-radius and easy to undo (git revert / force-push).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_DEV_REPO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "dev-repo")
+
+
+def _run_git(args: list) -> Dict[str, Any]:
+    import subprocess
+    if not os.path.isdir(os.path.join(_DEV_REPO_PATH, ".git")):
+        return {"error": "Dev repository is not initialized at backend/data/dev-repo."}
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=_DEV_REPO_PATH,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            shell=False,
+        )
+        return {
+            "exit_code": result.returncode,
+            "stdout": (result.stdout or "")[-4000:],
+            "stderr": (result.stderr or "")[-2000:],
+        }
+    except subprocess.TimeoutExpired:
+        return {"error": "Git command timed out after 30 seconds."}
+    except Exception as exc:
+        return {"error": f"Failed to run git: {exc}"}
+
+
+def git_status() -> str:
+    """Shows the working tree status of the agent's dev repository (backend/data/dev-repo)."""
+    return json.dumps(_run_git(["status", "--short", "--branch"]), ensure_ascii=False)
+
+
+def git_diff() -> str:
+    """Shows unstaged and staged changes in the agent's dev repository."""
+    return json.dumps(_run_git(["diff", "HEAD"]), ensure_ascii=False)
+
+
+def git_commit(message: str) -> str:
+    """Stages all changes and commits them in the agent's dev repository."""
+    add_result = _run_git(["add", "-A"])
+    if add_result.get("error") or add_result.get("exit_code") != 0:
+        return json.dumps({"error": "git add failed", "detail": add_result}, ensure_ascii=False)
+    commit_result = _run_git(["commit", "-m", (message or "Agent commit")[:500]])
+    return json.dumps(commit_result, ensure_ascii=False)
+
+
+def git_push() -> str:
+    """Pushes committed changes in the agent's dev repository to its Gitea remote."""
+    return json.dumps(_run_git(["push", "origin", "HEAD"]), ensure_ascii=False)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1796,6 +1989,13 @@ def execute_tool(name: str, arguments: Dict[str, Any], chat_id: str = "default")
 
 
 
+    elif name == "generate_image":
+        return generate_image(
+            prompt=arguments.get("prompt", ""),
+            aspect_ratio=arguments.get("aspect_ratio", "1:1"),
+            style_preset=arguments.get("style_preset", ""),
+        )
+
     elif name == "web_search":
         return web_search(
             query=arguments.get("query", "")
@@ -1833,8 +2033,8 @@ def execute_tool(name: str, arguments: Dict[str, Any], chat_id: str = "default")
             system_prompt=arguments.get("system_prompt", ""),
             model=arguments.get("model"),
             role=arguments.get("role", "Specialist"),
-            model_type=arguments.get("model_type", "external"),
-            model_provider=arguments.get("model_provider", "openrouter"),
+            model_type=arguments.get("model_type", "local"),
+            model_provider=arguments.get("model_provider", "ollama"),
         )
 
     elif name == "call_subagent":
@@ -1869,7 +2069,7 @@ def execute_tool(name: str, arguments: Dict[str, Any], chat_id: str = "default")
         return create_obsidian_note(
             title=arguments.get("title", ""),
             content=arguments.get("content", ""),
-            folder=arguments.get("folder", "Jarvis"),
+            folder=arguments.get("folder", "Vexa"),
             source=arguments.get("source", "")
         )
 
@@ -1878,6 +2078,18 @@ def execute_tool(name: str, arguments: Dict[str, Any], chat_id: str = "default")
 
     elif name == "execute_command":
         return execute_command(arguments.get("command", ""))
+
+    elif name == "git_status":
+        return git_status()
+
+    elif name == "git_diff":
+        return git_diff()
+
+    elif name == "git_commit":
+        return git_commit(arguments.get("message", ""))
+
+    elif name == "git_push":
+        return git_push()
 
     else:
         # Check if it is an MCP tool

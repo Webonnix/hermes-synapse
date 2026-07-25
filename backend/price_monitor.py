@@ -154,7 +154,7 @@ class PriceMonitor:
         # Format text and send Telegram notification
         cond_str = "поднялась выше" if alert["condition"] == "above" else "опустилась ниже"
         msg = (
-            f"📈 **ОПОВЕЩЕНИЕ О ЦЕНЕ, СЭР**\n\n"
+            f"📈 **ОПОВЕЩЕНИЕ О ЦЕНЕ, АЛЬБЕРТ**\n\n"
             f"Рыночная цена **{alert['display_name']}** {cond_str} целевого значения!\n"
             f"• Целевая цена: **${alert['target_price']:,.2f}**\n"
             f"• Текущая цена: **${current_price:,.2f}**\n"

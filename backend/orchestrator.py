@@ -6,7 +6,7 @@ from backend.subagents import ResearchAgent, CodeAgent, AnalystAgent, call_llm, 
 
 logger = logging.getLogger("hermes.orchestrator")
 
-PLANNER_SYSTEM_PROMPT = """You are the Planner in the Jarvis multi-agent system.
+PLANNER_SYSTEM_PROMPT = """You are the Planner in the Vexa multi-agent system.
 Your task is to break down a complex user query into a sequence of steps to be executed by specialized sub-agents:
 1. "research" — search for information on the Internet (DuckDuckGo, web pages, news, quotes, Wikipedia). Always use this agent when fresh news, stock/crypto quotes, or external web search are needed.
 2. "code" — write and execute Python code. WARNING: code runs in an isolated sandbox WITHOUT internet access (network is disabled). Use this agent only for math calculations, logic computations, or processing existing data/tables (e.g., uploaded CSV/Excel files).
@@ -470,16 +470,17 @@ Rules:
         results_context = "\n---\n".join(context_parts) if context_parts else "No information from sub-agents (simple conversation)."
         
         # Call LLM to synthesize final response
-        from backend.agent import DEFAULT_SYSTEM_PROMPT
+        from backend.agent import DEFAULT_SYSTEM_PROMPT, _address_directive
         orch_system_prompt = DEFAULT_SYSTEM_PROMPT
         parent_agent = get_subagent(orch_id)
         if parent_agent:
             orch_system_prompt = parent_agent["system_prompt"]
-            
+        orch_system_prompt += _address_directive()
+
         synth_prompt = (
-            f"You are {parent_agent['name'] if parent_agent else 'Jarvis'}, a highly intelligent assistant.\n"
-            f"Formulate the final response to the user (Sir) based on their original query and the results of your sub-agents.\n\n"
-            f"Original query of Sir: \"{query}\"\n\n"
+            f"You are {parent_agent['name'] if parent_agent else 'Vexa'}, a highly intelligent assistant.\n"
+            f"Formulate the final response to the user based on their original query and the results of your sub-agents.\n\n"
+            f"Original query: \"{query}\"\n\n"
             f"Results of sub-agents:\n{results_context}\n\n"
             f"Adhere to the tone and instructions of your system role. "
             f"Embed links to charts as Markdown images, for example: ![Chart](chart_url)."
@@ -516,7 +517,7 @@ Rules:
         
     except Exception as general_err:
         state.add_trace("Orchestrator", "Error", f"Critical orchestrator failure: {str(general_err)}", "error")
-        state.final_response = f"Apologies, Sir. A failure occurred while coordinating my sub-agents: {str(general_err)}"
+        state.final_response = f"Apologies, Albert. A failure occurred while coordinating my sub-agents: {str(general_err)}"
         if state.plan_id:
             try:
                 from backend.autonomy import update_plan

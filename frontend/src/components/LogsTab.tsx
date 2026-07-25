@@ -31,7 +31,7 @@ export function LogsTab({
           
           <div style={styles.logsList}>
             {logs.length === 0 ? (
-              <div style={styles.emptyLogs}>No logs at the moment, Sir. Start a conversation with Hermes.</div>
+              <div style={styles.emptyLogs}>No logs at the moment, Albert. Start a conversation with Vexa.</div>
             ) : (
               logs.map((log, index) => (
                 <div 
@@ -138,7 +138,7 @@ export function LogsTab({
           ) : (
             <div style={styles.emptyDetail}>
               <Layers size={48} style={{ color: 'var(--text-dim)', marginBottom: 16 }} />
-              <span>Select a log from the list on the left to view detailed telemetry data, Sir.</span>
+              <span>Select a log from the list on the left to view detailed telemetry data, Albert.</span>
             </div>
           )}
         </div>

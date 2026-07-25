@@ -11,6 +11,26 @@ logger = logging.getLogger("hermes.database")
 DB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 DB_PATH = os.path.join(DB_DIR, "hermes.db")
 
+SENIOR_WEB_DEV_PROMPT = (
+    "You are a Senior Web Developer with 10+ years of experience shipping production websites "
+    "and web apps of any complexity — from single-page marketing sites to full-stack platforms. "
+    "You are fluent in HTML5, CSS3 (flexbox/grid, responsive and mobile-first design), modern "
+    "JavaScript/TypeScript, React and Vue, Node.js and Python backends, REST/GraphQL API design, "
+    "relational and document databases, Docker, and Git workflows. You care about clean "
+    "architecture, accessibility (WCAG), performance (Core Web Vitals), and security (OWASP top "
+    "10) as much as about making the feature work.\n\n"
+    "You have direct access to a real development repository through git tools (git_status, "
+    "git_diff, git_commit, git_push) and can execute code via python_sandbox to test logic before "
+    "committing. Work like a senior engineer would: read the existing code before changing it, "
+    "make small reviewable commits with clear messages, explain trade-offs when there's more than "
+    "one reasonable approach, and flag risks (breaking changes, missing tests, security concerns) "
+    "instead of silently working around them. When a task calls for original imagery (hero images, "
+    "icons, illustrations, placeholders), use the generate_image tool rather than describing what "
+    "an image should look like.\n\n"
+    "Ask clarifying questions when requirements are ambiguous, but don't over-engineer — match the "
+    "solution's complexity to what was actually asked."
+)
+
 
 def _get_conn() -> sqlite3.Connection:
     """Open a SQLite connection configured for concurrent runtime access."""
@@ -305,6 +325,12 @@ def _init_sqlite_schema():
         ("last_error", "TEXT DEFAULT ''"),
         ("progress", "INTEGER DEFAULT 0"),
         ("updated_at", "TEXT"),
+        # NULL budget_usd_limit means unlimited. budget_period is 'monthly' (resets
+        # every calendar month) or 'lifetime' (never resets) — checked against
+        # decision_logs.cost_usd for this agent_id, see get_agent_budget_status().
+        ("budget_usd_limit", "REAL"),
+        ("budget_period", "TEXT DEFAULT 'monthly'"),
+        ("tier_id", "TEXT"),
     ]:
         try:
             cursor.execute(f"ALTER TABLE subagents ADD COLUMN {col} {definition}")
@@ -319,8 +345,8 @@ def _init_sqlite_schema():
         default_model = os.environ.get("LLM_MODEL", "qwen3:8b")
         default_agents = [
             (
-                "jarvis", "Jarvis (Main)",
-                "You are Jarvis, a highly intelligent AI orchestrator. Your job is to understand the user's request and delegate it to the most appropriate sub-agent. Be concise, efficient, and always explain which agent you are routing to.",
+                "jarvis", "Vexa (Main)",
+                "You are Vexa, a highly intelligent AI orchestrator. Your job is to understand the user's request and delegate it to the most appropriate sub-agent. Be concise, efficient, and always explain which agent you are routing to.",
                 default_model, "orchestrator", None, "", 100, 350
             ),
             (
@@ -363,6 +389,11 @@ def _init_sqlite_schema():
                 "You are a Football Analyst Agent. You have deep knowledge of football (soccer): tactics, player performance, match statistics, league standings, and transfer news. Use web_search to fetch the latest match results, lineups, and news. Provide detailed tactical breakdowns, score predictions, and injury updates. Support all major leagues: Premier League, La Liga, Serie A, Bundesliga, Champions League, and others.",
                 default_model, "agent", "jarvis", "web_search", 450, 940
             ),
+            (
+                "web_dev", "Senior Web Developer",
+                SENIOR_WEB_DEV_PROMPT,
+                default_model, "agent", "jarvis", "git_dev,python_sandbox,image_generation", 450, 1060
+            ),
         ]
         cursor.executemany("""
             INSERT INTO subagents (id, name, system_prompt, model, agent_type, parent_id, skills, x, y, temperature)
@@ -373,8 +404,8 @@ def _init_sqlite_schema():
         # Migration: upsert new default agents that don't exist yet,
         # and update existing ones if they still have old prompts.
         upserts = [
-            ("jarvis", "Jarvis (Main)",
-             "You are Jarvis, a highly intelligent AI orchestrator. Your job is to understand the user's request and delegate it to the most appropriate sub-agent. Be concise, efficient, and always explain which agent you are routing to.",
+            ("jarvis", "Vexa (Main)",
+             "You are Vexa, a highly intelligent AI orchestrator. Your job is to understand the user's request and delegate it to the most appropriate sub-agent. Be concise, efficient, and always explain which agent you are routing to.",
              "orchestrator", None, "", 100, 350),
             ("research", "Search Agent",
              "You are a Research Agent. Use web_search to find accurate, up-to-date information. Always cite sources and summarize findings clearly. You can also check weather and fetch RSS news digests.",
@@ -400,6 +431,9 @@ def _init_sqlite_schema():
             ("football", "Football Analyst",
              "You are a Football Analyst Agent. You have deep knowledge of football (soccer): tactics, player performance, match statistics, league standings, and transfer news. Use web_search to fetch the latest match results, lineups, and news. Provide detailed tactical breakdowns, score predictions, and injury updates. Support all major leagues: Premier League, La Liga, Serie A, Bundesliga, Champions League, and others.",
              "agent", "jarvis", "web_search", 450, 940),
+            ("web_dev", "Senior Web Developer",
+             SENIOR_WEB_DEV_PROMPT,
+             "agent", "jarvis", "git_dev,python_sandbox,image_generation", 450, 1060),
         ]
         default_model = os.environ.get("LLM_MODEL", "qwen3:8b")
         for agent_id, name, prompt, agent_type, parent_id, skills, x, y in upserts:
@@ -425,15 +459,18 @@ def _init_sqlite_schema():
                 )
             """, (agent_id, name, prompt, default_model, agent_type, parent_id, skills, x, y, 0.7))
 
-        # Restore public Jarvis branding for databases that were temporarily migrated to Vexa.
-        cursor.execute("""
-            UPDATE subagents
-            SET name = 'Jarvis (Main)',
-                system_prompt = REPLACE(system_prompt, 'Vexa', 'Jarvis')
-            WHERE id = 'jarvis'
-              AND (name = 'Vexa (Main)' OR system_prompt LIKE '%Vexa%')
-        """)
         logger.info("Checked and migrated default subagents.")
+
+    # On installs where the model_provider/model_type columns were added by the
+    # ALTER TABLE above before their defaults were corrected to 'ollama'/'local',
+    # the column's *stored* SQLite default is still the old 'openrouter'/'external'
+    # — a bare INSERT that omits these columns silently inherits that stale
+    # default, not whatever this file currently declares. Force newly-seeded
+    # agents that should run locally back onto the correct default explicitly.
+    cursor.execute(
+        "UPDATE subagents SET model_provider = 'ollama', model_type = 'local' "
+        "WHERE id = 'web_dev' AND model_provider != 'ollama'"
+    )
 
     # Create subagent memory table
     cursor.execute("""
@@ -490,6 +527,18 @@ def _init_sqlite_schema():
     cursor.execute("""
         INSERT OR IGNORE INTO app_settings (key, value)
         VALUES ('language', 'ru')
+    """)
+
+    # Dashboard-managed integration secrets (Serper, OpenWeatherMap, Todoist,
+    # Stability AI, etc.) — a UI-friendly alternative to editing the server's
+    # .env by hand. tools.py's _env() checks this table when the matching
+    # env var isn't set (see set_api_key/get_api_key below).
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS api_keys (
+            key_name TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
     """)
 
     cursor.execute("""
@@ -696,6 +745,9 @@ def _init_postgres_schema():
             ("x", "INTEGER DEFAULT 100"),
             ("y", "INTEGER DEFAULT 100"),
             ("temperature", "REAL DEFAULT 0.7"),
+            ("budget_usd_limit", "REAL"),
+            ("budget_period", "TEXT DEFAULT 'monthly'"),
+            ("tier_id", "TEXT"),
         ]:
             cursor.execute(
                 "SELECT 1 FROM information_schema.columns WHERE table_name='subagents' AND column_name=%s",
@@ -765,8 +817,8 @@ def _init_postgres_schema():
 def _get_default_agents(default_model: str) -> list:
     return [
         (
-            "jarvis", "Jarvis (Main)",
-            "You are Jarvis, a highly intelligent AI orchestrator. Your job is to understand the user's request and delegate it to the most appropriate sub-agent. Be concise, efficient, and always explain which agent you are routing to.",
+            "jarvis", "Vexa (Main)",
+            "You are Vexa, a highly intelligent AI orchestrator. Your job is to understand the user's request and delegate it to the most appropriate sub-agent. Be concise, efficient, and always explain which agent you are routing to.",
             default_model, "orchestrator", None, "", 100, 350
         ),
         (
@@ -866,8 +918,8 @@ def _migrate_existing_subagents_postgres(cursor):
 
 def _get_default_agents_migrations() -> list:
     return [
-        ("jarvis", "Jarvis (Main)",
-         "You are Jarvis, a highly intelligent AI orchestrator. Your job is to understand the user's request and delegate it to the most appropriate sub-agent. Be concise, efficient, and always explain which agent you are routing to.",
+        ("jarvis", "Vexa (Main)",
+         "You are Vexa, a highly intelligent AI orchestrator. Your job is to understand the user's request and delegate it to the most appropriate sub-agent. Be concise, efficient, and always explain which agent you are routing to.",
          "orchestrator", None, "", 100, 350),
         ("research", "Search Agent",
          "You are a Research Agent. Use web_search to find accurate, up-to-date information. Always cite sources and summarize findings clearly. You can also check weather and fetch RSS news digests.",
@@ -956,6 +1008,21 @@ def save_user_memory(key: str, value: str, session_id: str = "global", source: s
         return memory_id
     except Exception as e:
         logger.error(f"Error saving user memory: {e}")
+        return None
+
+def get_preferred_address() -> Optional[str]:
+    """Returns the user's remembered preferred name/address form, if any agent has learned it yet."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT value FROM user_memory WHERE key = 'preferred_address' ORDER BY updated_at DESC LIMIT 1"
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row[0].strip() if row and row[0] else None
+    except Exception as e:
+        logger.error(f"Error reading preferred address: {e}")
         return None
 
 def search_user_memory(query: str, session_id: str = "global", limit: int = 4) -> List[Dict[str, Any]]:
@@ -1193,6 +1260,9 @@ def save_subagent(
     model_provider: str = "ollama",
     model_type: str = "local",
     model_params: Optional[Dict[str, Any]] = None,
+    budget_usd_limit: Optional[float] = None,
+    budget_period: str = "monthly",
+    tier_id: Optional[str] = None,
 ):
     """Saves or updates a subagent's configuration in the database."""
     try:
@@ -1203,10 +1273,10 @@ def save_subagent(
             INSERT INTO subagents (
                 id, name, system_prompt, model, agent_type, parent_id, skills, x, y,
                 temperature, role, status, is_enabled, model_provider, model_type,
-                model_params, updated_at
-            ) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(id) DO UPDATE SET 
+                model_params, budget_usd_limit, budget_period, tier_id, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name,
                 system_prompt=excluded.system_prompt,
                 model=excluded.model,
@@ -1222,11 +1292,14 @@ def save_subagent(
                 model_provider=excluded.model_provider,
                 model_type=excluded.model_type,
                 model_params=excluded.model_params,
+                budget_usd_limit=excluded.budget_usd_limit,
+                budget_period=excluded.budget_period,
+                tier_id=excluded.tier_id,
                 updated_at=CURRENT_TIMESTAMP
         """, (
             id, name, system_prompt, model, agent_type, parent_id, skills, x, y,
             temperature, role, status, 1 if is_enabled else 0, model_provider,
-            model_type, model_params_json
+            model_type, model_params_json, budget_usd_limit, budget_period or "monthly", tier_id
         ))
         conn.commit()
         conn.close()
@@ -1240,7 +1313,8 @@ def get_subagent(id: str) -> Optional[Dict[str, Any]]:
         rows = _execute("""
             SELECT id, name, system_prompt, model, created_at, agent_type, parent_id, skills,
                    x, y, temperature, role, status, is_enabled, model_provider, model_type,
-                   model_params, current_task, last_action, last_error, progress, updated_at
+                   model_params, current_task, last_action, last_error, progress, updated_at,
+                   budget_usd_limit, budget_period, tier_id
             FROM subagents WHERE id = ?
         """, (id,))
         if rows:
@@ -1268,6 +1342,9 @@ def get_subagent(id: str) -> Optional[Dict[str, Any]]:
                 "last_error": row[19] or "",
                 "progress": row[20] if row[20] is not None else 0,
                 "updated_at": row[21],
+                "budget_usd_limit": row[22],
+                "budget_period": row[23] or "monthly",
+                "tier_id": row[24],
             }
         return None
     except Exception as e:
@@ -1282,7 +1359,8 @@ def get_all_subagents() -> List[Dict[str, Any]]:
         cursor.execute("""
             SELECT id, name, system_prompt, model, created_at, agent_type, parent_id, skills,
                    x, y, temperature, role, status, is_enabled, model_provider, model_type,
-                   model_params, current_task, last_action, last_error, progress, updated_at
+                   model_params, current_task, last_action, last_error, progress, updated_at,
+                   budget_usd_limit, budget_period, tier_id
             FROM subagents ORDER BY id ASC
         """)
         rows = cursor.fetchall()
@@ -1311,6 +1389,9 @@ def get_all_subagents() -> List[Dict[str, Any]]:
                 "last_error": r[19] or "",
                 "progress": r[20] if r[20] is not None else 0,
                 "updated_at": r[21],
+                "budget_usd_limit": r[22],
+                "budget_period": r[23] or "monthly",
+                "tier_id": r[24],
             }
             for r in rows
         ]
@@ -1329,6 +1410,52 @@ def delete_subagent(id: str) -> bool:
         logger.error(f"Error deleting subagent {id}: {e}")
         return False
 
+def get_agent_usage_usd(agent_id: str, since_iso: Optional[str] = None) -> float:
+    """Sums decision_logs.cost_usd for one agent, optionally since a given
+    'YYYY-MM-DD HH:MM:SS' timestamp (decision_logs.timestamp is lexicographically
+    sortable in that fixed format, so a plain string comparison works)."""
+    try:
+        if since_iso:
+            rows = _execute(
+                "SELECT COALESCE(SUM(cost_usd), 0) FROM decision_logs WHERE agent_id = ? AND timestamp >= ?",
+                (agent_id, since_iso),
+            )
+        else:
+            rows = _execute(
+                "SELECT COALESCE(SUM(cost_usd), 0) FROM decision_logs WHERE agent_id = ?",
+                (agent_id,),
+            )
+        return float(rows[0][0]) if rows else 0.0
+    except Exception as e:
+        logger.error(f"Error summing usage for agent {agent_id}: {e}")
+        return 0.0
+
+
+def get_agent_budget_status(agent_id: str) -> Dict[str, Any]:
+    """Combines a subagent's configured budget_usd_limit/budget_period with its
+    actual decision_logs spend to answer 'has this agent hit its limit'."""
+    subagent = get_subagent(agent_id)
+    limit = subagent.get("budget_usd_limit") if subagent else None
+    period = (subagent.get("budget_period") if subagent else None) or "monthly"
+
+    since_iso = None
+    if period == "monthly":
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        since_iso = datetime.now(ZoneInfo("Asia/Jerusalem")).strftime("%Y-%m-01 00:00:00")
+
+    used = get_agent_usage_usd(agent_id, since_iso)
+    exceeded = limit is not None and used >= limit
+    return {
+        "agent_id": agent_id,
+        "budget_usd_limit": limit,
+        "budget_period": period,
+        "used_usd": round(used, 6),
+        "remaining_usd": (round(max(0.0, limit - used), 6) if limit is not None else None),
+        "exceeded": exceeded,
+    }
+
+
 def log_agent_event(
     agent_id: str,
     event_type: str,
@@ -1337,7 +1464,7 @@ def log_agent_event(
     task: str = "",
     metadata: Optional[Dict[str, Any]] = None,
 ):
-    """Stores a visible agent action for the office/admin screens."""
+    """Stores a visible agent action for the admin/activity screens."""
     try:
         from datetime import datetime
         from zoneinfo import ZoneInfo
@@ -1399,7 +1526,7 @@ def update_agent_runtime_state(
     last_error: Optional[str] = None,
     progress: Optional[int] = None,
 ):
-    """Updates runtime-only agent state used by the AI office view."""
+    """Updates runtime-only agent state (current task, last action, progress)."""
     fields = []
     values: List[Any] = []
     for name, value in [
@@ -1424,23 +1551,6 @@ def update_agent_runtime_state(
         conn.close()
     except Exception as e:
         logger.error(f"Error updating agent runtime state for {agent_id}: {e}")
-
-def get_agent_office_state() -> Dict[str, Any]:
-    """Returns agents with their latest visible events for the live office screen."""
-    agents = get_all_subagents()
-    if not agents:
-        logger.warning("Office state requested with no subagents present. Re-running DB initialization.")
-        init_db()
-        agents = get_all_subagents()
-    return {
-        "agents": [
-            {
-                **agent,
-                "recent_events": get_agent_events(agent["id"], limit=5),
-            }
-            for agent in agents
-        ]
-    }
 
 def db_save_subagent_memory(subagent_id: str, key: str, value: str):
     """Saves or updates a memory fact (key-value pair) for a specific subagent."""
@@ -1504,6 +1614,48 @@ def set_setting(key: str, value: str) -> bool:
     except Exception as e:
         logger.error(f"Error setting {key}: {e}")
         return False
+
+# ─── DASHBOARD-MANAGED API KEYS ─────────────────────────────────────────────
+
+def get_api_key(key_name: str) -> Optional[str]:
+    """Returns a dashboard-configured secret value by name, or None if unset."""
+    try:
+        rows = _execute("SELECT value FROM api_keys WHERE key_name = ?", (key_name,))
+        return rows[0][0] if rows else None
+    except Exception as e:
+        logger.error(f"Error getting api_key {key_name}: {e}")
+        return None
+
+def set_api_key(key_name: str, value: str) -> bool:
+    """Saves or updates a dashboard-configured secret."""
+    try:
+        _execute(
+            "INSERT INTO api_keys (key_name, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(key_name) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP",
+            (key_name, value),
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error setting api_key {key_name}: {e}")
+        return False
+
+def delete_api_key(key_name: str) -> bool:
+    """Removes a dashboard-configured secret (a matching env var, if any, still applies)."""
+    try:
+        _execute("DELETE FROM api_keys WHERE key_name = ?", (key_name,))
+        return True
+    except Exception as e:
+        logger.error(f"Error deleting api_key {key_name}: {e}")
+        return False
+
+def list_configured_api_keys() -> List[str]:
+    """Returns the names (never the values) of all dashboard-configured secrets."""
+    try:
+        rows = _execute("SELECT key_name FROM api_keys")
+        return [r[0] for r in rows]
+    except Exception as e:
+        logger.error(f"Error listing api_keys: {e}")
+        return []
 
 # ─── SESSION METADATA HELPERS ──────────────────────────────────────────────────
 

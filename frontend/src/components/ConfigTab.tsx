@@ -1,8 +1,121 @@
 import React, { useState, useEffect } from 'react';
-import { Cpu, Shield, Activity, Database, Globe, Server, Zap } from 'lucide-react';
+import { Cpu, Shield, Activity, Database, Globe, Server, Zap, KeyRound } from 'lucide-react';
 import { styles } from '../styles';
 import type { SystemConfig } from '../types';
 import { OllamaManager } from './OllamaManager';
+
+function authHeaders(): Record<string, string> {
+  const token = localStorage.getItem('jarvis_auth_token');
+  return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+}
+
+/** Self-contained "change admin password" form — used by password-based login on the auth screen. */
+function AdminPasswordSection() {
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newUsername, setNewUsername] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [status, setStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
+  const [message, setMessage] = useState('');
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setMessage('');
+    if (newPassword !== confirmPassword) {
+      setStatus('error');
+      setMessage('New passwords do not match.');
+      return;
+    }
+    setStatus('saving');
+    try {
+      const res = await fetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          current_password: currentPassword || null,
+          new_username: newUsername,
+          new_password: newPassword,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setStatus('success');
+        setMessage('Password updated.');
+        setCurrentPassword('');
+        setNewPassword('');
+        setConfirmPassword('');
+      } else {
+        setStatus('error');
+        setMessage(data.detail || 'Failed to update password.');
+      }
+    } catch {
+      setStatus('error');
+      setMessage('Error connecting to backend.');
+    }
+  };
+
+  return (
+    <div className="glass-panel" style={{ ...styles.configForm, marginBottom: '16px' }}>
+      <div style={styles.formGroup}>
+        <label style={styles.formLabel}>
+          <KeyRound size={16} style={{ color: '#00f0ff' }} />
+          <span>Dashboard login (username &amp; password)</span>
+        </label>
+        <span style={styles.formHelp}>
+          Set or change the username and password used to sign in without Telegram. Leave "current password" blank the first time you set this up.
+        </span>
+      </div>
+      <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '8px' }}>
+        <input
+          type="password"
+          className="form-input"
+          placeholder="Current password (leave blank on first setup)"
+          value={currentPassword}
+          onChange={e => setCurrentPassword(e.target.value)}
+          autoComplete="current-password"
+        />
+        <input
+          type="text"
+          className="form-input"
+          placeholder="New username"
+          value={newUsername}
+          onChange={e => setNewUsername(e.target.value)}
+          autoComplete="username"
+          required
+        />
+        <input
+          type="password"
+          className="form-input"
+          placeholder="New password (min. 8 characters)"
+          value={newPassword}
+          onChange={e => setNewPassword(e.target.value)}
+          autoComplete="new-password"
+          minLength={8}
+          required
+        />
+        <input
+          type="password"
+          className="form-input"
+          placeholder="Confirm new password"
+          value={confirmPassword}
+          onChange={e => setConfirmPassword(e.target.value)}
+          autoComplete="new-password"
+          minLength={8}
+          required
+        />
+        {message && (
+          <span style={{ fontSize: '0.85rem', color: status === 'success' ? '#10b981' : '#ef4444' }}>
+            {status === 'success' ? '✓ ' : '⚠️ '}{message}
+          </span>
+        )}
+        <button type="submit" className="btn-primary" disabled={status === 'saving'} style={{ alignSelf: 'flex-start' }}>
+          <KeyRound size={16} />
+          <span>{status === 'saving' ? 'Saving...' : 'Update credentials'}</span>
+        </button>
+      </form>
+    </div>
+  );
+}
 
 const LANGUAGES = [
   { code: 'ru', label: '🇷🇺 Russian' },
@@ -128,6 +241,8 @@ export function ConfigTab({
           </span>
         </div>
       </div>
+
+      <AdminPasswordSection />
 
       <form onSubmit={handleSaveConfig} style={styles.configForm} className="glass-panel">
         <div className="provider-config-grid">
@@ -297,6 +412,18 @@ export function ConfigTab({
                 type="checkbox"
                 checked={boolValue('auto_rag', false)}
                 onChange={e => updateRuntime({ auto_rag: e.target.checked })}
+              />
+            </label>
+
+            <label style={toggleRowStyle}>
+              <span>
+                <strong>Telegram voice replies</strong>
+                <span style={{ ...styles.formHelp, display: 'block' }}>Send a spoken voice message alongside every text reply in Telegram.</span>
+              </span>
+              <input
+                type="checkbox"
+                checked={boolValue('telegram_voice_replies', false)}
+                onChange={e => updateRuntime({ telegram_voice_replies: e.target.checked })}
               />
             </label>
           </div>

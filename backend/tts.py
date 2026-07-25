@@ -18,9 +18,24 @@ def _tts_config() -> Dict[str, Any]:
         "piper_model": os.getenv("VOICE_TTS_PIPER_MODEL", "").strip(),
         "rhvoice_binary": os.getenv("VOICE_TTS_RHVOICE_BINARY", "RHVoice-test").strip() or "RHVoice-test",
         "voice": os.getenv("VOICE_TTS_VOICE", "").strip(),
+        # RHVoice's Russian voices mangle English text (and vice versa) — a second,
+        # English-language voice lets synthesize_speech auto-pick per reply instead of
+        # always using the Russian one. rhvoice-english must be installed (Dockerfile).
+        "voice_en": os.getenv("VOICE_TTS_VOICE_EN", "slt").strip(),
         "timeout_seconds": max(2, int(os.getenv("VOICE_TTS_TIMEOUT_SECONDS", "30"))),
         "max_chars": max(200, int(os.getenv("VOICE_TTS_MAX_CHARS", "4000"))),
     }
+
+
+def _detect_voice_for_text(text: str, config: Dict[str, Any]) -> str:
+    """Pick the Russian or English default voice based on the dominant script in
+    `text`, so an English reply isn't read with the Russian phonetic engine (which
+    RHVoice will otherwise attempt, producing a mangled/transliterated result)."""
+    cyrillic = sum(1 for ch in text if "Ѐ" <= ch <= "ӿ")
+    latin = sum(1 for ch in text if "a" <= ch.lower() <= "z")
+    if latin > cyrillic and config.get("voice_en"):
+        return config["voice_en"]
+    return config["voice"]
 
 
 def _binary_available(binary: str) -> bool:
@@ -101,7 +116,9 @@ def synthesize_speech(text: str, output_path: str, voice: Optional[str] = None, 
         raise VoiceSynthesisError("No configured local TTS provider is ready.")
 
     output = str(Path(output_path).resolve())
-    selected_voice = (voice or config["voice"]).strip()
+    # An explicit `voice` argument (e.g. picked in Settings) always wins; otherwise
+    # auto-pick the Russian or English default based on the text itself.
+    selected_voice = (voice or _detect_voice_for_text(clean_text, config)).strip()
     if provider == "piper":
         command = [
             config["piper_binary"],
