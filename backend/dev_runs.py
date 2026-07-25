@@ -205,6 +205,7 @@ async def _plan(run: Dict[str, Any]) -> Dict[str, Any]:
     run = update_run(run["id"], plan_id=plan["id"], status="running")
     titles = "; ".join(step.get("title", step.get("id", "?")) for step in plan["steps"])
     add_step(run["id"], "plan", "", f"Plan {plan['id']} ({plan['tier']}): {titles}"[:1000])
+    await _emit_event(run["id"], "running", f"Plan ready: {titles}", "started")
     return run
 
 
@@ -224,6 +225,52 @@ def _plan_context(plan_id: Optional[str]) -> str:
         lines.append(f"- [{step.get('id')}] {step.get('title', '')}"
                      + (f" — acceptance: {acceptance}" if acceptance else ""))
     return "\n".join(lines)
+
+
+# ── Run events (WebSocket + Telegram owner notifications) ────────────────────
+
+RUN_EVENTS = ("started", "phase_done", "awaiting_approval", "done", "failed", "budget_80")
+
+
+async def _notify_owner_telegram(payload: Dict[str, Any]) -> None:
+    """Sends the event to the owner chat via the main bot (same owner-chat
+    pattern as Control Plane approval notifications)."""
+    import backend.bot as bot
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").split(",")[0].strip()
+    if not chat_id or not getattr(bot, "telegram_app", None) or not bot.telegram_app.bot:
+        return
+    icon = {"awaiting_approval": "⏳", "done": "✅", "failed": "❌", "budget_80": "⚠️"}.get(payload["event"], "🛠️")
+    text = (f"{icon} Dev-run {payload['run_id']}: {payload['event']} (status: {payload['status']})\n"
+            f"{payload['summary']}")
+    await bot.telegram_app.bot.send_message(chat_id=int(chat_id), text=text)
+
+
+async def _emit_event(run_id: str, status: str, summary: str, event: str) -> None:
+    """Broadcasts a dev-run event to all dashboard clients and the owner's
+    Telegram. Payload carries only a capped summary — never prompts or args."""
+    payload = {
+        "type": "dev_run_event",
+        "run_id": run_id,
+        "status": status,
+        "event": event,
+        "summary": (summary or "")[:200],
+    }
+    try:
+        from backend.websocket_manager import manager
+        await manager.broadcast(payload)
+    except Exception as exc:
+        logger.debug("Dev-run event broadcast failed: %s", exc)
+    try:
+        await _notify_owner_telegram(payload)
+    except Exception as exc:
+        logger.warning("Dev-run Telegram notification failed: %s", exc)
+
+
+def _crossed_80_percent(used_before: float, used_after: float, budget: Optional[float]) -> bool:
+    if not budget or budget <= 0:
+        return False
+    threshold = 0.8 * budget
+    return used_before < threshold <= used_after
 
 
 # ── Verification gate before push ────────────────────────────────────────────
@@ -289,6 +336,7 @@ async def _gate_push(run: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
     if not failed:
         add_step(run["id"], "verify", "dev_run_tests", "Verification passed; push permitted.")
         _remember_verification(run, "passed", f"Test runner: {result.get('runner', 'auto')}.")
+        await _emit_event(run["id"], run["status"], "Verification passed; pushing.", "phase_done")
         return True, run
 
     detail = (result.get("error") or result.get("stderr") or result.get("stdout") or "unknown failure")
@@ -313,6 +361,9 @@ async def _gate_push(run: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
                               f"Last failure: {str(detail)[:300]}")
         run = update_run(run["id"], status="awaiting_approval",
                          status_reason=f"Verification failed {attempts}x; owner override task {review['id']}")
+        await _emit_event(run["id"], "awaiting_approval",
+                          f"Tests failing after {attempts} attempts; override task {review['id']} awaits owner.",
+                          "awaiting_approval")
         return False, run
     return False, get_run(run["id"])  # type: ignore[return-value]
 
@@ -398,11 +449,17 @@ async def _iterate(run: Dict[str, Any]) -> Dict[str, Any]:
         provider_options=config["provider_options"],
     )
     cost_delta = float(response.usage.cost or 0.0)
+    iter_before, cost_before = run["iter_used"], run["cost_used"]
     run = update_run(
         run["id"],
-        iter_used=run["iter_used"] + 1,
-        cost_used=run["cost_used"] + cost_delta,
+        iter_used=iter_before + 1,
+        cost_used=cost_before + cost_delta,
     )
+    if _crossed_80_percent(iter_before, run["iter_used"], run["iter_budget"]) or \
+            _crossed_80_percent(cost_before, run["cost_used"], run["cost_budget"]):
+        await _emit_event(run["id"], run["status"],
+                          f"Budget 80% reached: iterations {run['iter_used']}/{run['iter_budget']}, "
+                          f"cost ${run['cost_used']:.4f}", "budget_80")
 
     if response.has_tool_calls:
         call = response.tool_calls[0]
@@ -432,8 +489,12 @@ async def _iterate(run: Dict[str, Any]) -> Dict[str, Any]:
             add_step(run["id"], "act", tool_name,
                      f"Queued in Control Plane as {result.get('task_id')} ({result.get('risk_class')})",
                      "awaiting_approval")
-            return update_run(run["id"], status="awaiting_approval",
-                              status_reason=f"Control Plane approval required: {result.get('task_id')}")
+            run = update_run(run["id"], status="awaiting_approval",
+                             status_reason=f"Control Plane approval required: {result.get('task_id')}")
+            await _emit_event(run["id"], "awaiting_approval",
+                              f"Tool {tool_name} requires owner approval ({result.get('task_id')})",
+                              "awaiting_approval")
+            return run
         error = result.get("error") if isinstance(result, dict) else None
         summary = str(error) if error else json.dumps(result, ensure_ascii=False)[:400]
         add_step(run["id"], "act", tool_name, summary[:400], "failed" if error else "done")
@@ -442,10 +503,14 @@ async def _iterate(run: Dict[str, Any]) -> Dict[str, Any]:
     text = (response.content or "").strip()
     if text.startswith("DONE:"):
         add_step(run["id"], "observe", "", text[:1000])
-        return update_run(run["id"], status="done", status_reason="")
+        run = update_run(run["id"], status="done", status_reason="")
+        await _emit_event(run["id"], "done", text, "done")
+        return run
     if text.startswith("BLOCKED:"):
         add_step(run["id"], "observe", "", text[:1000], "failed")
-        return update_run(run["id"], status="failed", status_reason=text[:500])
+        run = update_run(run["id"], status="failed", status_reason=text[:500])
+        await _emit_event(run["id"], "failed", text, "failed")
+        return run
     if not response.is_success:
         add_step(run["id"], "observe", "",
                  f"LLM error: {response.status} {response.error_message or ''}"[:400], "failed")
