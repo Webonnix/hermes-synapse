@@ -216,6 +216,109 @@ async def test_blocked_reply_fails_run(runs_db, scripted_llm, template_plan):
     assert "BLOCKED" in result["status_reason"]
 
 
+# ── Verification gate before push (Phase 3) ───────────────────────────────────
+
+class _GovernedWithTests:
+    """Governed-tool mock where dev_run_tests results are scripted."""
+
+    def __init__(self, test_results):
+        self.test_results = list(test_results)
+        self.calls = []
+
+    def __call__(self, tool_name, arguments, chat_id="default", **kwargs):
+        self.calls.append(tool_name)
+        if tool_name == "dev_run_tests":
+            result = self.test_results.pop(0) if self.test_results else {"exit_code": 0}
+            return json.dumps(result)
+        return json.dumps({"status": "ok", "tool": tool_name})
+
+
+_FAILING = {"exit_code": 1, "stdout": "", "stderr": "2 failed, 1 passed", "timed_out": False}
+_PASSING = {"exit_code": 0, "stdout": "3 passed", "stderr": "", "timed_out": False}
+
+
+@pytest.mark.asyncio
+async def test_push_is_allowed_only_after_tests_pass(runs_db, scripted_llm, template_plan, monkeypatch):
+    governed = _GovernedWithTests([_PASSING])
+    monkeypatch.setattr(dev_runs, "execute_governed_tool", governed)
+    scripted_llm["script"] = [
+        _llm_tool("git_push", {}),
+        _llm_text("DONE: pushed"),
+    ]
+    run = dev_runs.create_run("push my change")
+    result = await dev_runs.process_run(run["id"])
+    assert result["status"] == "done"
+    # Verification ran BEFORE the push reached the governed executor.
+    assert governed.calls == ["dev_run_tests", "git_push"]
+    verify_steps = [s for s in dev_runs.get_steps(run["id"]) if s["phase"] == "verify"]
+    assert verify_steps and verify_steps[0]["status"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_push_after_failed_tests_is_blocked_and_feeds_context(runs_db, scripted_llm, template_plan, monkeypatch):
+    governed = _GovernedWithTests([_FAILING])
+    monkeypatch.setattr(dev_runs, "execute_governed_tool", governed)
+    scripted_llm["script"] = [
+        _llm_tool("git_push", {}),
+        _llm_text("DONE: will fix tests first"),
+    ]
+    run = dev_runs.create_run("push my change")
+    result = await dev_runs.process_run(run["id"])
+    assert "git_push" not in governed.calls  # push blocked
+    steps = dev_runs.get_steps(run["id"])
+    failed_verify = [s for s in steps if s["phase"] == "verify" and s["status"] == "failed"]
+    assert failed_verify and "2 failed" in failed_verify[0]["summary"]
+    assert result["status"] == "done"  # run itself continues (model chose to stop)
+
+
+@pytest.mark.asyncio
+async def test_three_failures_escalate_to_r3_then_approve_unblocks_push(
+    runs_db, scripted_llm, template_plan, monkeypatch
+):
+    governed = _GovernedWithTests([_FAILING, _FAILING, _FAILING])
+    monkeypatch.setattr(dev_runs, "execute_governed_tool", governed)
+    scripted_llm["script"] = [_llm_tool("git_push", {})] * 3
+    run = dev_runs.create_run("push my change")
+
+    result = await dev_runs.process_run(run["id"])
+    assert result["status"] == "awaiting_approval"
+    assert "override task" in result["status_reason"]
+    assert governed.calls.count("dev_run_tests") == 3
+    assert "git_push" not in governed.calls
+
+    # A durable R3 review task exists in the Control Plane.
+    pending = [t for t in control_plane.list_tasks(status="awaiting_approval")
+               if t["risk_class"] == "R3" and run["id"] in (t.get("requester") or "")]
+    assert len(pending) == 1
+    override_task = pending[0]
+    assert "owner override" in override_task["goal"]
+
+    # Owner approves the override → resumed run pushes without re-running tests.
+    control_plane.approve_task(override_task["id"])
+    dev_runs.resume_run(run["id"])
+    scripted_llm["script"] = [_llm_tool("git_push", {}), _llm_text("DONE: pushed with override")]
+    final = await dev_runs.process_run(run["id"])
+    assert final["status"] == "done"
+    assert governed.calls[-1] == "git_push"
+    override_steps = [s for s in dev_runs.get_steps(run["id"])
+                      if s["phase"] == "verify" and "override" in s["summary"].lower()]
+    assert override_steps
+
+
+@pytest.mark.asyncio
+async def test_verification_verdicts_are_remembered_in_project_memory(
+    runs_db, scripted_llm, template_plan, monkeypatch
+):
+    governed = _GovernedWithTests([_PASSING])
+    monkeypatch.setattr(dev_runs, "execute_governed_tool", governed)
+    scripted_llm["script"] = [_llm_tool("git_push", {}), _llm_text("DONE: pushed")]
+    run = dev_runs.create_run("push my change")
+    await dev_runs.process_run(run["id"])
+    entries = autonomy.recent_project_entries(limit=10)
+    verdicts = [e for e in entries if e["kind"] == "verification" and run["id"] in e["title"]]
+    assert verdicts and "passed" in verdicts[0]["title"]
+
+
 # ── LLM planner with schema validation and retry ──────────────────────────────
 
 _VALID_PLAN_JSON = json.dumps({
