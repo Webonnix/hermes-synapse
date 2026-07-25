@@ -593,6 +593,34 @@ async def _process_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         "logs": DECISION_LOGS[:20]  # Send last 20 logs
     })
 
+# Owner text commands for dev-runs: «пауза run-xxxx» / «отмена run-xxxx»
+# (approve/reject for the escalated Control Plane tasks already work via /approve).
+_DEV_RUN_TEXT_COMMAND = re.compile(
+    r"^\s*(пауза|отмена|pause|cancel)\s+(run-[0-9a-f]{6,})\s*$", re.IGNORECASE
+)
+
+
+async def _try_dev_run_command(update: Update, text: str) -> bool:
+    """Handles a dev-run pause/cancel text command. Returns True when handled."""
+    match = _DEV_RUN_TEXT_COMMAND.match(text or "")
+    if not match:
+        return False
+    action, run_id = match.group(1).lower(), match.group(2)
+    from backend import dev_runs
+    try:
+        if action in ("пауза", "pause"):
+            run = await asyncio.to_thread(dev_runs.pause_run, run_id, "Paused by owner via Telegram")
+        else:
+            run = await asyncio.to_thread(dev_runs.cancel_run, run_id, "Cancelled by owner via Telegram")
+        await _reply_text(update, f"Dev-run {run_id}: статус теперь «{run['status']}».")
+    except KeyError:
+        await _reply_text(update, f"Dev-run {run_id} не найден.")
+    except Exception:
+        logger.exception("Dev-run text command failed for %s", run_id)
+        await _reply_text(update, f"Не удалось выполнить команду для {run_id}. Подробности в логах сервера.")
+    return True
+
+
 @admin_only
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Processes any text message, runs agent loop, sends response, and broadcasts to dashboard."""
@@ -601,6 +629,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not update.message or not update.message.text:
+        return
+
+    if await _try_dev_run_command(update, update.message.text):
         return
 
     await _run_user_request(update, context, update.message.text)
