@@ -389,9 +389,8 @@ export function VexaCommandCenter({
   const recentSessions = chatSessions.slice(0, 12);
   const phase = phaseFor(isConnected, micState, isGenerating, isSpeaking);
   const secureMicrophone = window.isSecureContext;
-  const audioAnalyserRef = useRef<VexaAudioAnalyser | null>(null);
-  if (!audioAnalyserRef.current) audioAnalyserRef.current = new VexaAudioAnalyser(micStreamRef, ttsAudioElRef);
-  useEffect(() => () => audioAnalyserRef.current?.dispose(), []);
+  const [audioAnalyser] = useState(() => new VexaAudioAnalyser(micStreamRef, ttsAudioElRef));
+  useEffect(() => () => audioAnalyser.dispose(), [audioAnalyser]);
   const [energyCoreReady, setEnergyCoreReady] = useState(false);
 
   const conversation = useMemo(() => {
@@ -524,10 +523,10 @@ export function VexaCommandCenter({
   return (
     <section className={`vexa-command-center is-${phase}${energyCoreReady ? ' is-energy-ready' : ''}`} aria-label={copy.subtitle}>
       <div className="vexa-backdrop" aria-hidden="true" />
-      <VexaCoreAnimation phase={phase} audioAnalyser={audioAnalyserRef.current} pulseKey={conversation.answerKey} />
+      <VexaCoreAnimation phase={phase} audioAnalyser={audioAnalyser} pulseKey={conversation.answerKey} />
       <Suspense fallback={null}>
         <div className="vexa-energy-core-layer">
-          <VexaEnergyCore phase={phase} audioAnalyser={audioAnalyserRef.current} pulseKey={conversation.answerKey} onReady={() => setEnergyCoreReady(true)} />
+          <VexaEnergyCore phase={phase} audioAnalyser={audioAnalyser} pulseKey={conversation.answerKey} onReady={() => setEnergyCoreReady(true)} />
         </div>
       </Suspense>
       <div className="vexa-core-frame" aria-hidden="true">
