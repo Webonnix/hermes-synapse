@@ -319,6 +319,124 @@ async def test_verification_verdicts_are_remembered_in_project_memory(
     assert verdicts and "passed" in verdicts[0]["title"]
 
 
+# ── Run events and Telegram commands (Phase 4) ────────────────────────────────
+
+class _EventCollector:
+    def __init__(self, monkeypatch):
+        from backend import websocket_manager
+        self.ws_events = []
+        self.telegram_messages = []
+
+        async def fake_broadcast(payload):
+            if payload.get("type") == "dev_run_event":
+                self.ws_events.append(payload)
+
+        monkeypatch.setattr(websocket_manager.manager, "broadcast", fake_broadcast)
+
+        import backend.bot as bot
+
+        collector = self
+
+        class _FakeBot:
+            async def send_message(self, chat_id, text, **kwargs):
+                collector.telegram_messages.append((chat_id, text))
+
+        class _FakeApp:
+            bot = _FakeBot()
+
+        monkeypatch.setattr(bot, "telegram_app", _FakeApp())
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+
+
+@pytest.fixture()
+def event_collector(monkeypatch):
+    return _EventCollector(monkeypatch)
+
+
+@pytest.mark.asyncio
+async def test_awaiting_approval_event_reaches_websocket_and_mock_bot(
+    runs_db, scripted_llm, template_plan, event_collector, monkeypatch
+):
+    def fake_governed(tool_name, arguments, chat_id="default", **kwargs):
+        return json.dumps({"status": "awaiting_approval", "task_id": "T-777", "risk_class": "R2"})
+
+    monkeypatch.setattr(dev_runs, "execute_governed_tool", fake_governed)
+    scripted_llm["script"] = [_llm_tool("dev_write_file", {"path": "a.py", "content": "1"})]
+    run = dev_runs.create_run("goal")
+    await dev_runs.process_run(run["id"])
+
+    approval_events = [e for e in event_collector.ws_events if e["event"] == "awaiting_approval"]
+    assert approval_events and approval_events[0]["run_id"] == run["id"]
+    assert approval_events[0]["status"] == "awaiting_approval"
+    assert any("T-777" in text for _, text in event_collector.telegram_messages)
+    assert all(int(chat) == 42 for chat, _ in event_collector.telegram_messages)
+
+
+@pytest.mark.asyncio
+async def test_events_carry_only_capped_summaries(runs_db, scripted_llm, template_plan, event_collector, governed_ok):
+    scripted_llm["script"] = [_llm_text("DONE: " + "x" * 1000)]
+    run = dev_runs.create_run("goal")
+    await dev_runs.process_run(run["id"])
+    assert event_collector.ws_events  # started + done
+    for event in event_collector.ws_events:
+        assert len(event["summary"]) <= 200
+        assert set(event) == {"type", "run_id", "status", "event", "summary"}
+    done_events = [e for e in event_collector.ws_events if e["event"] == "done"]
+    assert done_events and done_events[0]["run_id"] == run["id"]
+
+
+@pytest.mark.asyncio
+async def test_budget_80_event_fires_once_on_crossing(runs_db, scripted_llm, template_plan, event_collector, governed_ok):
+    scripted_llm["script"] = [_llm_tool("dev_exec", {"argv": ["ls"]}) for _ in range(10)]
+    run = dev_runs.create_run("goal", iter_budget=5)
+    await dev_runs.process_run(run["id"])
+    budget_events = [e for e in event_collector.ws_events if e["event"] == "budget_80"]
+    assert len(budget_events) == 1
+    assert "80%" in budget_events[0]["summary"]
+
+
+class _FakeMessage:
+    def __init__(self, text):
+        self.text = text
+        self.replies = []
+
+    async def reply_text(self, text, **kwargs):
+        self.replies.append(text)
+
+
+class _FakeUpdate:
+    def __init__(self, text):
+        self.message = _FakeMessage(text)
+        self.effective_chat = None
+        self.effective_user = None
+
+
+@pytest.mark.asyncio
+async def test_telegram_pause_and_cancel_text_commands(runs_db):
+    from backend import bot
+
+    run = dev_runs.create_run("goal")
+    dev_runs.update_run(run["id"], status="running")
+
+    update = _FakeUpdate(f"пауза {run['id']}")
+    handled = await bot._try_dev_run_command(update, update.message.text)
+    assert handled is True
+    assert dev_runs.get_run(run["id"])["status"] == "paused"
+    assert any("paused" in reply for reply in update.message.replies)
+
+    update2 = _FakeUpdate(f"отмена {run['id']}")
+    assert await bot._try_dev_run_command(update2, update2.message.text) is True
+    assert dev_runs.get_run(run["id"])["status"] == "cancelled"
+
+    unknown = _FakeUpdate("пауза run-aaaaaaaaaaaa")
+    assert await bot._try_dev_run_command(unknown, unknown.message.text) is True
+    assert any("не найден" in reply for reply in unknown.message.replies)
+
+    ordinary = _FakeUpdate("привет, как дела?")
+    assert await bot._try_dev_run_command(ordinary, ordinary.message.text) is False
+    assert ordinary.message.replies == []
+
+
 # ── LLM planner with schema validation and retry ──────────────────────────────
 
 _VALID_PLAN_JSON = json.dumps({
