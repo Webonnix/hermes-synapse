@@ -673,6 +673,161 @@ def build_plan(goal: str, root: Optional[str] = None) -> dict[str, Any]:
     return plan
 
 
+_PLANNER_LLM_PROMPT = """You are the planning module of an autonomous development system.
+Given a development goal, fill in a scout → implement → verify plan.
+
+Output EXCLUSIVELY a JSON object of this exact structure (no prose, no markdown fences):
+{
+  "tier": "scout" | "verify" | "auditor",
+  "capabilities": ["repository_search", "version_control", ...],
+  "steps": [
+    {"id": "discover", "title": "...", "instructions": "...", "expected_output": ["..."], "acceptance": ["..."]},
+    {"id": "implement", "title": "...", "instructions": "...", "expected_output": ["..."], "acceptance": ["..."]},
+    {"id": "verify", "title": "...", "instructions": "...", "expected_output": ["..."], "acceptance": ["..."]}
+  ]
+}
+
+Rules:
+- The three steps discover/implement/verify are mandatory, in that order. Add a
+  fourth step with id "audit" only for large or risky goals (then tier="auditor").
+- capabilities must be a subset of: {capabilities}.
+- Every acceptance item must be an observable, testable condition.
+- Instructions must be concrete and scoped to the stated goal only.
+"""
+
+_STEP_AGENTS = {"discover": "scout", "implement": "implementer", "verify": "verifier", "audit": "auditor"}
+
+
+def _validate_llm_plan(data: Any) -> list[dict[str, Any]]:
+    if not isinstance(data, dict):
+        raise ValueError("Root element must be a JSON object.")
+    steps = data.get("steps")
+    if not isinstance(steps, list) or not steps:
+        raise ValueError("'steps' must be a non-empty list.")
+    ids = [step.get("id") for step in steps if isinstance(step, dict)]
+    if ids[:3] != ["discover", "implement", "verify"]:
+        raise ValueError("Steps must start with discover, implement, verify in order.")
+    if len(steps) > 4 or (len(steps) == 4 and ids[3] != "audit"):
+        raise ValueError("Only an optional final 'audit' step is allowed after verify.")
+    normalized = []
+    for step in steps:
+        if not isinstance(step, dict):
+            raise ValueError("Each step must be a JSON object.")
+        for key in ("title", "instructions"):
+            if not isinstance(step.get(key), str) or not step[key].strip():
+                raise ValueError(f"Step '{step.get('id')}' is missing a non-empty '{key}'.")
+        for key in ("expected_output", "acceptance"):
+            value = step.get(key, [])
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                raise ValueError(f"Step '{step.get('id')}' field '{key}' must be a list of strings.")
+        if not step.get("acceptance"):
+            raise ValueError(f"Step '{step.get('id')}' must declare acceptance criteria.")
+        normalized.append({
+            "id": step["id"],
+            "agent": _STEP_AGENTS[step["id"]],
+            "title": step["title"].strip()[:200],
+            "instructions": step["instructions"].strip()[:2000],
+            "status": "pending",
+            "input": [],
+            "expected_output": [item[:300] for item in step.get("expected_output", [])][:8],
+            "acceptance": [item[:300] for item in step["acceptance"]][:8],
+            "attempts": 0,
+            **({"max_attempts": 3} if step["id"] == "verify" else {}),
+        })
+    return normalized
+
+
+async def build_plan_llm(goal: str, root: Optional[str] = None) -> dict[str, Any]:
+    """LLM-driven replacement for the regex-heuristic planner. Produces the same
+    scout/implement/verify step format with acceptance criteria, validated
+    against a strict schema with up to 3 correction retries; falls back to the
+    deterministic build_plan template when the model cannot produce a valid plan."""
+    from backend.agent import agent_instance
+    from backend.llm_client import call_llm_normalized
+
+    system = _PLANNER_LLM_PROMPT.replace("{capabilities}", ", ".join(sorted(CAPABILITY_REGISTRY)))
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": f"Goal: {goal.strip()[:4000]}"},
+    ]
+    parse_err: Optional[str] = None
+    raw = ""
+    for attempt in range(4):
+        if attempt:
+            messages.append({"role": "assistant", "content": raw})
+            messages.append({"role": "user", "content":
+                             f"Your previous output failed validation: {parse_err}\n"
+                             "Output only corrected, valid JSON matching the schema."})
+        try:
+            response = await call_llm_normalized(
+                api_base=agent_instance.api_base,
+                api_key=agent_instance.api_key,
+                model=agent_instance.model,
+                messages=messages,
+                temperature=0.1,
+                provider_options={
+                    "provider": agent_instance.provider,
+                    "num_ctx": agent_instance.ollama_num_ctx,
+                    "keep_alive": agent_instance.ollama_keep_alive,
+                    "think": agent_instance.ollama_think,
+                },
+            )
+            raw = (response.content or "").strip()
+            if not response.is_success or not raw:
+                raise ValueError(f"LLM returned {response.status}: {response.error_message or 'empty output'}")
+            json_str = raw
+            if json_str.startswith("```"):
+                json_str = re.sub(r"^```(?:json)?\s*|\s*```$", "", json_str)
+            data = json.loads(json_str)
+            steps = _validate_llm_plan(data)
+            capabilities = [item for item in data.get("capabilities", [])
+                            if isinstance(item, str) and item in CAPABILITY_REGISTRY]
+            capabilities = list(dict.fromkeys(["repository_search", "version_control", *capabilities]))
+            tier = data.get("tier") if data.get("tier") in ("scout", "verify", "auditor") else (
+                "auditor" if any(step["id"] == "audit" for step in steps) else "verify"
+            )
+            parse_err = None
+            break
+        except Exception as exc:
+            parse_err = str(exc)
+            logger.warning("LLM plan attempt %d failed validation: %s", attempt, parse_err)
+
+    if parse_err is not None:
+        logger.warning("LLM planning failed after retries; using deterministic template plan.")
+        return build_plan(goal, root=root)
+
+    _init_schema()
+    workspace = resolve_workspace(root)
+    plan = {
+        "id": f"plan-{uuid.uuid4().hex[:12]}",
+        "goal": goal.strip()[:8000],
+        "root": str(workspace),
+        "tier": tier,
+        "status": "planned",
+        "capabilities": capabilities,
+        "steps": steps,
+        "iteration": 0,
+        "created_at": _now(),
+        "updated_at": _now(),
+        "role_contracts": {key: ROLE_CONTRACTS[key] for key in {step["agent"] for step in steps}},
+    }
+    with _connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO autonomy_plans
+                (id, goal, root, tier, status, capabilities, steps, iteration, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                plan["id"], plan["goal"], plan["root"], plan["tier"], plan["status"],
+                json.dumps(capabilities, ensure_ascii=False),
+                json.dumps(steps, ensure_ascii=False),
+                plan["iteration"], plan["created_at"], plan["updated_at"],
+            ),
+        )
+    return plan
+
+
 def save_runtime_plan(goal: str, steps: list[dict[str, Any]], root: Optional[str] = None) -> dict[str, Any]:
     plan = build_plan(goal, root=root)
     normalized = []
