@@ -358,7 +358,7 @@ async def request_code():
             return {"status": "error", "message": "Telegram bot is not initialized."}
     except Exception as e:
         logger.error(f"Failed to send auth code to Telegram: {e}")
-        return {"status": "error", "message": f"Failed to send code: {str(e)}"}
+        return {"status": "error", "message": "Failed to send code. Check server logs."}
 
 @app.post("/api/auth/verify-code")
 async def verify_code(req: AuthVerifyRequest):
@@ -725,8 +725,8 @@ async def upload_file(file: UploadFile = File(...)):
         
         return {"status": "success", "filename": file.filename, "filepath": file_path}
     except Exception as e:
-        logger.error(f"Error uploading file: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
+        logger.exception(f"Error uploading file: {e}")
+        raise HTTPException(status_code=500, detail="Failed to upload file. Check server logs.")
 
 
 @app.get("/api/voice/status")
@@ -886,8 +886,12 @@ async def create_timer_api(task: ScheduledTaskCreate):
             return {"status": "success", "id": reminder_id}
         else:
             return JSONResponse(status_code=400, content={"status": "failed", "error": f"Invalid type: {task.type}"})
-    except Exception as e:
+    except ValueError as e:
+        # Deliberate validation errors raised above — safe to show to the client.
         return JSONResponse(status_code=400, content={"status": "failed", "error": str(e)})
+    except Exception as e:
+        logger.exception(f"Failed to create timer: {e}")
+        return JSONResponse(status_code=500, content={"status": "failed", "error": "Internal error creating timer. Check server logs."})
 
 @app.delete("/api/timers/{timer_id}")
 async def cancel_timer_api(timer_id: str):
@@ -1075,8 +1079,8 @@ async def update_subagent_positions_api(update: SubagentPositionsUpdate):
         conn.close()
         return {"status": "success"}
     except Exception as e:
-        logger.error(f"Error updating positions: {e}")
-        return {"status": "error", "message": str(e)}
+        logger.exception(f"Error updating positions: {e}")
+        return {"status": "error", "message": "Failed to update positions. Check server logs."}
 
 @app.delete("/api/subagents/{subagent_id}")
 async def delete_subagent_api(subagent_id: str):
@@ -1686,7 +1690,8 @@ async def set_session_agent(session_id: str, payload: SessionAgentPayload):
         save_session_metadata(session_id, title, agent_id=payload.agent_id)
         return {"status": "success", "message": f"Session {session_id} target agent set to {payload.agent_id}"}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        logger.exception(f"Failed to set session agent for {session_id}: {e}")
+        return {"status": "error", "message": "Failed to set session agent. Check server logs."}
 
 @app.get("/api/history/{chat_id}")
 async def get_history_api(chat_id: str, limit: int = 40):
@@ -1717,7 +1722,8 @@ async def archive_history_session(session_id: str):
         conn.close()
         return {"status": "success", "message": f"Session {session_id} archived"}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        logger.exception(f"Failed to archive session {session_id}: {e}")
+        return {"status": "error", "message": "Failed to archive session. Check server logs."}
 
 @app.post("/api/history/{session_id}/fork")
 async def fork_history_session(session_id: str):
@@ -1744,7 +1750,8 @@ async def fork_history_session(session_id: str):
         
         return {"status": "success", "new_session_id": new_session_id}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        logger.exception(f"Failed to fork session {session_id}: {e}")
+        return {"status": "error", "message": "Failed to fork session. Check server logs."}
 
 class RenameSessionPayload(BaseModel):
     title: str
@@ -1757,7 +1764,8 @@ async def rename_history_session(session_id: str, payload: RenameSessionPayload)
         save_session_title(session_id, payload.title)
         return {"status": "success", "message": f"Session {session_id} renamed to {payload.title}"}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        logger.exception(f"Failed to rename session {session_id}: {e}")
+        return {"status": "error", "message": "Failed to rename session. Check server logs."}
 
 
 
