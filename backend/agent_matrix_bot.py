@@ -46,6 +46,8 @@ class AgentMatrixBotManager:
         self._clients: Dict[str, AsyncClient] = {}
         self._tasks: Dict[str, asyncio.Task] = {}
         self._allowed_room_ids: Dict[str, List[str]] = {}
+        self._overrides: Dict[str, dict] = {}
+        self._response_modes: Dict[str, str] = {}
 
     def _make_callback(self, binding_id: str, subagent_id: str):
         async def callback(room: MatrixRoom, event: RoomMessageText) -> None:
@@ -70,6 +72,9 @@ class AgentMatrixBotManager:
                 )
                 return
 
+            from backend.agent_messenger_governance import apply_binding_overrides
+            subagent = apply_binding_overrides(subagent, self._overrides.get(binding_id))
+
             from backend.agent import agent_instance
 
             session_id = f"matrixbot:{binding_id}:{room.room_id}"
@@ -80,15 +85,34 @@ class AgentMatrixBotManager:
             except Exception:
                 logger.exception("Agent matrix bot %s: error handling message", binding_id)
                 response_text = "Произошла ошибка при обработке запроса."
-            for chunk in _split_text(response_text):
-                await client.room_send(
-                    room.room_id, message_type="m.room.message", content={"msgtype": "m.text", "body": chunk}
-                )
+
+            mode = self._response_modes.get(binding_id, "draft")
+            if mode == "auto_labeled":
+                from backend.agent_messenger_governance import AUTO_REPLY_DISCLOSURE
+                for chunk in _split_text(response_text + AUTO_REPLY_DISCLOSURE):
+                    await client.room_send(
+                        room.room_id, message_type="m.room.message", content={"msgtype": "m.text", "body": chunk}
+                    )
+                return
+
+            # draft mode: never send anything to the other person automatically —
+            # queue it and let the owner review/send from the dashboard.
+            from backend.channel_replies import create_pending_reply
+            create_pending_reply(
+                binding_id=binding_id,
+                platform="matrix",
+                subagent_id=subagent_id,
+                chat_id=room.room_id,
+                incoming_text=event.body,
+                drafted_reply=response_text,
+                incoming_from=event.sender,
+            )
 
         return callback
 
     async def start(
-        self, binding_id: str, subagent_id: str, credentials: dict, allowed_room_ids: Optional[List[str]] = None
+        self, binding_id: str, subagent_id: str, credentials: dict, allowed_room_ids: Optional[List[str]] = None,
+        overrides: Optional[dict] = None, response_mode: str = "draft",
     ) -> None:
         if binding_id in self._clients:
             return
@@ -103,13 +127,25 @@ class AgentMatrixBotManager:
 
         self._clients[binding_id] = client
         self._allowed_room_ids[binding_id] = list(allowed_room_ids or [])
+        self._overrides[binding_id] = overrides or {}
+        self._response_modes[binding_id] = response_mode
         self._tasks[binding_id] = asyncio.create_task(client.sync_forever(timeout=30000))
-        logger.info("Agent matrix bot started: binding=%s subagent=%s", binding_id, subagent_id)
+        logger.info("Agent matrix bot started: binding=%s subagent=%s mode=%s", binding_id, subagent_id, response_mode)
+
+    def update_live_settings(self, binding_id: str, overrides: Optional[dict], response_mode: str) -> None:
+        """Applies an edited prompt/mode to an already-running bot without restarting
+        its sync loop — called from agent_messenger_governance.update_binding_settings."""
+        if binding_id not in self._clients:
+            return
+        self._overrides[binding_id] = overrides or {}
+        self._response_modes[binding_id] = response_mode
 
     async def stop(self, binding_id: str) -> None:
         task = self._tasks.pop(binding_id, None)
         client = self._clients.pop(binding_id, None)
         self._allowed_room_ids.pop(binding_id, None)
+        self._overrides.pop(binding_id, None)
+        self._response_modes.pop(binding_id, None)
         if task:
             task.cancel()
         if client:
@@ -131,8 +167,16 @@ class AgentMatrixBotManager:
                     "Agent matrix bot %s: active binding has no resolvable credentials, skipping", binding["id"]
                 )
                 continue
+            overrides = {
+                "system_prompt": binding.get("system_prompt_override"),
+                "model": binding.get("model_override"),
+                "model_provider": binding.get("model_provider_override"),
+            }
             try:
-                await self.start(binding["id"], binding["subagent_id"], credentials, binding.get("allowed_chat_ids"))
+                await self.start(
+                    binding["id"], binding["subagent_id"], credentials, binding.get("allowed_chat_ids"),
+                    overrides, binding.get("response_mode") or "draft",
+                )
             except Exception:
                 logger.exception("Failed to start agent matrix bot %s at startup", binding["id"])
 

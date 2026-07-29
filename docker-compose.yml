@@ -40,14 +40,17 @@ services:
       - VOICE_STT_MODEL=${VOICE_STT_MODEL:-small}
       - VOICE_STT_DEVICE=${VOICE_STT_DEVICE:-cpu}
       - VOICE_STT_COMPUTE_TYPE=${VOICE_STT_COMPUTE_TYPE:-int8}
-      - VOICE_STT_LANGUAGE=${VOICE_STT_LANGUAGE:-ru}
+      - VOICE_STT_LANGUAGE=${VOICE_STT_LANGUAGE:-}
       - VOICE_STT_DOWNLOAD_ROOT=/app/backend/data/voice-models
       - VOICE_STT_PRELOAD=${VOICE_STT_PRELOAD:-true}
       - VOICE_TTS_ENABLED=${VOICE_TTS_ENABLED:-true}
-      - VOICE_TTS_PROVIDER=${VOICE_TTS_PROVIDER:-rhvoice}
+      # "auto" tries the multilingual XTTS sidecar first, then Piper, then RHVoice.
+      - VOICE_TTS_PROVIDER=${VOICE_TTS_PROVIDER:-auto}
       - VOICE_TTS_RHVOICE_BINARY=${VOICE_TTS_RHVOICE_BINARY:-RHVoice-test}
       - VOICE_TTS_VOICE=${VOICE_TTS_VOICE:-anna}
       - VOICE_TTS_VOICE_EN=${VOICE_TTS_VOICE_EN:-slt}
+      - VOICE_TTS_XTTS_URL=${VOICE_TTS_XTTS_URL:-http://xtts:8700}
+      - VOICE_TTS_XTTS_TIMEOUT_SECONDS=${VOICE_TTS_XTTS_TIMEOUT_SECONDS:-120}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -96,6 +99,46 @@ services:
       retries: 3
       start_period: 15s
     logging: *default-logging
+
+  # One multilingual voice for Vexa: XTTS-v2 reads both Russian and English with
+  # the same speaker, cloned on first boot from the Piper English voice below.
+  # Deliberately not a backend dependency — if it is down or still loading its
+  # weights, backend/tts.py falls back to Piper/RHVoice instead of blocking boot.
+  xtts:
+    build:
+      context: .
+      dockerfile: xtts/Dockerfile
+    container_name: hermes-xtts
+    restart: unless-stopped
+    # Loopback only: the backend reaches it over hermes-net, the port is published
+    # purely so /health and /speakers can be inspected from the host.
+    ports:
+      - "127.0.0.1:8700:8700"
+    environment:
+      - XTTS_DEVICE=${XTTS_DEVICE:-cuda}
+      # Built-in studio speaker, used only when no Piper reference can be built.
+      - XTTS_SPEAKER=${XTTS_SPEAKER:-Daisy Studious}
+      - XTTS_SPEAKER_WAV=${XTTS_SPEAKER_WAV:-/speakers/vexa-reference.wav}
+      - XTTS_REFERENCE_PIPER_MODEL=${XTTS_REFERENCE_PIPER_MODEL:-/piper-voices/en_US-amy-medium.onnx}
+      - XTTS_DEFAULT_LANGUAGE=${XTTS_DEFAULT_LANGUAGE:-en}
+      - CUDA_VISIBLE_DEVICES=${XTTS_CUDA_VISIBLE_DEVICES:-0}
+      # XTTS-v2 weights are under the Coqui Public Model License (non-commercial);
+      # the downloader refuses to run unattended without this acknowledgement.
+      - COQUI_TOS_AGREED=${COQUI_TOS_AGREED:-1}
+    volumes:
+      - xtts_models:/models
+      - xtts_speakers:/speakers
+      - ./backend/data/piper-voices:/piper-voices:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    logging: *default-logging
+    networks:
+      - hermes-net
 
   frontend:
     build:
@@ -179,3 +222,5 @@ networks:
 volumes:
   qdrant_data:
   ollama_data:
+  xtts_models:
+  xtts_speakers:

@@ -46,7 +46,10 @@ RUN pip install --no-cache-dir \
     "pytest-asyncio==0.25.3" \
     "faster-whisper>=1.1.0" \
     "redis>=5.0.0" \
-    "matrix-nio>=0.24.0"
+    "matrix-nio>=0.24.0" \
+    "discord.py>=2.4.0" \
+    "slack-bolt>=1.20.0" \
+    "piper-tts>=1.6.0"
 
 # Git is a required read-only workspace capability for planning and verification.
 RUN apt-get update && apt-get install -y --no-install-recommends git \

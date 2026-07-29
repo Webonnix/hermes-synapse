@@ -34,8 +34,16 @@ MODE_PRESETS = {
 
 
 def _clean_text_for_speech(text: str) -> str:
-    """Strip Markdown formatting before handing a reply to the TTS engine."""
-    cleaned = re.sub(r'```[\s\S]*?```', ' блок кода. ', text or '')
+    """Strip Markdown formatting before handing a reply to the TTS engine.
+
+    The code-block placeholder is picked to match the reply's dominant script
+    (reusing tts.py's own detection) so an English reply doesn't get a Russian
+    word spoken in the middle of it, and vice versa.
+    """
+    from backend.tts import _is_latin_dominant
+
+    placeholder = ' code block. ' if _is_latin_dominant(text or '') else ' блок кода. '
+    cleaned = re.sub(r'```[\s\S]*?```', placeholder, text or '')
     cleaned = re.sub(r'`([^`]+)`', r'\1', cleaned)
     cleaned = re.sub(r'\*\*(.+?)\*\*', r'\1', cleaned)
     cleaned = re.sub(r'__(.+?)__', r'\1', cleaned)
@@ -251,6 +259,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/status — сервер, GPU, Docker и модель\n"
         "/mode — текущий режим генерации\n"
         "/mode fast|balanced|deep — переключить режим\n"
+        "/voice — текущий формат ответов\n"
+        "/voice text|voice|both — текст / голос / текст + голос\n"
         "/timers — активные таймеры и напоминания\n"
         "/stop <id> — остановить таймер или будильник\n"
         "/approvals — действия, ожидающие подтверждения\n"
@@ -291,6 +301,32 @@ async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "deep": "reasoning включён, максимальный бюджет",
     }
     await _reply_text(update, f"Режим переключён: {mode} — {descriptions[mode]}.")
+
+
+REPLY_MODE_LABELS = {"text": "текст", "voice": "голос", "both": "текст + голос"}
+
+
+@admin_only
+async def voice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed_chat(update):
+        return
+    if not context.args:
+        current = getattr(agent_instance, "telegram_reply_mode", "text")
+        await _reply_text(
+            update,
+            f"Текущий формат ответов: {REPLY_MODE_LABELS.get(current, current)}. "
+            "Доступно: /voice text, /voice voice, /voice both.",
+        )
+        return
+    mode = context.args[0].strip().lower()
+    if mode not in REPLY_MODE_LABELS:
+        await _reply_text(update, "Неизвестный формат. Используй: /voice text, /voice voice или /voice both.")
+        return
+    agent_instance.update_runtime_config(telegram_reply_mode=mode)
+    from backend.database import save_app_settings
+    save_app_settings(agent_instance.get_runtime_config())
+    await manager.broadcast({"type": "config_update", **agent_instance.get_runtime_config()})
+    await _reply_text(update, f"Формат ответов переключён: {REPLY_MODE_LABELS[mode]}.")
 
 
 @admin_only
@@ -476,7 +512,10 @@ async def _process_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await _reply_text(update, text)
 
     plot_matches = re.findall(r'!\[.*?\]\((?:https?://[^/]+)?/api/plots/(plot_[a-f0-9]+\.png)\)', response_text)
-    
+    reply_mode = getattr(agent_instance, "telegram_reply_mode", "text")
+    send_text = reply_mode in ("text", "both")
+    send_voice = reply_mode in ("voice", "both")
+
     # Check if this was a complex query flow (using orchestrator / subagents)
     metadata = agent_instance.last_run_metadata.get(str(chat_id), {})
     is_complex = metadata.get("is_complex", False)
@@ -532,7 +571,8 @@ async def _process_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                         logger.error(f"Failed to send generated photo to Telegram: {send_photo_err}")
     else:
         if plot_matches:
-            await safe_reply(response_text)
+            if send_text:
+                await safe_reply(response_text)
             base_dir = os.path.dirname(os.path.abspath(__file__))
             for plot_file in plot_matches:
                 plot_path = os.path.join(base_dir, "data", "plots", plot_file)
@@ -546,10 +586,10 @@ async def _process_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                             )
                     except Exception as send_photo_err:
                         logger.error(f"Failed to send generated photo to Telegram: {send_photo_err}")
-        else:
+        elif send_text:
             await safe_reply(response_text)
 
-    if getattr(agent_instance, "telegram_voice_replies", False):
+    if send_voice:
         speech_text = _clean_text_for_speech(response_text)
         if speech_text:
             ogg_path = await _synthesize_voice_reply(speech_text)
@@ -779,6 +819,7 @@ async def init_bot() -> Application:
     telegram_app.add_handler(CommandHandler("status", status_command))
     telegram_app.add_handler(CommandHandler("help", help_command))
     telegram_app.add_handler(CommandHandler("mode", mode_command))
+    telegram_app.add_handler(CommandHandler("voice", voice_command))
     telegram_app.add_handler(CommandHandler("timers", timers_command))
     telegram_app.add_handler(CommandHandler("stop", stop_command))
     telegram_app.add_handler(CommandHandler("cancel", cancel_command))
@@ -800,6 +841,7 @@ async def init_bot() -> Application:
         await telegram_app.bot.set_my_commands([
             BotCommand("status", "Сервер, GPU, Docker и модель"),
             BotCommand("mode", "Режим fast / balanced / deep"),
+            BotCommand("voice", "Формат ответов: text / voice / both"),
             BotCommand("timers", "Активные таймеры и напоминания"),
             BotCommand("stop", "Остановить таймер по ID"),
             BotCommand("approvals", "Очередь подтверждений Control Plane"),

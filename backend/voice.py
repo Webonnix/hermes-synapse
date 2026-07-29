@@ -29,7 +29,10 @@ def _voice_config() -> Dict[str, Any]:
         "model": os.getenv("VOICE_STT_MODEL", "small").strip() or "small",
         "device": os.getenv("VOICE_STT_DEVICE", "cpu").strip() or "cpu",
         "compute_type": os.getenv("VOICE_STT_COMPUTE_TYPE", "int8").strip() or "int8",
-        "language": os.getenv("VOICE_STT_LANGUAGE", "ru").strip() or None,
+        # Empty/unset means auto-detect: faster-whisper picks the spoken language
+        # per clip, so Russian and English utterances both transcribe correctly.
+        # Only set this to a fixed code (e.g. "ru") to force one language.
+        "language": os.getenv("VOICE_STT_LANGUAGE", "").strip() or None,
         "download_root": os.getenv("VOICE_STT_DOWNLOAD_ROOT", default_download_root).strip() or default_download_root,
         "beam_size": int(os.getenv("VOICE_STT_BEAM_SIZE", "5")),
         "vad_filter": _env_bool("VOICE_STT_VAD_FILTER", True),

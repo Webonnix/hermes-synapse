@@ -41,7 +41,7 @@ class ConfigUpdate(BaseModel):
     memory_enabled: bool | None = None
     memory_auto_save: bool | None = None
     memory_max_items: int | None = None
-    telegram_voice_replies: bool | None = None
+    telegram_reply_mode: str | None = None
     provider: str | None = None
     api_base: str | None = None
     ollama_base_url: str | None = None
@@ -237,6 +237,15 @@ async def lifespan(app: FastAPI):
     from backend import agent_matrix_bot
     await agent_matrix_bot.manager.start_all_active()
 
+    from backend import agent_discord_bot
+    await agent_discord_bot.manager.start_all_active()
+
+    from backend import agent_slack_bot
+    await agent_slack_bot.manager.start_all_active()
+
+    from backend import agent_email_channel
+    await agent_email_channel.manager.start_all_active()
+
     # Background Obsidian vault sync (non-blocking)
     async def _obsidian_startup_sync():
         try:
@@ -282,6 +291,12 @@ async def lifespan(app: FastAPI):
     await agent_bot.manager.stop_all()
     from backend import agent_matrix_bot
     await agent_matrix_bot.manager.stop_all()
+    from backend import agent_discord_bot
+    await agent_discord_bot.manager.stop_all()
+    from backend import agent_slack_bot
+    await agent_slack_bot.manager.stop_all()
+    from backend import agent_email_channel
+    await agent_email_channel.manager.stop_all()
     await shutdown_bot()
     
     # Stop price alert monitor background task
@@ -640,7 +655,7 @@ async def update_config(update: ConfigUpdate):
         memory_enabled=update.memory_enabled,
         memory_auto_save=update.memory_auto_save,
         memory_max_items=update.memory_max_items,
-        telegram_voice_replies=update.telegram_voice_replies,
+        telegram_reply_mode=update.telegram_reply_mode,
     )
     config = agent_instance.get_runtime_config()
     _models_cache["data"] = None
@@ -1485,10 +1500,10 @@ async def add_provider_api(binding: ProviderBindingRequest):
 
 @app.delete("/api/providers/{binding_id}")
 async def delete_provider_api(binding_id: str):
-    """Revokes a provider binding and deletes its stored API key."""
-    from backend.provider_governance import revoke_binding
+    """Permanently removes a provider binding and its stored API key."""
+    from backend.provider_governance import delete_binding
     try:
-        await asyncio.to_thread(revoke_binding, binding_id)
+        await asyncio.to_thread(delete_binding, binding_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Binding not found")
     return {"status": "success", "id": binding_id}
@@ -1512,6 +1527,8 @@ class AgentTierRequest(BaseModel):
 class AgentTelegramBindingRequest(BaseModel):
     bot_token: str
     allowed_chat_ids: List[str] = Field(default_factory=list)
+    system_prompt: str = ""
+    response_mode: str = "draft"
 
 class AgentMatrixBindingRequest(BaseModel):
     homeserver_url: str
@@ -1519,6 +1536,39 @@ class AgentMatrixBindingRequest(BaseModel):
     password: str = ""
     access_token: str = ""
     allowed_room_ids: List[str] = Field(default_factory=list)
+    system_prompt: str = ""
+    response_mode: str = "draft"
+
+class MessengerBindingUpdateRequest(BaseModel):
+    system_prompt: Optional[str] = None
+    response_mode: Optional[str] = None
+
+class PendingReplySendRequest(BaseModel):
+    edited_text: Optional[str] = None
+
+class AgentDiscordBindingRequest(BaseModel):
+    bot_token: str
+    allowed_channel_ids: List[str] = Field(default_factory=list)
+    system_prompt: str = ""
+    response_mode: str = "draft"
+
+class AgentSlackBindingRequest(BaseModel):
+    bot_token: str
+    app_token: str
+    allowed_channel_ids: List[str] = Field(default_factory=list)
+    system_prompt: str = ""
+    response_mode: str = "draft"
+
+class AgentEmailBindingRequest(BaseModel):
+    imap_host: str
+    imap_port: int = 993
+    smtp_host: str
+    smtp_port: int = 587
+    address: str
+    password: str
+    allowed_senders: List[str] = Field(default_factory=list)
+    system_prompt: str = ""
+    response_mode: str = "draft"
 
 
 @app.get("/api/agents/{agent_id}/usage")
@@ -1596,7 +1646,8 @@ async def create_agent_telegram_binding_api(agent_id: str, payload: AgentTelegra
     from backend.agent_messenger_governance import create_telegram_binding_proposal
     try:
         proposal = await asyncio.to_thread(
-            create_telegram_binding_proposal, agent_id, payload.bot_token, payload.allowed_chat_ids
+            create_telegram_binding_proposal, agent_id, payload.bot_token, payload.allowed_chat_ids,
+            payload.system_prompt, "", "", payload.response_mode,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1633,6 +1684,7 @@ async def create_agent_matrix_binding_api(agent_id: str, payload: AgentMatrixBin
             create_matrix_binding_proposal,
             agent_id, payload.homeserver_url, payload.user_id,
             payload.password, payload.access_token, payload.allowed_room_ids,
+            payload.system_prompt, "", "", payload.response_mode,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1655,21 +1707,185 @@ async def delete_agent_matrix_binding_api(binding_id: str):
     return {"status": "success", "id": binding_id}
 
 
+@app.get("/api/agents/{agent_id}/discord")
+async def list_agent_discord_bindings_api(agent_id: str):
+    from backend.agent_messenger_governance import list_discord_bindings
+    return await asyncio.to_thread(list_discord_bindings, agent_id)
+
+@app.post("/api/agents/{agent_id}/discord")
+async def create_agent_discord_binding_api(agent_id: str, payload: AgentDiscordBindingRequest):
+    """Validates a Discord bot token and creates a single-confirmation (R3) approval proposal."""
+    from backend.agent_messenger_governance import create_discord_binding_proposal
+    try:
+        proposal = await asyncio.to_thread(
+            create_discord_binding_proposal, agent_id, payload.bot_token, payload.allowed_channel_ids,
+            payload.system_prompt, "", "", payload.response_mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "status": proposal["status"],
+        "binding_id": proposal["id"],
+        "bot_username": proposal["bot_username"],
+        "task_id": proposal["control_task_id"],
+        "risk_class": "R3",
+        "message": "Bot token validated. One owner approval is required before the bot goes live.",
+    }
+
+@app.delete("/api/agents/discord/{binding_id}")
+async def delete_agent_discord_binding_api(binding_id: str):
+    from backend.agent_messenger_governance import revoke_discord_binding
+    try:
+        await revoke_discord_binding(binding_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Binding not found")
+    return {"status": "success", "id": binding_id}
+
+
+@app.get("/api/agents/{agent_id}/slack")
+async def list_agent_slack_bindings_api(agent_id: str):
+    from backend.agent_messenger_governance import list_slack_bindings
+    return await asyncio.to_thread(list_slack_bindings, agent_id)
+
+@app.post("/api/agents/{agent_id}/slack")
+async def create_agent_slack_binding_api(agent_id: str, payload: AgentSlackBindingRequest):
+    """Validates Slack tokens and creates a single-confirmation (R3) approval proposal."""
+    from backend.agent_messenger_governance import create_slack_binding_proposal
+    try:
+        proposal = await asyncio.to_thread(
+            create_slack_binding_proposal, agent_id, payload.bot_token, payload.app_token,
+            payload.allowed_channel_ids, payload.system_prompt, "", "", payload.response_mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "status": proposal["status"],
+        "binding_id": proposal["id"],
+        "slack_identity": proposal["bot_username"],
+        "task_id": proposal["control_task_id"],
+        "risk_class": "R3",
+        "message": "Slack tokens validated. One owner approval is required before the bot goes live.",
+    }
+
+@app.delete("/api/agents/slack/{binding_id}")
+async def delete_agent_slack_binding_api(binding_id: str):
+    from backend.agent_messenger_governance import revoke_slack_binding
+    try:
+        await revoke_slack_binding(binding_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Binding not found")
+    return {"status": "success", "id": binding_id}
+
+
+@app.get("/api/agents/{agent_id}/email")
+async def list_agent_email_bindings_api(agent_id: str):
+    from backend.agent_messenger_governance import list_email_bindings
+    return await asyncio.to_thread(list_email_bindings, agent_id)
+
+@app.post("/api/agents/{agent_id}/email")
+async def create_agent_email_binding_api(agent_id: str, payload: AgentEmailBindingRequest):
+    """Logs into IMAP+SMTP with the given mailbox credentials and creates a
+    single-confirmation (R3) approval proposal."""
+    from backend.agent_messenger_governance import create_email_binding_proposal
+    try:
+        proposal = await asyncio.to_thread(
+            create_email_binding_proposal, agent_id,
+            payload.imap_host, payload.imap_port, payload.smtp_host, payload.smtp_port,
+            payload.address, payload.password, payload.allowed_senders,
+            payload.system_prompt, "", "", payload.response_mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "status": proposal["status"],
+        "binding_id": proposal["id"],
+        "mailbox": proposal["bot_username"],
+        "task_id": proposal["control_task_id"],
+        "risk_class": "R3",
+        "message": "Mailbox credentials validated. One owner approval is required before it goes live.",
+    }
+
+@app.delete("/api/agents/email/{binding_id}")
+async def delete_agent_email_binding_api(binding_id: str):
+    from backend.agent_messenger_governance import revoke_email_binding
+    try:
+        await revoke_email_binding(binding_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Binding not found")
+    return {"status": "success", "id": binding_id}
+
+
 @app.get("/api/messenger-bindings")
 async def list_all_messenger_bindings_api():
     """Cross-agent, cross-platform view of every messenger binding — powers the
     central 'Каналы связи' admin page rather than each agent's own edit form."""
-    from backend.agent_messenger_governance import list_telegram_bindings, list_matrix_bindings
+    from backend.agent_messenger_governance import (
+        list_telegram_bindings, list_matrix_bindings, list_discord_bindings,
+        list_slack_bindings, list_email_bindings,
+    )
     from backend.database import get_all_subagents
 
     names = {a["id"]: a["name"] for a in await asyncio.to_thread(get_all_subagents)}
-    telegram = await asyncio.to_thread(list_telegram_bindings)
-    matrix = await asyncio.to_thread(list_matrix_bindings)
-    bindings = telegram + matrix
+    telegram, matrix, discord_, slack, email_ = await asyncio.gather(
+        asyncio.to_thread(list_telegram_bindings),
+        asyncio.to_thread(list_matrix_bindings),
+        asyncio.to_thread(list_discord_bindings),
+        asyncio.to_thread(list_slack_bindings),
+        asyncio.to_thread(list_email_bindings),
+    )
+    bindings = telegram + matrix + discord_ + slack + email_
     for binding in bindings:
         binding["agent_name"] = names.get(binding["subagent_id"], binding["subagent_id"])
     bindings.sort(key=lambda b: b.get("created_at", ""), reverse=True)
     return bindings
+
+
+@app.patch("/api/messenger-bindings/{binding_id}")
+async def update_messenger_binding_api(binding_id: str, payload: MessengerBindingUpdateRequest):
+    """Edits an active binding's per-channel prompt and/or draft/auto-labeled
+    response mode. Doesn't require a new owner approval — see
+    agent_messenger_governance.update_binding_settings for why."""
+    from backend.agent_messenger_governance import update_binding_settings
+    try:
+        return await update_binding_settings(
+            binding_id, system_prompt_override=payload.system_prompt, response_mode=payload.response_mode
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Binding not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/channel-replies")
+async def list_channel_replies_api(status: str = "pending"):
+    """Drafts queued by 'draft' mode channels, awaiting the owner's review/send."""
+    from backend.channel_replies import list_pending_replies
+    return await asyncio.to_thread(list_pending_replies, status)
+
+
+@app.post("/api/channel-replies/{reply_id}/send")
+async def send_channel_reply_api(reply_id: str, payload: PendingReplySendRequest):
+    from backend.channel_replies import send_pending_reply
+    try:
+        return await send_pending_reply(reply_id, payload.edited_text)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/channel-replies/{reply_id}/discard")
+async def discard_channel_reply_api(reply_id: str):
+    from backend.channel_replies import discard_pending_reply
+    try:
+        await asyncio.to_thread(discard_pending_reply, reply_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "success", "id": reply_id}
 
 
 @app.get("/api/system/stats")
@@ -1724,7 +1940,11 @@ async def get_history_sessions():
         subagent_ids = {r[0] for r in cursor.fetchall()}
         
         cursor.execute("SELECT session_id, MAX(timestamp) as last_time FROM messages GROUP BY session_id ORDER BY last_time DESC")
-        sessions = [r[0] for r in cursor.fetchall()]
+        session_rows = cursor.fetchall()
+        sessions = [r[0] for r in session_rows]
+        # The dashboard's chat-history card shows the last-activity time per session, so
+        # surface the timestamp this query already computes instead of discarding it.
+        last_time_map = {r[0]: r[1] for r in session_rows}
         
         # Fetch all custom titles and agent_ids from session_metadata
         cursor.execute("SELECT session_id, title, agent_id FROM session_metadata")
@@ -1747,7 +1967,8 @@ async def get_history_sessions():
             sessions_response.append({
                 "id": s,
                 "title": title,
-                "agent_id": agent_id
+                "agent_id": agent_id,
+                "updated_at": last_time_map.get(s)
             })
         return sessions_response
     except Exception as e:

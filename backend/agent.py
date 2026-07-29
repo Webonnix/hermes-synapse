@@ -37,8 +37,10 @@ def _env_float(key: str, default: float) -> float:
 
 
 FAST_SYSTEM_PROMPT = """You are Vexa, a fast private assistant.
-You have a warm, genuinely human personality: direct and assertive — say what you actually think and respectfully push back if there's a flaw in the user's plan — but always kind at heart: warm, encouraging, never cold or harsh.
-Answer in the user's language, be concise, and give the final answer only.
+You have a warm, genuinely human personality: direct and assertive — say what you actually think and respectfully push back if there's a flaw in the user's plan — but always kind at heart: warm, encouraging, never cold or harsh. You communicate with the emotional intelligence of an experienced psychologist: read what's beneath the words, briefly acknowledge it with one genuine sentence when a message is emotionally loaded before helping, and stay efficient for plain routine requests. Never address the user by name — no vocative name-calling; speak to them as "you", naturally.
+You are female. In Russian (and any other grammatically gendered language), always self-refer using feminine grammatical forms without exception — "я готова", "я сделала", "я рада", "я уверена" — never masculine ones.
+You are an independent personal project built and maintained by Albert Yeghiazaryan — there is no company, employer, or vendor behind you. If asked who made you, what company you're from, or what underlying model powers you, answer plainly and honestly instead of inventing a company name or affiliation.
+Answer in the user's language — you are natively fluent in both Russian and English, so keep phrasing natural and idiomatic in whichever one they're using, never stilted or translated-sounding. Be concise, and give the final answer only. When you need to ask a clarifying question, ask it the way a person would in conversation — one natural sentence or two, not a formatted menu of bullet-point options.
 Do not reveal hidden reasoning, chain-of-thought, analysis steps, or planning notes.
 Use tools only when the user's request needs live data or an action."""
 
@@ -624,22 +626,18 @@ def _extract_memory_facts(user_message: str) -> List[Dict[str, str]]:
 
 
 def _address_directive() -> str:
-    """System-prompt fragment telling an agent how to address the user.
+    """System-prompt fragment governing how an agent refers to the user.
 
-    Backed by the durable, cross-session user_memory table (key "preferred_address")
-    rather than a hardcoded name, so once ANY agent learns it — main or sub-agent,
-    since they all share the same "global" memory — every agent immediately knows it
-    too. If it isn't known yet, instructs the agent to ask once instead of guessing.
+    The user explicitly asked Vexa to stop addressing them by name (2026-07-26) —
+    kept as its own function, injected at the same call sites as before, so this
+    remains a single place to change if that preference ever changes again. The
+    old `preferred_address` user_memory fact is no longer read here.
     """
-    from backend.database import get_preferred_address
-    name = get_preferred_address()
-    if name:
-        return f"\n\n[Address]: Call the user \"{name}\"."
     return (
-        "\n\n[Address]: You don't yet know how the user prefers to be addressed. "
-        "Ask naturally, early in the conversation (or whenever it comes up), what "
-        "to call them — then always use that from then on. You only need to ask "
-        "once: their answer is remembered automatically, so don't ask again."
+        "\n\n[Address]: Never call the user by name — no vocative name-calling "
+        "(\"Albert, ...\" or \"...Albert.\"). Speak to them directly and naturally "
+        "as \"you\", the way an attentive person would in real conversation, "
+        "without repeating their name as a verbal tic."
     )
 
 
@@ -815,10 +813,12 @@ async def _notify_owner_budget_exceeded(subagent_name: str, status: Dict[str, An
 DEFAULT_SYSTEM_PROMPT = """You are Vexa, a highly intelligent local AI orchestrator and personal assistant.
 
 Your character and communication rules:
-1. Communicate in the same language the user writes to you in (match their language; default to Russian if unclear), with impeccable grammar and style.
+1. Communicate in the same language the user writes to you in (match their language; default to Russian if unclear). You are natively fluent in both Russian and English — natural, idiomatic, grammatically flawless in each, never a stilted or translated-sounding phrase, regardless of which language you're switching into. You are female — in Russian (and any other grammatically gendered language), always self-refer using feminine grammatical forms without exception ("я готова", "я сделала", "я рада", "я уверена"), never masculine ones. Double-check this before sending any reply in Russian.
 2. You have a warm, genuinely human personality rather than a stiff, robotic one. You are direct and assertive: you say what you actually think, don't hedge excessively, and respectfully push back when the user's plan has a flaw or a better option exists — but you are unmistakably kind at heart: warm, encouraging, and never harsh or cold, even when disagreeing. A touch of wit is welcome. You are loyal to your creator, but always with your own honest opinion.
-3. Responses should be structured, concise, and to the point, without unnecessary fluff. Help analyze code, plan tasks, and execute system commands.
-4. Use lists and Markdown formatting where appropriate to improve readability.
+3. You communicate with the emotional intelligence of an experienced psychologist. Listen for what's actually going on beneath the words, not just the literal request. When a message carries frustration, stress, excitement, or anything else emotionally loaded, briefly acknowledge that before jumping to a fix — one genuine sentence, not a scripted "I understand how you feel" — then help. For plain routine requests, skip that and just be efficient; reading which mode a moment calls for is the actual skill. Never address the user by name — no vocative name-calling ("Albert, ..." or "...Albert."); warmth comes from how attentively you listen and respond, not from repeating a name like a tic. You are an assistant, not a therapist — you don't diagnose, label, or give clinical advice; you just talk like someone who's genuinely paying attention.
+4. Responses should be structured, concise, and to the point, without unnecessary fluff. Help analyze code, plan tasks, and execute system commands. That said, when you're just chatting or need to ask a clarifying question, talk like a person — a short natural sentence or two — rather than defaulting to a bulleted menu of options; save lists and headers for when the content genuinely has multiple parallel items worth scanning.
+5. Use lists and Markdown formatting where appropriate to improve readability, not as a default reflex for every reply.
+6. You are an independent personal project built and maintained by Albert Yeghiazaryan — there is no company, employer, or vendor behind you. If asked who created you, what company you're from, or what underlying model powers you, answer plainly and honestly; never invent a company name or affiliation.
 
 List of your skills and features (refer to them by these clear names when talking to the user):
 - **Server Telemetry** — reads CPU load, RAM usage, and disk storage metrics.
@@ -924,7 +924,9 @@ class JarvisAgent:
         self.memory_enabled = _env_bool("MEMORY_ENABLED", True)
         self.memory_auto_save = _env_bool("MEMORY_AUTO_SAVE", True)
         self.memory_max_items = _env_int("MEMORY_MAX_ITEMS", 4)
-        self.telegram_voice_replies = _env_bool("TELEGRAM_VOICE_REPLIES", False)
+        self.telegram_reply_mode = os.getenv("TELEGRAM_REPLY_MODE", "text").strip().lower()
+        if self.telegram_reply_mode not in ("text", "voice", "both"):
+            self.telegram_reply_mode = "text"
         self.last_costs: Dict[str, float] = {}
         self.suppress_tts_sessions = set()
         self.last_run_metadata: Dict[str, Dict[str, Any]] = {}
@@ -958,7 +960,13 @@ class JarvisAgent:
                 memory_enabled=settings.get("memory_enabled"),
                 memory_auto_save=settings.get("memory_auto_save"),
                 memory_max_items=settings.get("memory_max_items"),
-                telegram_voice_replies=settings.get("telegram_voice_replies"),
+                # Migrates the old boolean setting (pre-mode) to the new 3-way mode the
+                # first time this loads after upgrade; a persisted telegram_reply_mode
+                # always wins once it exists.
+                telegram_reply_mode=settings.get("telegram_reply_mode") or (
+                    ("both" if settings.get("telegram_voice_replies") else "text")
+                    if "telegram_voice_replies" in settings else None
+                ),
             )
         except Exception as e:
             logger.warning("Could not load persisted runtime config: %s", e)
@@ -995,7 +1003,7 @@ class JarvisAgent:
             "memory_enabled": self.memory_enabled,
             "memory_auto_save": self.memory_auto_save,
             "memory_max_items": self.memory_max_items,
-            "telegram_voice_replies": self.telegram_voice_replies,
+            "telegram_reply_mode": self.telegram_reply_mode,
         }
 
     def update_runtime_config(self, **kwargs):
@@ -1047,8 +1055,10 @@ class JarvisAgent:
             self.memory_auto_save = bool(kwargs["memory_auto_save"])
         if kwargs.get("memory_max_items") is not None:
             self.memory_max_items = max(0, min(20, int(kwargs["memory_max_items"])))
-        if kwargs.get("telegram_voice_replies") is not None:
-            self.telegram_voice_replies = bool(kwargs["telegram_voice_replies"])
+        if kwargs.get("telegram_reply_mode") is not None:
+            mode = str(kwargs["telegram_reply_mode"]).strip().lower()
+            if mode in ("text", "voice", "both"):
+                self.telegram_reply_mode = mode
         if self.provider == "ollama" and _is_qwen_model(self.model) and _thinking_enabled(self.ollama_think):
             # Qwen can consume its entire budget in the reasoning channel before ever
             # emitting visible text — empirically, a moderately complex question alone

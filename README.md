@@ -200,17 +200,40 @@ Recommended defaults:
 * `VOICE_STT_MODEL=small`
 * `VOICE_STT_DEVICE=cpu`
 * `VOICE_STT_COMPUTE_TYPE=int8`
-* `VOICE_STT_LANGUAGE=ru`
+* `VOICE_STT_LANGUAGE=` (empty — auto-detects Russian or English per clip; set a fixed code like `ru` to force one language)
 * `VOICE_STT_DOWNLOAD_ROOT=/app/backend/data/voice-models`
 * `VOICE_STT_PRELOAD=true`
 * `VOICE_TTS_ENABLED=true`
-* `VOICE_TTS_PROVIDER=rhvoice`
+* `VOICE_TTS_PROVIDER=auto`
 * `VOICE_TTS_VOICE=anna`
 
 The first transcription downloads the selected Whisper model. Rebuild the backend image after changing dependencies:
 ```bash
 docker-compose up -d --build backend
 ```
+
+#### One voice for both languages (XTTS)
+Piper and RHVoice load a separate voice per language, so a Russian reply and an
+English one come out of two different mouths. The optional `xtts` service
+(`src/xtts`) runs Coqui XTTS-v2 on the GPU instead: one multilingual model driven
+by a single speaker reference, so both languages share one timbre. On first boot
+it renders that reference from the Piper English voice
+(`XTTS_REFERENCE_PIPER_MODEL`), which keeps the voice Vexa already had — falling
+back to a built-in studio speaker (`XTTS_SPEAKER`) when no Piper model is
+available.
+
+With `VOICE_TTS_PROVIDER=auto` the backend prefers XTTS whenever its `/health`
+reports ready, and falls back to Piper/RHVoice while the weights load or if the
+sidecar is down — a reply is never lost to a cold GPU service.
+
+```bash
+docker-compose up -d --build xtts     # first start downloads ~2 GB of weights
+curl -s http://localhost:8700/speakers # built-in speakers, to try another XTTS_SPEAKER
+```
+
+The XTTS-v2 weights are released under the Coqui Public Model License
+(non-commercial); `COQUI_TOS_AGREED=1` in the compose file acknowledges it on
+download.
 
 ### 📅 Google Calendar (OAuth2 Manual Flow)
 If you wish to allow Hermes to manage your calendars:

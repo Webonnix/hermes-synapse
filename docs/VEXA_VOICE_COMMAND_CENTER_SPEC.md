@@ -35,7 +35,7 @@ degraded and offline.
 
 ### Phase 2: fully local speech service
 
-- Server-side Piper or RHVoice provider.
+- Server-side Piper, RHVoice or XTTS provider.
 - Audio streaming instead of waiting for a complete WAV.
 - Local model cache mounted outside the application image.
 - Voice preview and explicit model-license acknowledgement.
@@ -81,6 +81,14 @@ names when upgrading the streaming recognizer.
 
 Provider order:
 
+0. **Coqui XTTS-v2** (`src/xtts`, GPU sidecar): the only adapter here that is
+   multilingual in a *single* model, so Russian and English replies share one
+   timbre instead of switching voices mid-conversation. The speaker reference is
+   rendered from the Piper English voice on first boot, keeping continuity with
+   the previous setup. The weights are under the Coqui Public Model License
+   (non-commercial), so this is a personal-deployment adapter and must stay
+   opt-in. Requires a GPU; the backend falls back to the adapters below while it
+   loads or if it is unreachable.
 1. **Piper**: preferred production adapter. Local, fast and GPL-3.0 engine.
    Every selected voice model must have its own model card reviewed. The common
    `ru_RU-irina-medium` dataset license is not clearly declared, so it must not
@@ -98,6 +106,7 @@ Provider order:
 Official sources:
 
 - https://github.com/SYSTRAN/faster-whisper
+- https://github.com/idiap/coqui-ai-TTS
 - https://github.com/OHF-Voice/piper1-gpl
 - https://github.com/RHVoice/RHVoice
 - https://github.com/snakers4/silero-models
@@ -120,8 +129,11 @@ Error transitions always return to `ready` after an actionable error is shown.
 The microphone is never active without a persistent visual indicator.
 
 Conversational mode starts only after a user gesture. After Vexa finishes
-speaking, it may reopen the microphone. It stops automatically when:
+speaking, it may reopen the microphone. A turn in which nothing was recognised
+produces no answer to reopen on, so it reopens the microphone on that signal too,
+up to three unheard turns in a row. It stops automatically when:
 
+- three consecutive turns are heard as silence;
 - the user disables the mode;
 - the tab loses permission;
 - the network disconnects;

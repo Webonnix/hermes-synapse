@@ -245,4 +245,19 @@ def revoke_binding(binding_id: str) -> None:
     _set_status(binding_id, "revoked")
 
 
+def delete_binding(binding_id: str) -> None:
+    """Permanently removes a provider binding — unlike revoke_binding (which only
+    flips status to 'revoked' and leaves the row so it stays listed), this drops the
+    row entirely. Used by the dashboard's trash-icon action, which the user expects
+    to make the entry disappear regardless of its current status."""
+    binding = get_binding(binding_id)
+    if not binding:
+        raise KeyError(binding_id)
+    from backend.valkey_client import delete_value
+
+    delete_value(f"provider_secret:{binding_id}")
+    with _connect() as connection:
+        connection.execute("DELETE FROM provider_bindings WHERE id = ?", (binding_id,))
+
+
 _init_schema()

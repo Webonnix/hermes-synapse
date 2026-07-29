@@ -49,6 +49,7 @@ class AgentBotManager:
         self._apps: Dict[str, Application] = {}
         self._allowed_chat_ids: Dict[str, List[str]] = {}
         self._overrides: Dict[str, dict] = {}
+        self._response_modes: Dict[str, str] = {}
 
     def _make_handler(self, binding_id: str, subagent_id: str):
         async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -82,14 +83,35 @@ class AgentBotManager:
                 logger.exception("Agent bot %s: error handling message", binding_id)
                 await update.message.reply_text("Произошла ошибка при обработке запроса.")
                 return
-            for chunk in _split_text(response_text):
-                await update.message.reply_text(chunk)
+
+            mode = self._response_modes.get(binding_id, "draft")
+            if mode == "auto_labeled":
+                from backend.agent_messenger_governance import AUTO_REPLY_DISCLOSURE
+                for chunk in _split_text(response_text + AUTO_REPLY_DISCLOSURE):
+                    await update.message.reply_text(chunk)
+                return
+
+            # draft mode: never send anything to the other person automatically —
+            # queue it and let the owner review/send from the dashboard.
+            from backend.channel_replies import create_pending_reply
+            sender = update.effective_user
+            incoming_from = f"@{sender.username}" if sender and sender.username else (str(sender.id) if sender else "")
+            create_pending_reply(
+                binding_id=binding_id,
+                platform="telegram",
+                subagent_id=subagent_id,
+                chat_id=chat_id,
+                incoming_text=update.message.text,
+                drafted_reply=response_text,
+                incoming_from=incoming_from,
+            )
 
         return handler
 
     async def start(
         self, binding_id: str, subagent_id: str, bot_token: str,
         allowed_chat_ids: Optional[List[str]] = None, overrides: Optional[dict] = None,
+        response_mode: str = "draft",
     ) -> None:
         if binding_id in self._apps:
             return
@@ -101,12 +123,22 @@ class AgentBotManager:
         self._apps[binding_id] = app
         self._allowed_chat_ids[binding_id] = list(allowed_chat_ids or [])
         self._overrides[binding_id] = overrides or {}
-        logger.info("Agent bot started: binding=%s subagent=%s", binding_id, subagent_id)
+        self._response_modes[binding_id] = response_mode
+        logger.info("Agent bot started: binding=%s subagent=%s mode=%s", binding_id, subagent_id, response_mode)
+
+    def update_live_settings(self, binding_id: str, overrides: Optional[dict], response_mode: str) -> None:
+        """Applies an edited prompt/mode to an already-running bot without restarting
+        its polling loop — called from agent_messenger_governance.update_binding_settings."""
+        if binding_id not in self._apps:
+            return
+        self._overrides[binding_id] = overrides or {}
+        self._response_modes[binding_id] = response_mode
 
     async def stop(self, binding_id: str) -> None:
         app = self._apps.pop(binding_id, None)
         self._allowed_chat_ids.pop(binding_id, None)
         self._overrides.pop(binding_id, None)
+        self._response_modes.pop(binding_id, None)
         if not app:
             return
         try:
@@ -135,7 +167,8 @@ class AgentBotManager:
             }
             try:
                 await self.start(
-                    binding["id"], binding["subagent_id"], token, binding.get("allowed_chat_ids"), overrides
+                    binding["id"], binding["subagent_id"], token, binding.get("allowed_chat_ids"), overrides,
+                    binding.get("response_mode") or "draft",
                 )
             except Exception:
                 logger.exception("Failed to start agent bot %s at startup", binding["id"])
