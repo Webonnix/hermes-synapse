@@ -60,7 +60,7 @@ export interface SystemConfig {
   memory_enabled?: boolean;
   memory_auto_save?: boolean;
   memory_max_items?: number;
-  telegram_voice_replies?: boolean;
+  telegram_reply_mode?: 'text' | 'voice' | 'both' | string;
   provider?: 'ollama' | 'openrouter' | 'openai_compatible' | string;
   api_base?: string;
   ollama_base_url?: string;
@@ -193,6 +193,25 @@ export interface MessengerBinding {
   control_task_id?: string;
   created_at: string;
   updated_at: string;
+  system_prompt_override?: string | null;
+  response_mode: 'draft' | 'auto_labeled' | string;
+}
+
+// A drafted reply from a 'draft'-mode channel binding, queued for the owner
+// to review, optionally edit, and explicitly send — see backend/channel_replies.py.
+export interface PendingChannelReply {
+  id: string;
+  binding_id: string;
+  platform: string;
+  subagent_id: string;
+  chat_id: string;
+  incoming_from: string;
+  incoming_text: string;
+  drafted_reply: string;
+  status: 'pending' | 'sent' | 'discarded' | string;
+  created_at: string;
+  updated_at: string;
+  sent_at?: string | null;
 }
 
 // An external LLM provider an agent can be bound to (agent.model_provider references
@@ -457,6 +476,8 @@ export interface ChatSession {
   id: string;
   title: string;
   agent_id?: string;
+  /** ISO timestamp of the session's most recent message; absent for a brand-new chat. */
+  updated_at?: string | null;
 }
 
 export type DevRunStatus =

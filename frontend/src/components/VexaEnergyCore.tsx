@@ -24,7 +24,12 @@ import {
   FILAMENT_FRAGMENT_SHADER,
   PARTICLE_VERTEX_SHADER,
   PARTICLE_FRAGMENT_SHADER,
+  NEURAL_POINT_VERTEX_SHADER,
+  NEURAL_POINT_FRAGMENT_SHADER,
+  NEURAL_LINK_VERTEX_SHADER,
+  NEURAL_LINK_FRAGMENT_SHADER,
 } from './vexaShaders';
+import { buildNeuralMesh } from './vexaNeuralMesh';
 
 // Deliberately no EffectComposer/UnrealBloomPass: three.js's bloom composite does not
 // reliably preserve per-pixel alpha against a transparent renderer (verified: it either
@@ -400,6 +405,107 @@ export default function VexaEnergyCore({ phase, audioAnalyser, pulseKey, errorPu
     const particles = new THREE.Points(particleGeometry, particleMaterial);
     scene.add(particles);
 
+    // ── Neural mesh: point cloud + link graph + signal pulses ─────────────────
+    // Built once (spatial-hash kNN in vexaNeuralMesh.ts), then only re-tinted and
+    // rotated. The pulse positions are the single buffer updated per frame, and they
+    // are written in place — no allocation inside the loop.
+    const mesh = buildNeuralMesh({
+      pointCount: quality.neuralPointCount,
+      linksPerNode: quality.linksPerNode,
+    });
+
+    const neuralUniforms = {
+      uTime: { value: 0 },
+      uAmp: { value: 0 },
+      uEnergy: { value: 0.4 },
+      uBoot: { value: 0 },
+      uColor: { value: new THREE.Color(0.45, 0.82, 1) },
+    };
+    const neuralGeometry = new THREE.BufferGeometry();
+    neuralGeometry.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3));
+    neuralGeometry.setAttribute('aSize', new THREE.BufferAttribute(mesh.sizes, 1));
+    neuralGeometry.setAttribute('aSeed', new THREE.BufferAttribute(mesh.seeds, 1));
+    disposables.push(neuralGeometry);
+    const neuralMaterial = new THREE.ShaderMaterial({
+      uniforms: neuralUniforms,
+      vertexShader: NEURAL_POINT_VERTEX_SHADER,
+      fragmentShader: NEURAL_POINT_FRAGMENT_SHADER,
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+      blending: THREE.AdditiveBlending,
+    });
+    disposables.push(neuralMaterial);
+    const neuralPoints = new THREE.Points(neuralGeometry, neuralMaterial);
+    scene.add(neuralPoints);
+
+    const linkUniforms = {
+      uTime: { value: 0 },
+      uAmp: { value: 0 },
+      uEnergy: { value: 0.4 },
+      uBoot: { value: 0 },
+      uColor: { value: new THREE.Color(0.35, 0.78, 1) },
+      uColorFar: { value: new THREE.Color(0.32, 0.28, 0.72) },
+    };
+    const linkGeometry = new THREE.BufferGeometry();
+    linkGeometry.setAttribute('position', new THREE.BufferAttribute(mesh.linkPositions, 3));
+    linkGeometry.setAttribute('aDepth', new THREE.BufferAttribute(mesh.linkDepths, 1));
+    linkGeometry.setAttribute('aSeed', new THREE.BufferAttribute(mesh.linkSeeds, 1));
+    disposables.push(linkGeometry);
+    const linkMaterial = new THREE.ShaderMaterial({
+      uniforms: linkUniforms,
+      vertexShader: NEURAL_LINK_VERTEX_SHADER,
+      fragmentShader: NEURAL_LINK_FRAGMENT_SHADER,
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+      blending: THREE.AdditiveBlending,
+    });
+    disposables.push(linkMaterial);
+    const links = new THREE.LineSegments(linkGeometry, linkMaterial);
+    scene.add(links);
+
+    // Signal pulses ride the existing edges. Edge assignment, progress and speed live in
+    // typed arrays; only `pulsePositions` is uploaded each frame.
+    const pulseCount = mesh.linkCount > 0 ? Math.min(quality.pulseCount, mesh.linkCount) : 0;
+    const pulseEdges = new Uint32Array(pulseCount);
+    const pulseProgress = new Float32Array(pulseCount);
+    const pulseSpeeds = new Float32Array(pulseCount);
+    const pulsePositions = new Float32Array(pulseCount * 3);
+    const pulseSizes = new Float32Array(pulseCount);
+    const pulseSeeds = new Float32Array(pulseCount);
+    for (let index = 0; index < pulseCount; index += 1) {
+      pulseEdges[index] = Math.floor(Math.random() * mesh.linkCount);
+      pulseProgress[index] = Math.random();
+      pulseSpeeds[index] = 0.35 + Math.random() * 0.75;
+      pulseSizes[index] = 1.1 + Math.random() * 0.9;
+      pulseSeeds[index] = Math.random();
+    }
+    const pulseGeometry = new THREE.BufferGeometry();
+    pulseGeometry.setAttribute('position', new THREE.BufferAttribute(pulsePositions, 3));
+    pulseGeometry.setAttribute('aSize', new THREE.BufferAttribute(pulseSizes, 1));
+    pulseGeometry.setAttribute('aSeed', new THREE.BufferAttribute(pulseSeeds, 1));
+    disposables.push(pulseGeometry);
+    const signalUniforms = {
+      uTime: { value: 0 },
+      uAmp: { value: 0 },
+      uEnergy: { value: 0.9 },
+      uBoot: { value: 1 },
+      uColor: { value: new THREE.Color(0.7, 0.95, 1) },
+    };
+    const signalMaterial = new THREE.ShaderMaterial({
+      uniforms: signalUniforms,
+      vertexShader: NEURAL_POINT_VERTEX_SHADER,
+      fragmentShader: NEURAL_POINT_FRAGMENT_SHADER,
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+      blending: THREE.AdditiveBlending,
+    });
+    disposables.push(signalMaterial);
+    const signals = new THREE.Points(pulseGeometry, signalMaterial);
+    if (pulseCount > 0) scene.add(signals);
+
     let bloomRig: VexaBloomRig | null = null;
     const resize = () => {
       const rect = mount.getBoundingClientRect();
@@ -484,6 +590,57 @@ export default function VexaEnergyCore({ phase, audioAnalyser, pulseKey, errorPu
       particleUniforms.uAmp.value = amp + errorBoost * 0.6;
       particleUniforms.uSpeedMul.value = speedMul * (1 + amp * 0.25);
       (particleUniforms.uColor.value as THREE.Color).lerp(targetColor, 0.04);
+
+      // Boot-in: the mesh assembles from the centre over ~1.4s on first paint.
+      const boot = Math.min(1, t / 1.4);
+      const eased = boot * boot * (3 - 2 * boot);
+
+      neuralUniforms.uTime.value = t;
+      neuralUniforms.uAmp.value = amp;
+      neuralUniforms.uEnergy.value = energy;
+      neuralUniforms.uBoot.value = eased;
+      (neuralUniforms.uColor.value as THREE.Color).lerp(targetColor, 0.05);
+
+      linkUniforms.uTime.value = t;
+      linkUniforms.uAmp.value = amp;
+      linkUniforms.uEnergy.value = energy;
+      linkUniforms.uBoot.value = eased;
+      (linkUniforms.uColor.value as THREE.Color).lerp(targetColor, 0.05);
+
+      if (!reduceMotion) {
+        const spin = 0.028 * speedMul * (1 + smoothedAmp * 0.3) * 0.016;
+        neuralPoints.rotation.y += spin;
+        links.rotation.y = neuralPoints.rotation.y;
+        signals.rotation.y = neuralPoints.rotation.y;
+      }
+
+      // Advance the signal pulses along their edges and write the new positions in place.
+      if (pulseCount > 0) {
+        const step = 0.016 * speedMul * (1 + amp * 0.6);
+        for (let index = 0; index < pulseCount; index += 1) {
+          let progress = pulseProgress[index] + pulseSpeeds[index] * step;
+          if (progress >= 1) {
+            progress -= 1;
+            // Re-seed onto another edge so the traffic pattern keeps changing without
+            // ever rebuilding the graph.
+            pulseEdges[index] = Math.floor(Math.random() * mesh.linkCount);
+          }
+          pulseProgress[index] = progress;
+          const edge = pulseEdges[index] * 6;
+          const ax = mesh.linkPositions[edge];
+          const ay = mesh.linkPositions[edge + 1];
+          const az = mesh.linkPositions[edge + 2];
+          pulsePositions[index * 3] = ax + (mesh.linkPositions[edge + 3] - ax) * progress;
+          pulsePositions[index * 3 + 1] = ay + (mesh.linkPositions[edge + 4] - ay) * progress;
+          pulsePositions[index * 3 + 2] = az + (mesh.linkPositions[edge + 5] - az) * progress;
+        }
+        pulseGeometry.attributes.position.needsUpdate = true;
+        signalUniforms.uTime.value = t;
+        signalUniforms.uAmp.value = amp;
+        signalUniforms.uEnergy.value = Math.min(1.2, energy + 0.3);
+        signalUniforms.uBoot.value = eased;
+        (signalUniforms.uColor.value as THREE.Color).lerp(targetColor, 0.03);
+      }
 
       pulsesRef.current = pulsesRef.current.filter(pulse => now - pulse.start < 1200);
       pulsesRef.current.forEach(pulse => {

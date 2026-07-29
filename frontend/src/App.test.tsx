@@ -88,8 +88,10 @@ describe('App Component', () => {
 
     render(<App />);
 
+    // The dashboard's own header replaces the old "autonomous voice command center"
+    // subtitle; the system-status panel is the stable landmark for "Vexa rendered".
     await waitFor(() => {
-      expect(screen.getByText(/autonomous voice command center/i)).toBeInTheDocument();
+      expect(screen.getByText(/system status/i)).toBeInTheDocument();
     });
 
     const transcriptToggle = screen.getByRole('button', { name: /open a channel with an agent/i });
@@ -99,8 +101,11 @@ describe('App Component', () => {
       expect(screen.getByText(/communication link/i)).toBeInTheDocument();
     });
 
-    const settingsBtn = screen.getByText('Settings');
-    fireEvent.click(settingsBtn);
+    // The Vexa dashboard's bottom navigation also has a "Settings" entry, so target the
+    // workspace sidebar's one explicitly.
+    const settingsBtn = screen.getAllByRole('button', { name: 'Settings' })
+      .find(button => !button.classList.contains('vx-nav-item'));
+    fireEvent.click(settingsBtn!);
 
     await waitFor(() => {
       expect(screen.getByText('Model & Prompt')).toBeInTheDocument();

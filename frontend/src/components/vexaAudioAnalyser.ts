@@ -86,6 +86,30 @@ export class VexaAudioAnalyser {
     return Math.min(1, sum / this.data.length / 150);
   }
 
+  /**
+   * Fills `out` with a 0..1 magnitude per bar for the voice waveform, resampling the FFT
+   * bins onto however many bars the caller draws. Returns false when there is no live
+   * audio for the current phase, so the caller can fall back to a synthetic idle wave.
+   */
+  readBands(out: Float32Array, phase: string): boolean {
+    if (phase !== 'listening' && phase !== 'speaking') return false;
+    const analyser = this.analyser;
+    const data = this.data;
+    if (!analyser || !data) return false;
+    analyser.getByteFrequencyData(data);
+    const bins = data.length;
+    if (bins === 0) return false;
+    const perBar = bins / out.length;
+    for (let index = 0; index < out.length; index += 1) {
+      const start = Math.floor(index * perBar);
+      const end = Math.max(start + 1, Math.floor((index + 1) * perBar));
+      let sum = 0;
+      for (let bin = start; bin < end; bin += 1) sum += data[bin];
+      out[index] = Math.min(1, sum / (end - start) / 190);
+    }
+    return true;
+  }
+
   /** Tears down the mic connection (called when the owning animation loop restarts/unmounts). */
   disconnectMic() {
     if (this.micSource) {

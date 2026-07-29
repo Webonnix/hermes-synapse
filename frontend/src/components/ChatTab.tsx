@@ -24,6 +24,11 @@ import type { ChatMessage, SystemConfig, ChatSession } from '../types';
 import { styles } from '../styles';
 import { renderMarkdown } from '../utils';
 
+function authHeaders(): Record<string, string> {
+  const token = localStorage.getItem('jarvis_auth_token');
+  return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+}
+
 interface ChatTabProps {
   currentChatId: string;
   chatSessions: ChatSession[];
@@ -175,7 +180,7 @@ export function ChatTab({
     if (!nextTitle) return;
     const response = await fetch(`/api/history/${sessionId}/rename`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders(),
       body: JSON.stringify({ title: nextTitle }),
     });
     if (response.ok) fetchChatSessions();
@@ -524,7 +529,7 @@ export function ChatTab({
                             e.stopPropagation();
                             setActiveMenu(null);
                             try {
-                              const res = await fetch(`/api/history/${s}/fork`, { method: 'POST' });
+                              const res = await fetch(`/api/history/${s}/fork`, { method: 'POST', headers: authHeaders() });
                               if (res.ok) {
                                 const data = await res.json();
                                 fetchChatSessions();
@@ -544,7 +549,7 @@ export function ChatTab({
                               setActiveMenu(null);
                               if (window.confirm('Albert, are you sure you want to completely purge the history of the Main Terminal?')) {
                                 try {
-                                  const res = await fetch(`/api/history/dashboard`, { method: 'DELETE' });
+                                  const res = await fetch(`/api/history/dashboard`, { method: 'DELETE', headers: authHeaders() });
                                   if (res.ok) {
                                     selectChat('dashboard');
                                   }
@@ -563,7 +568,7 @@ export function ChatTab({
                                 setActiveMenu(null);
                                 if (window.confirm(`Archive session "${label}"?`)) {
                                   try {
-                                    const res = await fetch(`/api/history/${s}/archive`, { method: 'POST' });
+                                    const res = await fetch(`/api/history/${s}/archive`, { method: 'POST', headers: authHeaders() });
                                     if (res.ok) {
                                       if (currentChatId === s) selectChat('dashboard');
                                       fetchChatSessions();
@@ -582,7 +587,7 @@ export function ChatTab({
                                 setActiveMenu(null);
                                 if (window.confirm(`Are you sure you want to delete session "${label}"?`)) {
                                   try {
-                                    const res = await fetch(`/api/history/${s}`, { method: 'DELETE' });
+                                    const res = await fetch(`/api/history/${s}`, { method: 'DELETE', headers: authHeaders() });
                                     if (res.ok) {
                                       if (currentChatId === s) selectChat('dashboard');
                                       fetchChatSessions();

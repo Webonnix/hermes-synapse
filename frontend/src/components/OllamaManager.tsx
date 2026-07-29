@@ -1,10 +1,14 @@
-import { AlertTriangle, Box, CheckCircle2, Cpu, Download, HardDrive, Loader2, Play, RefreshCw, Server, Trash2, Unplug } from 'lucide-react';
+import { AlertTriangle, Box, CheckCircle2, Cpu, Download, HardDrive, Loader2, Play, RefreshCw, Server, Trash2, Unplug, Zap } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { OllamaModel, OllamaStatus } from '../types';
+import type { OllamaModel, OllamaStatus, SystemConfig } from '../types';
 
 interface OllamaManagerProps {
   selectedModel: string;
   onSelectModel: (model: string) => void;
+  /** The model actually in use by the live agent right now (from GET /api/config), as opposed to selectedModel which may just be a pending, unsaved choice in the form below. */
+  activeModel?: string;
+  /** Called after a model is activated in-place, with the backend's fresh config, so callers can sync it into their own state without a full page reload. */
+  onActivated?: (config: Partial<SystemConfig>) => void;
 }
 
 function formatBytes(value?: number) {
@@ -24,7 +28,7 @@ async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
-export function OllamaManager({ selectedModel, onSelectModel }: OllamaManagerProps) {
+export function OllamaManager({ selectedModel, onSelectModel, activeModel, onActivated }: OllamaManagerProps) {
   const [status, setStatus] = useState<OllamaStatus | null>(null);
   const [models, setModels] = useState<OllamaModel[]>([]);
   const [running, setRunning] = useState<OllamaModel[]>([]);
@@ -35,6 +39,7 @@ export function OllamaManager({ selectedModel, onSelectModel }: OllamaManagerPro
   const [pullStatus, setPullStatus] = useState('');
   const [pullProgress, setPullProgress] = useState(0);
   const [busyModel, setBusyModel] = useState('');
+  const [activatingModel, setActivatingModel] = useState('');
 
   const runningNames = useMemo(() => new Set(running.map(model => model.name || model.model || '')), [running]);
 
@@ -135,6 +140,27 @@ export function OllamaManager({ selectedModel, onSelectModel }: OllamaManagerPro
     }
   };
 
+  /** Switches the live agent to this model immediately — no need to touch the rest of the config form below. */
+  const activateModel = async (model: string) => {
+    if (activatingModel || model === activeModel) return;
+    setActivatingModel(model);
+    setError('');
+    try {
+      const result = await apiJson<{ status: string; config: Partial<SystemConfig> }>('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model }),
+      });
+      onSelectModel(model);
+      onActivated?.(result.config);
+      await refresh();
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : `Could not activate “${model}”.`);
+    } finally {
+      setActivatingModel('');
+    }
+  };
+
   return (
     <section className="ollama-manager" aria-labelledby="ollama-manager-title">
       <header>
@@ -151,7 +177,10 @@ export function OllamaManager({ selectedModel, onSelectModel }: OllamaManagerPro
       <div className="ollama-runtime-stats">
         <div><HardDrive size={15} /><span>Installed</span><strong>{status?.models_count ?? models.length}</strong></div>
         <div><Cpu size={15} /><span>Loaded</span><strong>{status?.running_count ?? running.length}</strong></div>
-        <div><Box size={15} /><span>Selected</span><strong title={selectedModel}>{selectedModel || 'None'}</strong></div>
+        <div><Zap size={15} /><span>Active now</span><strong title={activeModel}>{activeModel || 'None'}</strong></div>
+        {selectedModel && selectedModel !== activeModel && (
+          <div><Box size={15} /><span>Pending in form below</span><strong title={selectedModel}>{selectedModel}</strong></div>
+        )}
       </div>
 
       <div className="ollama-pull">
@@ -165,15 +194,26 @@ export function OllamaManager({ selectedModel, onSelectModel }: OllamaManagerPro
         {models.map(model => {
           const name = model.name || model.model || '';
           const isRunning = runningNames.has(name);
+          const isActive = name === activeModel;
           const busy = busyModel === name;
+          const activating = activatingModel === name;
           return (
-            <article key={name} role="listitem" className={`${selectedModel === name ? 'is-selected' : ''}`}>
+            <article key={name} role="listitem" className={`${selectedModel === name ? 'is-selected' : ''} ${isActive ? 'is-active' : ''}`}>
               <button type="button" className="ollama-model-select" onClick={() => onSelectModel(name)} aria-pressed={selectedModel === name}>
                 <span className="ollama-model-icon"><Box size={17} /></span>
                 <span className="ollama-model-info"><strong title={name}>{name}</strong><small>{model.details?.parameter_size || 'Local model'} · {model.details?.quantization_level || model.details?.family || 'Ollama'} · {formatBytes(model.size)}</small></span>
-                <span className={`ollama-running ${isRunning ? 'is-running' : ''}`}>{isRunning ? <><Play size={11} fill="currentColor" />Loaded</> : 'Idle'}</span>
+                <span className="ollama-model-badges">
+                  {isActive && <span className="ollama-active-badge" title="This is the model the live agent uses right now"><Zap size={11} fill="currentColor" />Active</span>}
+                  <span className={`ollama-running ${isRunning ? 'is-running' : ''}`}>{isRunning ? <><Play size={11} fill="currentColor" />Loaded</> : 'Idle'}</span>
+                </span>
               </button>
               <div className="ollama-model-actions">
+                {!isActive && (
+                  <button type="button" className="primary" onClick={() => void activateModel(name)} disabled={activating || Boolean(activatingModel)} title="Switch the live agent to this model now">
+                    {activating ? <Loader2 size={14} className="spin-slow" /> : <Zap size={14} />}
+                    {activating ? 'Activating…' : 'Activate'}
+                  </button>
+                )}
                 {isRunning && <button type="button" onClick={() => void unloadModel(name)} disabled={busy} title="Unload from memory"><Unplug size={14} /></button>}
                 <button type="button" className="danger" onClick={() => void deleteModel(name)} disabled={busy} title="Delete local model">{busy ? <Loader2 size={14} className="spin-slow" /> : <Trash2 size={14} />}</button>
               </div>

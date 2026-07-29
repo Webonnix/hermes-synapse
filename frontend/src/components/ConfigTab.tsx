@@ -140,6 +140,10 @@ interface ConfigTabProps {
   onLanguageChange: (language: string) => void;
   devRunNotificationsEnabled?: boolean;
   onDevRunNotificationsChange?: (enabled: boolean) => void;
+  /** The model actually in use by the live agent right now, independent of the pending edits below. */
+  activeModel?: string;
+  /** Fired after a one-click model activation, so the parent can sync its confirmed + pending config state. */
+  onModelActivated?: (config: Partial<SystemConfig>) => void;
 }
 
 export function ConfigTab({
@@ -155,7 +159,9 @@ export function ConfigTab({
   language,
   onLanguageChange,
   devRunNotificationsEnabled = false,
-  onDevRunNotificationsChange
+  onDevRunNotificationsChange,
+  activeModel,
+  onModelActivated
 }: ConfigTabProps) {
   
   // Check if editedModel is part of the returned models list.
@@ -325,7 +331,12 @@ export function ConfigTab({
         </div>
 
         {activeProvider === 'ollama' && (
-          <OllamaManager selectedModel={editedModel} onSelectModel={setEditedModel} />
+          <OllamaManager
+            selectedModel={editedModel}
+            onSelectModel={setEditedModel}
+            activeModel={activeModel}
+            onActivated={onModelActivated}
+          />
         )}
 
         <div style={styles.formGroup}>
@@ -458,14 +469,19 @@ export function ConfigTab({
 
             <label style={toggleRowStyle}>
               <span>
-                <strong>Telegram voice replies</strong>
-                <span style={{ ...styles.formHelp, display: 'block' }}>Send a spoken voice message alongside every text reply in Telegram.</span>
+                <strong>Telegram reply format</strong>
+                <span style={{ ...styles.formHelp, display: 'block' }}>Text only, voice only, or both for every reply in Telegram. Also changeable from Telegram itself with /voice.</span>
               </span>
-              <input
-                type="checkbox"
-                checked={boolValue('telegram_voice_replies', false)}
-                onChange={e => updateRuntime({ telegram_voice_replies: e.target.checked })}
-              />
+              <select
+                className="form-input"
+                style={{ width: 'auto' }}
+                value={String(runtimeConfig.telegram_reply_mode ?? 'text')}
+                onChange={e => updateRuntime({ telegram_reply_mode: e.target.value })}
+              >
+                <option value="text">Text</option>
+                <option value="voice">Voice</option>
+                <option value="both">Text + Voice</option>
+              </select>
             </label>
           </div>
 

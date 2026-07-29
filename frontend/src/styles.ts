@@ -256,7 +256,8 @@ export const styles: Record<string, any> = {
     display: 'flex',
     flexDirection: 'column' as const,
     gap: '24px',
-    maxWidth: '800px',
+    width: '100%',
+    maxWidth: '1400px',
     background: 'rgba(18, 19, 32, 0.58)'
   },
   formGroup: {

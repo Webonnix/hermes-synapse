@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { MessageCircle, Plus, Trash2, X } from 'lucide-react';
+import { Check, ChevronDown, ChevronUp, MessageCircle, Plus, Send, Trash2, X } from 'lucide-react';
 import { styles } from '../styles';
-import type { AgentModel, MessengerBinding } from '../types';
+import type { AgentModel, MessengerBinding, PendingChannelReply } from '../types';
 
 const field = (label: string, child: ReactNode) => (
   <label style={{ display: 'flex', flexDirection: 'column', gap: 6, color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 600 }}>
@@ -10,11 +10,15 @@ const field = (label: string, child: ReactNode) => (
   </label>
 );
 
-type Platform = 'telegram' | 'matrix';
+type Platform = 'telegram' | 'matrix' | 'discord' | 'slack' | 'email';
+type ResponseMode = 'draft' | 'auto_labeled';
 
 const PLATFORM_LABELS: Record<Platform, string> = {
   telegram: 'Telegram',
   matrix: 'Element / Matrix',
+  discord: 'Discord',
+  slack: 'Slack',
+  email: 'Email',
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -25,6 +29,11 @@ const STATUS_LABELS: Record<string, string> = {
   revoked: 'Отключён',
 };
 
+const RESPONSE_MODE_LABELS: Record<ResponseMode, string> = {
+  draft: 'Черновик на подтверждение',
+  auto_labeled: 'Автоответ с пометкой «ассистент»',
+};
+
 function authHeaders(): Record<string, string> {
   const token = localStorage.getItem('jarvis_auth_token');
   return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
@@ -32,6 +41,34 @@ function authHeaders(): Record<string, string> {
 
 const emptyTelegramForm = { bot_token: '', allowed_chat_ids: '' };
 const emptyMatrixForm = { homeserver_url: 'https://matrix.org', user_id: '', password: '', access_token: '', allowed_room_ids: '' };
+const emptyDiscordForm = { bot_token: '', allowed_channel_ids: '' };
+const emptySlackForm = { bot_token: '', app_token: '', allowed_channel_ids: '' };
+const emptyEmailForm = { imap_host: '', imap_port: '993', smtp_host: '', smtp_port: '587', address: '', password: '', allowed_senders: '' };
+
+function ResponseModePicker({ value, onChange }: { value: ResponseMode; onChange: (mode: ResponseMode) => void }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 600 }}>Режим ответа</span>
+      {(['draft', 'auto_labeled'] as ResponseMode[]).map(mode => (
+        <label key={mode} style={{
+          display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 12px', borderRadius: 8,
+          border: `1px solid ${value === mode ? 'rgba(77,222,180,.4)' : 'rgba(255,255,255,.09)'}`,
+          background: value === mode ? 'rgba(46,179,139,.08)' : 'rgba(255,255,255,.02)', cursor: 'pointer',
+        }}>
+          <input type="radio" name="response_mode" checked={value === mode} onChange={() => onChange(mode)} style={{ marginTop: 3 }} />
+          <span>
+            <strong style={{ display: 'block', fontSize: '0.83rem' }}>{RESPONSE_MODE_LABELS[mode]}</strong>
+            <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-dim, #8a94a6)', marginTop: 2 }}>
+              {mode === 'draft'
+                ? 'Ничего не уходит собеседнику автоматически — Vexa готовит ответ, вы проверяете и отправляете сами из раздела «Черновики» ниже.'
+                : 'Отвечает сразу, но каждое сообщение помечено как ответ ассистента — собеседник всегда знает, что говорит не Альберт лично.'}
+            </span>
+          </span>
+        </label>
+      ))}
+    </div>
+  );
+}
 
 interface MessengerChannelsTabProps {
   agents: AgentModel[];
@@ -45,9 +82,24 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
   const [agentId, setAgentId] = useState('');
   const [telegramForm, setTelegramForm] = useState(emptyTelegramForm);
   const [matrixForm, setMatrixForm] = useState(emptyMatrixForm);
+  const [discordForm, setDiscordForm] = useState(emptyDiscordForm);
+  const [slackForm, setSlackForm] = useState(emptySlackForm);
+  const [emailForm, setEmailForm] = useState(emptyEmailForm);
+  const [systemPrompt, setSystemPrompt] = useState('');
+  const [responseMode, setResponseMode] = useState<ResponseMode>('draft');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+
+  const [expandedId, setExpandedId] = useState('');
+  const [editPrompt, setEditPrompt] = useState('');
+  const [editMode, setEditMode] = useState<ResponseMode>('draft');
+  const [savingEdit, setSavingEdit] = useState(false);
+
+  const [replies, setReplies] = useState<PendingChannelReply[]>([]);
+  const [repliesLoading, setRepliesLoading] = useState(true);
+  const [editedReplyText, setEditedReplyText] = useState<Record<string, string>>({});
+  const [busyReplyId, setBusyReplyId] = useState('');
 
   const fetchBindings = () => {
     fetch('/api/messenger-bindings', { headers: authHeaders() })
@@ -57,14 +109,36 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => { fetchBindings(); }, []);
+  const fetchReplies = () => {
+    fetch('/api/channel-replies?status=pending', { headers: authHeaders() })
+      .then(res => res.json())
+      .then(data => setReplies(Array.isArray(data) ? data : []))
+      .catch(() => setReplies([]))
+      .finally(() => setRepliesLoading(false));
+  };
+
+  useEffect(() => {
+    fetchBindings();
+    fetchReplies();
+    const interval = setInterval(fetchReplies, 20000);
+    return () => clearInterval(interval);
+  }, []);
 
   const resetForm = () => {
     setShowForm(false);
     setAgentId('');
     setTelegramForm(emptyTelegramForm);
     setMatrixForm(emptyMatrixForm);
+    setDiscordForm(emptyDiscordForm);
+    setSlackForm(emptySlackForm);
+    setEmailForm(emptyEmailForm);
+    setSystemPrompt('');
+    setResponseMode('draft');
     setError('');
+  };
+
+  const PLATFORM_PATHS: Record<Platform, string> = {
+    telegram: 'telegram', matrix: 'matrix', discord: 'discord', slack: 'slack', email: 'email',
   };
 
   const addBinding = async () => {
@@ -73,23 +147,43 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
     setError('');
     setNotice('');
     try {
-      const path = platform === 'telegram' ? `/api/agents/${agentId}/telegram` : `/api/agents/${agentId}/matrix`;
-      const body = platform === 'telegram'
-        ? {
+      const path = `/api/agents/${agentId}/${PLATFORM_PATHS[platform]}`;
+      const bodyByPlatform: Record<Platform, object> = {
+        telegram: {
           bot_token: telegramForm.bot_token,
           allowed_chat_ids: telegramForm.allowed_chat_ids.split(',').map(s => s.trim()).filter(Boolean),
-        }
-        : {
+        },
+        matrix: {
           homeserver_url: matrixForm.homeserver_url,
           user_id: matrixForm.user_id,
           password: matrixForm.password,
           access_token: matrixForm.access_token,
           allowed_room_ids: matrixForm.allowed_room_ids.split(',').map(s => s.trim()).filter(Boolean),
-        };
+        },
+        discord: {
+          bot_token: discordForm.bot_token,
+          allowed_channel_ids: discordForm.allowed_channel_ids.split(',').map(s => s.trim()).filter(Boolean),
+        },
+        slack: {
+          bot_token: slackForm.bot_token,
+          app_token: slackForm.app_token,
+          allowed_channel_ids: slackForm.allowed_channel_ids.split(',').map(s => s.trim()).filter(Boolean),
+        },
+        email: {
+          imap_host: emailForm.imap_host,
+          imap_port: Number(emailForm.imap_port) || 993,
+          smtp_host: emailForm.smtp_host,
+          smtp_port: Number(emailForm.smtp_port) || 587,
+          address: emailForm.address,
+          password: emailForm.password,
+          allowed_senders: emailForm.allowed_senders.split(',').map(s => s.trim()).filter(Boolean),
+        },
+      };
+      const body = { ...bodyByPlatform[platform], system_prompt: systemPrompt, response_mode: responseMode };
       const response = await fetch(path, { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Не удалось подключить канал');
-      const identity = data.bot_username || data.matrix_user_id;
+      const identity = data.bot_username || data.matrix_user_id || data.slack_identity || data.mailbox;
       setNotice(`${identity} ожидает подтверждения — выполните /approve ${data.task_id} в Telegram.`);
       resetForm();
       fetchBindings();
@@ -102,14 +196,77 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
 
   const deleteBinding = async (binding: MessengerBinding) => {
     if (!window.confirm(`Отключить канал ${PLATFORM_LABELS[binding.platform as Platform] || binding.platform} для агента "${binding.agent_name}"?`)) return;
-    const path = binding.platform === 'matrix' ? `/api/agents/matrix/${binding.id}` : `/api/agents/telegram/${binding.id}`;
+    const path = `/api/agents/${PLATFORM_PATHS[binding.platform as Platform] || binding.platform}/${binding.id}`;
     await fetch(path, { method: 'DELETE', headers: authHeaders() });
     fetchBindings();
   };
 
-  const canSubmit = platform === 'telegram'
-    ? Boolean(agentId && telegramForm.bot_token)
-    : Boolean(agentId && matrixForm.user_id && (matrixForm.password || matrixForm.access_token));
+  const openEdit = (binding: MessengerBinding) => {
+    if (expandedId === binding.id) {
+      setExpandedId('');
+      return;
+    }
+    setExpandedId(binding.id);
+    setEditPrompt(binding.system_prompt_override || '');
+    setEditMode((binding.response_mode as ResponseMode) || 'draft');
+  };
+
+  const saveEdit = async (binding: MessengerBinding) => {
+    setSavingEdit(true);
+    try {
+      const response = await fetch(`/api/messenger-bindings/${binding.id}`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({ system_prompt: editPrompt, response_mode: editMode }),
+      });
+      if (!response.ok) throw new Error('Не удалось сохранить изменения');
+      setExpandedId('');
+      fetchBindings();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось сохранить изменения');
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  const sendReply = async (reply: PendingChannelReply) => {
+    setBusyReplyId(reply.id);
+    try {
+      const editedText = editedReplyText[reply.id];
+      const response = await fetch(`/api/channel-replies/${reply.id}/send`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ edited_text: editedText !== undefined ? editedText : null }),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.detail || 'Не удалось отправить ответ');
+      }
+      fetchReplies();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось отправить ответ');
+    } finally {
+      setBusyReplyId('');
+    }
+  };
+
+  const discardReply = async (reply: PendingChannelReply) => {
+    setBusyReplyId(reply.id);
+    try {
+      await fetch(`/api/channel-replies/${reply.id}/discard`, { method: 'POST', headers: authHeaders() });
+      fetchReplies();
+    } finally {
+      setBusyReplyId('');
+    }
+  };
+
+  const canSubmit = !agentId ? false : (
+    platform === 'telegram' ? Boolean(telegramForm.bot_token) :
+    platform === 'matrix' ? Boolean(matrixForm.user_id && (matrixForm.password || matrixForm.access_token)) :
+    platform === 'discord' ? Boolean(discordForm.bot_token) :
+    platform === 'slack' ? Boolean(slackForm.bot_token && slackForm.app_token) :
+    Boolean(emailForm.imap_host && emailForm.smtp_host && emailForm.address && emailForm.password)
+  );
 
   return (
     <div style={styles.tabWrapper}>
@@ -125,6 +282,37 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
         )}
       </div>
 
+      {replies.length > 0 && (
+        <div className="glass-panel" style={{ padding: '16px', marginBottom: '18px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <strong style={{ fontSize: '0.9rem' }}>Черновики, ожидающие отправки ({replies.length})</strong>
+          {replies.map(reply => (
+            <div key={reply.id} style={{ padding: '12px', borderRadius: 8, border: '1px solid rgba(255,255,255,.08)', background: 'rgba(255,255,255,.02)', display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <span style={{ fontSize: '0.75rem', color: 'var(--text-dim, #8a94a6)' }}>
+                {PLATFORM_LABELS[reply.platform as Platform] || reply.platform} · от {reply.incoming_from || 'неизвестно'}
+              </span>
+              <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>«{reply.incoming_text}»</span>
+              <textarea
+                className="form-input"
+                rows={3}
+                value={editedReplyText[reply.id] !== undefined ? editedReplyText[reply.id] : reply.drafted_reply}
+                onChange={e => setEditedReplyText(prev => ({ ...prev, [reply.id]: e.target.value }))}
+              />
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button type="button" className="btn-primary" disabled={busyReplyId === reply.id} onClick={() => void sendReply(reply)}>
+                  <Send size={13} /><span>Отправить</span>
+                </button>
+                <button type="button" className="icon-btn danger" disabled={busyReplyId === reply.id} onClick={() => void discardReply(reply)} title="Отклонить черновик">
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {!repliesLoading && replies.length === 0 && (
+        <p style={{ color: 'var(--text-dim, #8a94a6)', fontSize: '0.8rem', marginBottom: '14px' }}>Черновиков на подтверждение сейчас нет.</p>
+      )}
+
       {showForm && (
         <div className="glass-panel" style={{ padding: '16px', marginBottom: '18px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -137,6 +325,9 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
               <select className="form-input" value={platform} onChange={e => setPlatform(e.target.value as Platform)}>
                 <option value="telegram">Telegram</option>
                 <option value="matrix">Element / Matrix</option>
+                <option value="discord">Discord</option>
+                <option value="slack">Slack</option>
+                <option value="email">Email</option>
               </select>
             ))}
             {field('Агент', (
@@ -183,6 +374,76 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
             </div>
           )}
 
+          {platform === 'discord' && (
+            <div className="admin-add-grid">
+              {field('Bot token (Discord Developer Portal → Bot)', (
+                <input className="form-input" type="password" autoComplete="off" value={discordForm.bot_token}
+                  onChange={e => setDiscordForm({ ...discordForm, bot_token: e.target.value })} placeholder="MTIz..." />
+              ))}
+              {field('Разрешённые channel/user ID (через запятую)', (
+                <input className="form-input" value={discordForm.allowed_channel_ids}
+                  onChange={e => setDiscordForm({ ...discordForm, allowed_channel_ids: e.target.value })} placeholder="без ограничений, если пусто" />
+              ))}
+            </div>
+          )}
+
+          {platform === 'slack' && (
+            <div className="admin-add-grid">
+              {field('Bot User OAuth Token (xoxb-...)', (
+                <input className="form-input" type="password" autoComplete="off" value={slackForm.bot_token}
+                  onChange={e => setSlackForm({ ...slackForm, bot_token: e.target.value })} placeholder="xoxb-..." />
+              ))}
+              {field('App-Level Token (xapp-..., нужен scope connections:write)', (
+                <input className="form-input" type="password" autoComplete="off" value={slackForm.app_token}
+                  onChange={e => setSlackForm({ ...slackForm, app_token: e.target.value })} placeholder="xapp-..." />
+              ))}
+              {field('Разрешённые channel/user ID (через запятую)', (
+                <input className="form-input" value={slackForm.allowed_channel_ids}
+                  onChange={e => setSlackForm({ ...slackForm, allowed_channel_ids: e.target.value })} placeholder="без ограничений, если пусто" />
+              ))}
+            </div>
+          )}
+
+          {platform === 'email' && (
+            <div className="admin-add-grid">
+              {field('IMAP host', (
+                <input className="form-input" value={emailForm.imap_host}
+                  onChange={e => setEmailForm({ ...emailForm, imap_host: e.target.value })} placeholder="imap.gmail.com" />
+              ))}
+              {field('IMAP порт', (
+                <input className="form-input" type="number" value={emailForm.imap_port}
+                  onChange={e => setEmailForm({ ...emailForm, imap_port: e.target.value })} />
+              ))}
+              {field('SMTP host', (
+                <input className="form-input" value={emailForm.smtp_host}
+                  onChange={e => setEmailForm({ ...emailForm, smtp_host: e.target.value })} placeholder="smtp.gmail.com" />
+              ))}
+              {field('SMTP порт', (
+                <input className="form-input" type="number" value={emailForm.smtp_port}
+                  onChange={e => setEmailForm({ ...emailForm, smtp_port: e.target.value })} />
+              ))}
+              {field('Email адрес', (
+                <input className="form-input" value={emailForm.address}
+                  onChange={e => setEmailForm({ ...emailForm, address: e.target.value })} placeholder="agent@example.com" />
+              ))}
+              {field('Пароль (app password для Gmail/Yandex и т.п.)', (
+                <input className="form-input" type="password" autoComplete="off" value={emailForm.password}
+                  onChange={e => setEmailForm({ ...emailForm, password: e.target.value })} />
+              ))}
+              {field('Разрешённые отправители (через запятую) — настоятельно рекомендуется', (
+                <input className="form-input" value={emailForm.allowed_senders}
+                  onChange={e => setEmailForm({ ...emailForm, allowed_senders: e.target.value })} placeholder="friend@example.com, boss@company.com" />
+              ))}
+            </div>
+          )}
+
+          {field('Системный промпт для этого канала (необязательно)', (
+            <textarea className="form-input" rows={3} value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)}
+              placeholder="Оставьте пустым, чтобы использовать промпт выбранного агента без изменений. Здесь можно задать особый тон/роль именно для этого канала." />
+          ))}
+
+          <ResponseModePicker value={responseMode} onChange={setResponseMode} />
+
           <button type="button" className="btn-primary" onClick={addBinding} disabled={saving || !canSubmit} style={{ alignSelf: 'flex-start' }}>
             <span>{saving ? '...' : 'Подключить'}</span>
           </button>
@@ -199,24 +460,44 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
           {bindings.map(binding => (
-            <div key={binding.id} className="glass-panel" style={{ padding: '12px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                <MessageCircle size={16} />
-                <div>
-                  <strong style={{ fontSize: '0.9rem' }}>{binding.agent_name}</strong>
-                  <span style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-dim, #8a94a6)' }}>
-                    {PLATFORM_LABELS[binding.platform as Platform] || binding.platform} · {binding.bot_username}
+            <div key={binding.id} className="glass-panel" style={{ padding: '12px 16px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <MessageCircle size={16} />
+                  <div>
+                    <strong style={{ fontSize: '0.9rem' }}>{binding.agent_name}</strong>
+                    <span style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-dim, #8a94a6)' }}>
+                      {PLATFORM_LABELS[binding.platform as Platform] || binding.platform} · {binding.bot_username} · {RESPONSE_MODE_LABELS[(binding.response_mode as ResponseMode) || 'draft']}
+                    </span>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <span className={`admin-status-chip ${binding.status === 'active' ? 'is-active' : binding.status === 'failed' || binding.status === 'revoked' ? 'is-revoked' : ''}`}>
+                    <i className="dot" />{STATUS_LABELS[binding.status] || binding.status}
                   </span>
+                  {binding.status === 'active' && (
+                    <button type="button" className="icon-btn" title="Настроить промпт/режим" onClick={() => openEdit(binding)}>
+                      {expandedId === binding.id ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                    </button>
+                  )}
+                  <button type="button" className="icon-btn danger" title="Отключить" onClick={() => deleteBinding(binding)}>
+                    <Trash2 size={14} />
+                  </button>
                 </div>
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                <span className={`admin-status-chip ${binding.status === 'active' ? 'is-active' : binding.status === 'failed' || binding.status === 'revoked' ? 'is-revoked' : ''}`}>
-                  <i className="dot" />{STATUS_LABELS[binding.status] || binding.status}
-                </span>
-                <button type="button" className="icon-btn danger" title="Отключить" onClick={() => deleteBinding(binding)}>
-                  <Trash2 size={14} />
-                </button>
-              </div>
+
+              {expandedId === binding.id && (
+                <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,.07)', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {field('Системный промпт для этого канала', (
+                    <textarea className="form-input" rows={3} value={editPrompt} onChange={e => setEditPrompt(e.target.value)}
+                      placeholder="Пусто — использовать промпт агента как есть" />
+                  ))}
+                  <ResponseModePicker value={editMode} onChange={setEditMode} />
+                  <button type="button" className="btn-primary" disabled={savingEdit} onClick={() => void saveEdit(binding)} style={{ alignSelf: 'flex-start' }}>
+                    <Check size={13} /><span>{savingEdit ? '...' : 'Сохранить'}</span>
+                  </button>
+                </div>
+              )}
             </div>
           ))}
         </div>

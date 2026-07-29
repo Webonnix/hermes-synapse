@@ -34,6 +34,7 @@ import {
 
 // Import sub-components
 import { ChatTab } from './components/ChatTab';
+import { SimpleChatView } from './components/SimpleChatView';
 import { ConfigTab } from './components/ConfigTab';
 import { LogsTab } from './components/LogsTab';
 import { ActivityTab } from './components/ActivityTab';
@@ -79,6 +80,12 @@ export default function App() {
     return (savedTab && legacySettingsTabs.includes(savedTab) ? savedTab : 'config') as any;
   });
   const [vexaTranscriptOpen, setVexaTranscriptOpen] = useState(false);
+  const [vexaUiMode, setVexaUiMode] = useState<'immersive' | 'simple'>(
+    () => (localStorage.getItem('hermes_vexa_ui_mode') === 'simple' ? 'simple' : 'immersive')
+  );
+  useEffect(() => {
+    localStorage.setItem('hermes_vexa_ui_mode', vexaUiMode);
+  }, [vexaUiMode]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => localStorage.getItem('hermes_sidebar_collapsed') === '1');
   const [language, setLanguageState] = useState<Language>(() => (localStorage.getItem('hermes_language') as Language) || 'ru');
@@ -175,6 +182,10 @@ export default function App() {
   const [micEnabled, setMicEnabled] = useState(false);
   const [micState, setMicState] = useState<'off' | 'listening' | 'capturing' | 'transcribing' | 'error'>('off');
   const [micErrorMessage, setMicErrorMessage] = useState('');
+  // Bumped every time a listening turn ends without any recognised speech, so
+  // Vexa's dialog mode can restart the microphone — before this, a turn the STT
+  // heard nothing in simply ended the conversation loop with no visible reason.
+  const [voiceIdleTick, setVoiceIdleTick] = useState(0);
 
   const [inputValue, setInputValue] = useState('');
   const [selectedLog, setSelectedLog] = useState<DecisionLog | null>(null);
@@ -195,6 +206,11 @@ export default function App() {
   const voiceStreamRef = useRef<MediaStream | null>(null);
   const voiceChunksRef = useRef<Blob[]>([]);
   const vadCleanupRef = useRef<(() => void) | null>(null);
+  // Set only when the VAD gives up on a recording it never heard speech in: that
+  // one is dropped without an STT round-trip and reported as an idle turn so
+  // dialog mode can re-arm. A manually stopped recording is always submitted,
+  // however quiet it was — the server gets the final say on it.
+  const voiceNoSpeechRef = useRef(false);
   const micStateRef = useRef<'off' | 'listening' | 'capturing' | 'transcribing' | 'error'>('off');
   const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
   const ttsAudioUrlRef = useRef('');
@@ -524,7 +540,13 @@ export default function App() {
 
       const text = String(data.text || '').trim();
       if (!text) {
-        throw new Error('No speech detected in recording.');
+        // Recognised nothing (background noise, a cough, a false trigger). Not an
+        // error worth an alarm pill — end the turn quietly and let dialog mode
+        // take another one rather than dropping out of the conversation.
+        setMicEnabled(false);
+        setMicState('off');
+        setVoiceIdleTick(tick => tick + 1);
+        return;
       }
 
       // Show what was recognized before it's auto-sent, so the user can actually see
@@ -601,6 +623,7 @@ export default function App() {
 
       voiceStreamRef.current = stream;
       voiceChunksRef.current = [];
+      voiceNoSpeechRef.current = false;
       mediaRecorderRef.current = recorder;
 
       recorder.ondataavailable = (event) => {
@@ -612,7 +635,16 @@ export default function App() {
       recorder.onstop = () => {
         const recordedType = recorder.mimeType || mimeType || 'audio/webm';
         const blob = new Blob(voiceChunksRef.current, { type: recordedType });
+        const heardNothing = voiceNoSpeechRef.current;
         resetVoiceRecorder();
+        if (heardNothing) {
+          // Silence: skip the upload (whisper's own VAD would strip it to an
+          // empty transcript anyway) and report an idle turn.
+          setMicEnabled(false);
+          setMicState('off');
+          setVoiceIdleTick(tick => tick + 1);
+          return;
+        }
         submitVoiceBlob(blob);
       };
 
@@ -638,7 +670,19 @@ export default function App() {
           source.connect(analyser);
           const dataArray = new Uint8Array(analyser.frequencyBinCount);
 
-          const SPEECH_RMS_THRESHOLD = 0.025;
+          // A fixed 0.025 floor assumed a hot microphone. On a quieter input the
+          // RMS never crossed it, so no speech was ever "started", the recording
+          // ran to its 60s cap and arrived at the STT as pure silence — the user
+          // talks and Vexa simply never answers. The threshold is now derived
+          // from the room: sample the ambient level during ARM_DELAY_MS and sit a
+          // fixed multiple above it, clamped so neither a dead-silent room nor a
+          // noisy one produces a useless threshold.
+          const MIN_RMS_THRESHOLD = 0.012;
+          const MAX_RMS_THRESHOLD = 0.05;
+          const NOISE_FLOOR_MULTIPLIER = 2.5;
+          let speechThreshold = MIN_RMS_THRESHOLD;
+          let noiseFloorSum = 0;
+          let noiseFloorSamples = 0;
           const SILENCE_MS = 1000;
           // A single instant above threshold used to count as "speech started" — the
           // confirmation beep (played the moment recording starts) or any stray click
@@ -652,6 +696,11 @@ export default function App() {
           const MIN_SUSTAINED_SPEECH_MS = 200;
           const ARM_DELAY_MS = 350;
           const MAX_RECORDING_MS = 60000;
+          // If nothing resembling speech turns up in this window, stop and let the
+          // caller re-arm rather than recording silence until MAX_RECORDING_MS —
+          // a minute of dead air costs a pointless STT round-trip and leaves
+          // dialog mode looking frozen.
+          const NO_SPEECH_TIMEOUT_MS = 12000;
           const startedAt = performance.now();
           let candidateSpeechAt: number | null = null;
           let speechStartedAt: number | null = null;
@@ -671,11 +720,27 @@ export default function App() {
             const now = performance.now();
 
             if (now - startedAt < ARM_DELAY_MS) {
+              // Sample the room only past the confirmation beep's ~120ms tail —
+              // averaging the beep itself in would inflate the floor and push the
+              // threshold right back above normal speech.
+              if (now - startedAt > 200) {
+                noiseFloorSum += rms;
+                noiseFloorSamples += 1;
+              }
               rafId = requestAnimationFrame(tick);
               return;
             }
 
-            if (rms > SPEECH_RMS_THRESHOLD) {
+            if (noiseFloorSamples > 0) {
+              const noiseFloor = noiseFloorSum / noiseFloorSamples;
+              speechThreshold = Math.min(
+                MAX_RMS_THRESHOLD,
+                Math.max(MIN_RMS_THRESHOLD, noiseFloor * NOISE_FLOOR_MULTIPLIER)
+              );
+              noiseFloorSamples = 0;
+            }
+
+            if (rms > speechThreshold) {
               if (candidateSpeechAt === null) candidateSpeechAt = now;
               if (speechStartedAt === null && now - candidateSpeechAt >= MIN_SUSTAINED_SPEECH_MS) {
                 speechStartedAt = candidateSpeechAt;
@@ -691,6 +756,13 @@ export default function App() {
                   return;
                 }
               }
+            }
+
+            if (speechStartedAt === null && now - startedAt > NO_SPEECH_TIMEOUT_MS) {
+              stopped = true;
+              voiceNoSpeechRef.current = true;
+              stopVoiceRecording();
+              return;
             }
 
             if (now - startedAt > MAX_RECORDING_MS) {
@@ -1816,7 +1888,8 @@ export default function App() {
           auto_rag: editedRuntimeConfig.auto_rag,
           memory_enabled: editedRuntimeConfig.memory_enabled,
           memory_auto_save: editedRuntimeConfig.memory_auto_save,
-          memory_max_items: editedRuntimeConfig.memory_max_items
+          memory_max_items: editedRuntimeConfig.memory_max_items,
+          telegram_reply_mode: editedRuntimeConfig.telegram_reply_mode
         })
       });
       if (response.ok) {
@@ -2022,8 +2095,11 @@ export default function App() {
     );
   }
 
+  const vexaImmersive = activeTab === 'vexa' && vexaUiMode === 'immersive';
+  const railCollapsed = isSidebarCollapsed || vexaImmersive;
+
   return (
-    <div className={`app-container scanlines${activeTab === 'vexa' ? ' is-vexa-mode' : ''}`}>
+    <div className={`app-container scanlines${activeTab === 'vexa' ? (vexaUiMode === 'immersive' ? ' is-vexa-mode' : ' is-vexa-simple-mode') : ''}`}>
       {/* Mobile Menu Toggle Button */}
       <button 
         onClick={() => setSidebarOpen(!sidebarOpen)}
@@ -2068,27 +2144,31 @@ export default function App() {
         />
       )}
 
-      {/* 1. Left Sidebar */}
+      {/* 1. Left Sidebar — pinned to its icon rail while the Vexa dashboard is up, so the
+          four-column composition gets the width it needs. The user's own collapse
+          preference is untouched and comes back on any other tab. */}
       <aside
-        style={{ ...styles.sidebar, ...(isSidebarCollapsed ? styles.sidebarCollapsed : {}) }}
-        className={`glass-panel sidebar ${sidebarOpen ? 'sidebar-open' : ''} ${isSidebarCollapsed ? 'sidebar-collapsed' : ''}`}
+        style={{ ...styles.sidebar, ...(railCollapsed ? styles.sidebarCollapsed : {}) }}
+        className={`glass-panel sidebar ${sidebarOpen ? 'sidebar-open' : ''} ${railCollapsed ? 'sidebar-collapsed' : ''}`}
       >
-        <button
-          type="button"
-          onClick={toggleSidebar}
-          style={styles.sidebarToggle}
-          title={isSidebarCollapsed ? 'Развернуть меню' : 'Свернуть меню до иконок'}
-          aria-label={isSidebarCollapsed ? 'Развернуть меню' : 'Свернуть меню до иконок'}
-        >
-          {isSidebarCollapsed ? <ChevronsRight size={17} /> : <ChevronsLeft size={17} />}
-        </button>
+        {!vexaImmersive && (
+          <button
+            type="button"
+            onClick={toggleSidebar}
+            style={styles.sidebarToggle}
+            title={isSidebarCollapsed ? 'Развернуть меню' : 'Свернуть меню до иконок'}
+            aria-label={isSidebarCollapsed ? 'Развернуть меню' : 'Свернуть меню до иконок'}
+          >
+            {isSidebarCollapsed ? <ChevronsRight size={17} /> : <ChevronsLeft size={17} />}
+          </button>
+        )}
         <div style={styles.logoArea}>
           <HermesMark />
           <h1 className="glow-text-cyan sidebar-title" style={styles.logoTitle}>HERMES</h1>
         </div>
         <p className="sidebar-subtitle" style={styles.logoSubtitle}>{t('appSubtitle')}</p>
         
-        <nav style={{ ...styles.navMenu, ...(isSidebarCollapsed ? styles.navMenuCollapsed : {}) }}>
+        <nav style={{ ...styles.navMenu, ...(railCollapsed ? styles.navMenuCollapsed : {}) }}>
           <button
             style={navStyle('vexa')}
             onClick={() => {
@@ -2189,98 +2269,150 @@ export default function App() {
       {/* 2. Main Workspace */}
       <main
         style={styles.mainContent}
-        className={activeTab === 'vexa' ? 'vexa-main' : undefined}
+        className={
+          activeTab === 'vexa'
+            ? (vexaUiMode === 'immersive' ? 'vexa-main' : 'simple-chat-page')
+            : undefined
+        }
       >
         {activeTab === 'vexa' && (
           <>
-            <VexaCommandCenter
-              agents={subagents}
-              messages={messages}
-              isConnected={isConnected}
-              isGenerating={isGenerating}
-              isSpeaking={isSpeaking}
-              micState={micState}
-              micErrorMessage={micErrorMessage}
-              onVoiceToggle={handleVoiceToggle}
-              onCommand={handleVexaCommand}
-              onStop={handleStopGeneration}
-              language={language}
-              micStreamRef={voiceStreamRef}
-              ttsAudioElRef={ttsAudioRef}
-              onOpenAgentChat={(agentId) => {
-                if (agentId) selectChat(agentId);
-                setVexaTranscriptOpen(true);
-              }}
-              chatSessions={chatSessions}
-              currentChatId={currentChatId}
-              getSessionLabel={getSessionLabel}
-              onCreateSession={handleCreateNewSession}
-              fetchAgents={fetchSubagents}
-            />
-            {vexaTranscriptOpen && (
-              <FloatingWindow
-                title={t('navVexa')}
-                subtitle={getSessionLabel(currentChatId)}
-                storageKey="hermes_vexa_channel_window"
-                onClose={() => setVexaTranscriptOpen(false)}
-                labels={{
-                  minimize: t('vexaWindowMinimize'),
-                  restore: t('vexaWindowRestore'),
-                  fullscreen: t('vexaWindowFullscreen'),
-                  exitFullscreen: t('vexaWindowExitFullscreen'),
-                  close: t('vexaWindowClose'),
-                }}
-              >
-                <ChatTab
-                  currentChatId={currentChatId}
-                  chatSessions={chatSessions}
+            {vexaUiMode === 'simple' ? (
+              <SimpleChatView
+                language={language}
+                messages={messages}
+                inputValue={inputValue}
+                setInputValue={setInputValue}
+                isGenerating={isGenerating}
+                onStopGeneration={handleStopGeneration}
+                handleSendMessage={handleSendMessage}
+                isConnected={isConnected}
+                micState={micState}
+                onVoiceToggle={handleVoiceToggle}
+                chatSessions={chatSessions}
+                currentChatId={currentChatId}
+                selectChat={selectChat}
+                handleCreateNewSession={handleCreateNewSession}
+                getSessionLabel={getSessionLabel}
+                fetchChatSessions={fetchChatSessions}
+                mainChatEndRef={mainChatEndRef}
+                attachedFile={attachedFile}
+                setAttachedFile={setAttachedFile}
+                handleChatFileAttach={handleChatFileAttach}
+                isUploading={isUploading}
+                onSwitchToImmersive={() => setVexaUiMode('immersive')}
+                isTTSEnabled={isTTSEnabled}
+                setIsTTSEnabled={setIsTTSEnabled}
+                isSpeaking={isSpeaking}
+                setIsSpeaking={setIsSpeaking}
+              />
+            ) : (
+              <>
+                <VexaCommandCenter
+                  agents={subagents}
                   messages={messages}
-                  inputValue={inputValue}
-                  setInputValue={setInputValue}
+                  isConnected={isConnected}
+                  isGenerating={isGenerating}
                   isSpeaking={isSpeaking}
-                  setIsSpeaking={setIsSpeaking}
                   micState={micState}
                   micErrorMessage={micErrorMessage}
-                  micEnabled={micEnabled}
+                  voiceIdleTick={voiceIdleTick}
                   onVoiceToggle={handleVoiceToggle}
-                  isTTSEnabled={isTTSEnabled}
-                  setIsTTSEnabled={setIsTTSEnabled}
-                  isGenerating={isGenerating}
-                  playingMsgIndex={playingMsgIndex}
-                  setPlayingMsgIndex={setPlayingMsgIndex}
-                  config={config}
-                  isConnected={isConnected}
-                  isUploading={isUploading}
-                  attachedFile={attachedFile}
-                  setAttachedFile={setAttachedFile}
-                  speakText={speakText}
-                  handleClearChat={handleClearChat}
-                  handleSendMessage={handleSendMessage}
-                  handleChatFileAttach={handleChatFileAttach}
-                  selectChat={selectChat}
-                  handleCreateNewSession={handleCreateNewSession}
-                  fetchChatSessions={fetchChatSessions}
+                  onCommand={handleVexaCommand}
+                  onStop={handleStopGeneration}
+                  language={language}
+                  micStreamRef={voiceStreamRef}
+                  ttsAudioElRef={ttsAudioRef}
+                  onOpenAgentChat={(agentId) => {
+                    if (agentId) selectChat(agentId);
+                    setVexaTranscriptOpen(true);
+                  }}
+                  chatSessions={chatSessions}
+                  currentChatId={currentChatId}
                   getSessionLabel={getSessionLabel}
-                  mainChatEndRef={mainChatEndRef}
-                  t={t}
-                  onStopGeneration={handleStopGeneration}
-                  onRetryLast={handleRetryLast}
-                  hasLastUserMessage={messages.some(message => message.role === 'user')}
-                  onChangeModel={() => { setActiveTab('settings'); setSettingsSection('config'); }}
-                  subagents={subagents}
-                  handleSetSessionAgent={handleSetSessionAgent}
-                  activeDevRun={lastDevRunEvent}
-                  onOpenDevRuns={() => { setVexaTranscriptOpen(false); setActiveTab('devruns'); }}
+                  onCreateSession={handleCreateNewSession}
+                  onSwitchToSimpleMode={() => setVexaUiMode('simple')}
+                  fetchAgents={fetchSubagents}
+                  onNavigate={(route) => {
+                    // The dashboard's bottom navigation speaks in route ids; Hermes drives
+                    // the workspace from `activeTab`, so translate rather than add a router.
+                    const tab = route === 'analytics' ? 'metrics'
+                      : route === 'protocols' ? 'processes'
+                        : route === 'agents' ? 'agents'
+                          : route === 'settings' ? 'settings' : 'vexa';
+                    setActiveTab(tab);
+                  }}
                 />
-              </FloatingWindow>
+                {vexaTranscriptOpen && (
+                  <FloatingWindow
+                    title={t('navVexa')}
+                    subtitle={getSessionLabel(currentChatId)}
+                    storageKey="hermes_vexa_channel_window"
+                    onClose={() => setVexaTranscriptOpen(false)}
+                    labels={{
+                      minimize: t('vexaWindowMinimize'),
+                      restore: t('vexaWindowRestore'),
+                      fullscreen: t('vexaWindowFullscreen'),
+                      exitFullscreen: t('vexaWindowExitFullscreen'),
+                      close: t('vexaWindowClose'),
+                    }}
+                  >
+                    <ChatTab
+                      currentChatId={currentChatId}
+                      chatSessions={chatSessions}
+                      messages={messages}
+                      inputValue={inputValue}
+                      setInputValue={setInputValue}
+                      isSpeaking={isSpeaking}
+                      setIsSpeaking={setIsSpeaking}
+                      micState={micState}
+                      micErrorMessage={micErrorMessage}
+                      micEnabled={micEnabled}
+                      onVoiceToggle={handleVoiceToggle}
+                      isTTSEnabled={isTTSEnabled}
+                      setIsTTSEnabled={setIsTTSEnabled}
+                      isGenerating={isGenerating}
+                      playingMsgIndex={playingMsgIndex}
+                      setPlayingMsgIndex={setPlayingMsgIndex}
+                      config={config}
+                      isConnected={isConnected}
+                      isUploading={isUploading}
+                      attachedFile={attachedFile}
+                      setAttachedFile={setAttachedFile}
+                      speakText={speakText}
+                      handleClearChat={handleClearChat}
+                      handleSendMessage={handleSendMessage}
+                      handleChatFileAttach={handleChatFileAttach}
+                      selectChat={selectChat}
+                      handleCreateNewSession={handleCreateNewSession}
+                      fetchChatSessions={fetchChatSessions}
+                      getSessionLabel={getSessionLabel}
+                      mainChatEndRef={mainChatEndRef}
+                      t={t}
+                      onStopGeneration={handleStopGeneration}
+                      onRetryLast={handleRetryLast}
+                      hasLastUserMessage={messages.some(message => message.role === 'user')}
+                      onChangeModel={() => { setActiveTab('settings'); setSettingsSection('config'); }}
+                      subagents={subagents}
+                      handleSetSessionAgent={handleSetSessionAgent}
+                      activeDevRun={lastDevRunEvent}
+                      onOpenDevRuns={() => { setVexaTranscriptOpen(false); setActiveTab('devruns'); }}
+                    />
+                  </FloatingWindow>
+                )}
+              </>
             )}
           </>
         )}
 
-        <AppHeader
-          language={language}
-          onOpenProcesses={() => setActiveTab('processes')}
-        />
+        {/* The Vexa dashboard carries its own approvals badge and emergency stop in its
+            header, so the floating one would duplicate them there. */}
+        {!vexaImmersive && (
+          <AppHeader
+            language={language}
+            onOpenProcesses={() => setActiveTab('processes')}
+          />
+        )}
 
         {activeTab === 'processes' && <ProcessesTab language={language} />}
 
@@ -2379,6 +2511,12 @@ export default function App() {
                 onDevRunNotificationsChange={(enabled) => {
                   localStorage.setItem('hermes_devrun_notifications', enabled ? '1' : '0');
                   setDevRunNotificationsEnabled(enabled);
+                }}
+                activeModel={config.model}
+                onModelActivated={(nextConfig) => {
+                  setConfig(prev => ({ ...prev, ...nextConfig }));
+                  setEditedRuntimeConfig(prev => ({ ...prev, ...nextConfig }));
+                  if (nextConfig.model) setEditedModel(nextConfig.model);
                 }}
               />
             )}

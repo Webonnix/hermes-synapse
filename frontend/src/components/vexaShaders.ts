@@ -171,3 +171,74 @@ void main() {
   float core = smoothstep(0.5, 0.14, d);
   gl_FragColor = vec4(uColor, core * vAlpha);
 }`;
+
+// ── Neural mesh ──────────────────────────────────────────────────────────────
+// A static point cloud filling a spherical shell around the core. Positions are baked
+// into the buffer once; the shader only breathes them in and out and modulates
+// brightness, so no per-frame CPU work touches the geometry.
+export const NEURAL_POINT_VERTEX_SHADER = `
+uniform float uTime;
+uniform float uAmp;
+uniform float uEnergy;
+uniform float uBoot;
+attribute float aSize;
+attribute float aSeed;
+varying float vAlpha;
+
+void main() {
+  float breathe = 1.0 + sin(uTime * 0.5 + aSeed * 6.283) * 0.018 + uAmp * 0.05;
+  vec3 pos = position * breathe * uBoot;
+  vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+  gl_PointSize = aSize * (11.0 / -mvPosition.z) * (1.0 + uAmp * 0.4);
+  float twinkle = 0.55 + 0.45 * sin(uTime * 1.7 + aSeed * 12.0);
+  vAlpha = (0.18 + 0.5 * twinkle) * (0.45 + uEnergy * 0.55) * uBoot;
+  gl_Position = projectionMatrix * mvPosition;
+}`;
+
+export const NEURAL_POINT_FRAGMENT_SHADER = `
+uniform vec3 uColor;
+varying float vAlpha;
+void main() {
+  vec2 uv = gl_PointCoord - 0.5;
+  float d = length(uv);
+  if (d > 0.5) discard;
+  float core = smoothstep(0.5, 0.08, d);
+  gl_FragColor = vec4(uColor + vec3(core * 0.35), core * vAlpha);
+}`;
+
+// Link segments between neighbouring nodes. `aDepth` is the midpoint's normalised
+// distance from the core, so links nearer the centre read brighter — the depth cue the
+// reference image relies on.
+export const NEURAL_LINK_VERTEX_SHADER = `
+uniform float uTime;
+uniform float uAmp;
+uniform float uBoot;
+attribute float aDepth;
+attribute float aSeed;
+varying float vDepth;
+varying float vSeed;
+
+void main() {
+  vec3 pos = position * (1.0 + uAmp * 0.04) * uBoot;
+  vDepth = aDepth;
+  vSeed = aSeed;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+}`;
+
+export const NEURAL_LINK_FRAGMENT_SHADER = `
+uniform float uTime;
+uniform float uEnergy;
+uniform float uBoot;
+uniform vec3 uColor;
+uniform vec3 uColorFar;
+varying float vDepth;
+varying float vSeed;
+
+void main() {
+  float near = 1.0 - vDepth;
+  // Slow per-link shimmer so the mesh never looks like a frozen wireframe.
+  float flicker = 0.72 + 0.28 * sin(uTime * 0.9 + vSeed * 21.0);
+  float alpha = (0.05 + near * 0.3) * (0.5 + uEnergy * 0.6) * flicker * uBoot;
+  if (alpha < 0.006) discard;
+  gl_FragColor = vec4(mix(uColorFar, uColor, near), alpha);
+}`;
