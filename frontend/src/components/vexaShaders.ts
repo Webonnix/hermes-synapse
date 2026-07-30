@@ -35,20 +35,34 @@ void main() {
   float kernel = smoothstep(0.075 * breathe, 0.0, r);
   float bleed = smoothstep(0.17 * breathe, 0.02, r) * 0.42;
 
-  // Thin containment ring just outside the kernel.
-  float ringRadius = 0.145 * breathe;
-  float ring = smoothstep(0.012, 0.0, abs(r - ringRadius)) * (0.45 + uEnergy * 0.5);
+  // Bright containment annulus around the kernel — a hard visual landmark in the
+  // reference, not a faint hairline.
+  float ringRadius = 0.19 * breathe;
+  float ringBand = abs(r - ringRadius);
+  float ring = smoothstep(0.022, 0.002, ringBand) * (0.75 + uEnergy * 0.45);
+  float ringGlow = smoothstep(0.07, 0.0, ringBand) * 0.22;
+
+  // Four-point star flare escaping the kernel.
+  vec2 aa = abs(uv);
+  float spikeH = smoothstep(0.02, 0.0, aa.y) * smoothstep(0.42, 0.02, aa.x);
+  float spikeV = smoothstep(0.02, 0.0, aa.x) * smoothstep(0.42, 0.02, aa.y);
+  vec2 rot = vec2(uv.x + uv.y, uv.x - uv.y) * 0.70710678;
+  vec2 ad = abs(rot);
+  float spikeD = (smoothstep(0.012, 0.0, ad.y) * smoothstep(0.26, 0.02, ad.x)
+                + smoothstep(0.012, 0.0, ad.x) * smoothstep(0.26, 0.02, ad.y)) * 0.55;
+  float flare = (spikeH + spikeV + spikeD) * (0.6 + uEnergy * 0.5);
 
   // Soft halo bridging the kernel and the surrounding point cloud.
   float halo = smoothstep(0.62, 0.05, r) * (0.1 + uEnergy * 0.16);
   float ambient = smoothstep(1.0, 0.1, r) * 0.05 * (0.5 + uEnergy * 0.5);
 
-  float alpha = clamp(kernel + bleed + ring + halo + ambient, 0.0, 1.0);
+  float alpha = clamp(kernel + bleed + ring + ringGlow + flare + halo + ambient, 0.0, 1.0);
   if (alpha < 0.012) discard;
 
-  // Toward white at the centre, toward the phase colour further out.
-  vec3 hot = mix(uColor, vec3(1.0), clamp(kernel * 1.1 + bleed * 0.55, 0.0, 1.0));
-  vec3 color = hot * (0.6 + uEnergy * 0.5 + kernel * 1.6 + ring * 0.8);
+  // Toward white at the centre and along the flare, toward the phase colour further out.
+  float whiteness = clamp(kernel * 1.1 + bleed * 0.55 + flare * 0.8 + ring * 0.35, 0.0, 1.0);
+  vec3 hot = mix(uColor, vec3(1.0), whiteness);
+  vec3 color = hot * (0.6 + uEnergy * 0.5 + kernel * 1.6 + ring * 1.1 + flare * 1.2);
   gl_FragColor = vec4(color, alpha);
 }`;
 
@@ -112,12 +126,18 @@ uniform vec3 uColor;
 varying vec2 vUv;
 
 void main() {
-  float travel = fract(vUv.x * uDashCount - uTime * uDashSpeed);
-  float dash = smoothstep(0.0, 0.08, travel) * smoothstep(0.85, 0.35, travel);
-  float rim = smoothstep(0.5, 0.0, abs(vUv.y - 0.5));
-  float alpha = (0.05 + dash * 1.1 * rim) * uOpacity * (0.5 + uEnergy * 0.4 + uAmp * 0.1);
-  if (alpha < 0.01) discard;
-  vec3 color = uColor * (0.7 + dash * 1.3);
+  // Cross-section falloff: a bright filament core with a soft glow either side.
+  float across = abs(vUv.y - 0.5) * 2.0;
+  float core = smoothstep(0.55, 0.0, across);
+  float glow = smoothstep(1.0, 0.15, across) * 0.45;
+
+  // Slow luminance swell travelling along the curve, so the ring is alive without
+  // breaking into dashes.
+  float swell = 0.72 + 0.28 * sin(vUv.x * uDashCount * 6.28318 - uTime * uDashSpeed * 2.0);
+
+  float alpha = (core * 0.95 + glow) * swell * uOpacity * (0.55 + uEnergy * 0.45 + uAmp * 0.12);
+  if (alpha < 0.008) discard;
+  vec3 color = uColor * (0.85 + core * 0.9 + uAmp * 0.2);
   gl_FragColor = vec4(color, clamp(alpha, 0.0, 1.0));
 }`;
 

@@ -19,7 +19,7 @@ export function getVexaQualityPreset(): VexaQualityPreset {
     && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   if (reduceMotion) {
     return {
-      particleCount: 90, orbitCount: 3, filamentCount: 0,
+      particleCount: 90, orbitCount: 7, filamentCount: 0,
       neuralPointCount: 320, linksPerNode: 2, pulseCount: 8,
       dprCap: 1.5, bloomEnabled: false, reduceMotion: true,
     };
@@ -29,14 +29,14 @@ export function getVexaQualityPreset(): VexaQualityPreset {
   const lowCores = (navigator.hardwareConcurrency || 4) <= 4;
   if (isNarrow || lowCores) {
     return {
-      particleCount: 160, orbitCount: 4, filamentCount: 2,
+      particleCount: 160, orbitCount: 10, filamentCount: 2,
       neuralPointCount: 900, linksPerNode: 3, pulseCount: 24,
       dprCap: 1.5, bloomEnabled: false, reduceMotion: false,
     };
   }
 
   return {
-    particleCount: 320, orbitCount: 6, filamentCount: 4,
+    particleCount: 320, orbitCount: 18, filamentCount: 4,
     neuralPointCount: 2400, linksPerNode: 4, pulseCount: 56,
     dprCap: 2, bloomEnabled: true, reduceMotion: false,
   };

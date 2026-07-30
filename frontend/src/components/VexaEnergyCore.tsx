@@ -59,6 +59,9 @@ interface VexaEnergyCoreProps {
 
 const ERROR_PULSE_COLOR = new THREE.Color(1.0, 0.42, 0.32);
 
+/** Violet the orbit strands blend toward, per their `hue`. */
+const ORBIT_VIOLET = new THREE.Color(0.62, 0.32, 1.0);
+
 const PHASE_COLOR: Record<VoicePhase, [number, number, number]> = {
   offline: [0.22, 0.26, 0.32],
   ready: [0.16, 0.52, 1.0],
@@ -103,20 +106,34 @@ interface Orbit3DConfig {
   speed: number;
   dir: 1 | -1;
   opacity: number;
+  /** 0 = phase colour, 1 = violet. The reference weaves violet strands through the ball. */
+  hue: number;
 }
 
-// Six tilted 3D orbit rings around the core — real TorusGeometry, not the flat
-// camera-facing quads above. Varying radius/tilt/speed/direction avoids the "perfectly
-// concentric" look; slow rotation.y drift produces a precession-like tumble rather than a
-// flat spin (a torus is rotationally symmetric around its own normal, so what reads as
-// motion here is this precession plus the shader's traveling dash).
+// The orbits are the core's defining structure: a woven ball of bold, continuous, glowing
+// ellipses at many inclinations — the reference reads as an atom model, not as a few
+// concentric hoops. Radii deliberately overlap (1.05..2.0) so the curves cross each other
+// through the volume instead of sitting in separate shells, and tube radii are an order of
+// magnitude thicker than the earlier hairlines.
 const ORBIT_CONFIGS: Orbit3DConfig[] = [
-  { radius: 1.5, tubeRadius: 0.006, tiltX: 0.4, tiltZ: 0.15, dashCount: 3, dashSpeed: 0.35, speed: 0.05, dir: 1, opacity: 0.8 },
-  { radius: 1.75, tubeRadius: 0.005, tiltX: -0.6, tiltZ: 0.45, dashCount: 4, dashSpeed: -0.28, speed: 0.04, dir: -1, opacity: 0.72 },
-  { radius: 2.0, tubeRadius: 0.005, tiltX: 1.0, tiltZ: -0.3, dashCount: 2, dashSpeed: 0.42, speed: 0.035, dir: 1, opacity: 0.66 },
-  { radius: 2.25, tubeRadius: 0.004, tiltX: -0.25, tiltZ: -0.85, dashCount: 5, dashSpeed: -0.22, speed: 0.03, dir: -1, opacity: 0.58 },
-  { radius: 2.5, tubeRadius: 0.004, tiltX: 1.2, tiltZ: 0.55, dashCount: 3, dashSpeed: 0.3, speed: 0.025, dir: 1, opacity: 0.5 },
-  { radius: 2.75, tubeRadius: 0.0035, tiltX: -1.05, tiltZ: 0.2, dashCount: 6, dashSpeed: -0.18, speed: 0.02, dir: -1, opacity: 0.42 },
+  { radius: 1.10, tubeRadius: 0.016, tiltX: 0.10, tiltZ: 0.05, dashCount: 2, dashSpeed: 0.30, speed: 0.055, dir: 1, opacity: 0.95, hue: 0 },
+  { radius: 1.18, tubeRadius: 0.014, tiltX: 1.35, tiltZ: 0.62, dashCount: 3, dashSpeed: -0.26, speed: 0.048, dir: -1, opacity: 0.9, hue: 0 },
+  { radius: 1.26, tubeRadius: 0.015, tiltX: -0.78, tiltZ: 1.15, dashCount: 2, dashSpeed: 0.34, speed: 0.052, dir: 1, opacity: 0.88, hue: 0.75 },
+  { radius: 1.34, tubeRadius: 0.013, tiltX: 0.55, tiltZ: -0.95, dashCount: 4, dashSpeed: -0.3, speed: 0.044, dir: -1, opacity: 0.86, hue: 0 },
+  { radius: 1.42, tubeRadius: 0.015, tiltX: -1.22, tiltZ: 0.28, dashCount: 2, dashSpeed: 0.28, speed: 0.05, dir: 1, opacity: 0.84, hue: 0 },
+  { radius: 1.50, tubeRadius: 0.013, tiltX: 0.88, tiltZ: 1.42, dashCount: 3, dashSpeed: -0.35, speed: 0.042, dir: -1, opacity: 0.82, hue: 0.55 },
+  { radius: 1.56, tubeRadius: 0.014, tiltX: -0.35, tiltZ: -1.3, dashCount: 2, dashSpeed: 0.32, speed: 0.046, dir: 1, opacity: 0.8, hue: 0 },
+  { radius: 1.63, tubeRadius: 0.012, tiltX: 1.05, tiltZ: -0.42, dashCount: 4, dashSpeed: -0.24, speed: 0.038, dir: -1, opacity: 0.78, hue: 0 },
+  { radius: 1.70, tubeRadius: 0.013, tiltX: -1.48, tiltZ: 0.85, dashCount: 2, dashSpeed: 0.36, speed: 0.04, dir: 1, opacity: 0.76, hue: 0.85 },
+  { radius: 1.76, tubeRadius: 0.012, tiltX: 0.32, tiltZ: 0.48, dashCount: 3, dashSpeed: -0.28, speed: 0.036, dir: -1, opacity: 0.72, hue: 0 },
+  { radius: 1.82, tubeRadius: 0.011, tiltX: -0.95, tiltZ: -0.68, dashCount: 2, dashSpeed: 0.26, speed: 0.034, dir: 1, opacity: 0.7, hue: 0 },
+  { radius: 1.88, tubeRadius: 0.012, tiltX: 1.5, tiltZ: 1.05, dashCount: 4, dashSpeed: -0.32, speed: 0.032, dir: -1, opacity: 0.66, hue: 0.6 },
+  { radius: 1.93, tubeRadius: 0.010, tiltX: -0.52, tiltZ: 0.15, dashCount: 2, dashSpeed: 0.3, speed: 0.03, dir: 1, opacity: 0.62, hue: 0 },
+  { radius: 1.98, tubeRadius: 0.011, tiltX: 0.72, tiltZ: -1.45, dashCount: 3, dashSpeed: -0.22, speed: 0.028, dir: -1, opacity: 0.58, hue: 0 },
+  { radius: 2.04, tubeRadius: 0.010, tiltX: -1.15, tiltZ: 1.28, dashCount: 2, dashSpeed: 0.24, speed: 0.026, dir: 1, opacity: 0.54, hue: 0.7 },
+  { radius: 2.10, tubeRadius: 0.009, tiltX: 0.18, tiltZ: -0.25, dashCount: 4, dashSpeed: -0.26, speed: 0.024, dir: -1, opacity: 0.5, hue: 0 },
+  { radius: 2.16, tubeRadius: 0.009, tiltX: 1.28, tiltZ: 0.72, dashCount: 2, dashSpeed: 0.22, speed: 0.022, dir: 1, opacity: 0.46, hue: 0 },
+  { radius: 2.22, tubeRadius: 0.008, tiltX: -0.65, tiltZ: -1.1, dashCount: 3, dashSpeed: -0.2, speed: 0.02, dir: -1, opacity: 0.42, hue: 0.5 },
 ];
 
 interface FilamentConfig {
@@ -268,7 +285,7 @@ export default function VexaEnergyCore({ phase, audioAnalyser, pulseKey, errorPu
         uDashSpeed: { value: config.dashSpeed },
         uColor: { value: new THREE.Color(0.3, 0.75, 1) },
       };
-      const geometry = new THREE.TorusGeometry(config.radius, config.tubeRadius, 8, 128);
+      const geometry = new THREE.TorusGeometry(config.radius, config.tubeRadius, 8, 160);
       disposables.push(geometry);
       const material = new THREE.ShaderMaterial({
         uniforms,
@@ -535,6 +552,8 @@ export default function VexaEnergyCore({ phase, audioAnalyser, pulseKey, errorPu
 
     const clock = new THREE.Clock();
     const targetColor = new THREE.Color();
+    // Reused per frame so the orbit hue blend allocates nothing inside the loop.
+    const orbitTarget = new THREE.Color();
     let frameId = 0;
     let frame = 0;
     let readySignalled = false;
@@ -582,7 +601,8 @@ export default function VexaEnergyCore({ phase, audioAnalyser, pulseKey, errorPu
         uniforms.uTime.value = t;
         uniforms.uEnergy.value = energy;
         uniforms.uAmp.value = amp;
-        (uniforms.uColor.value as THREE.Color).lerp(targetColor, 0.05);
+        orbitTarget.copy(targetColor).lerp(ORBIT_VIOLET, config.hue);
+        (uniforms.uColor.value as THREE.Color).lerp(orbitTarget, 0.05);
         if (!reduceMotion) mesh.rotation.y += config.dir * config.speed * speedMul * (1 + smoothedAmp * 0.4) * 0.016;
       });
 
