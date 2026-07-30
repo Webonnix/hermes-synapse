@@ -1,4 +1,5 @@
-import { BarChart3, Bell, MessageSquare, Package, PanelLeft, PanelRight, Settings, Sparkles, Users, Zap } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { BarChart3, Bell, Maximize, MessageSquare, Minimize, Package, PanelLeft, PanelRight, Settings, Sparkles, Users, Zap } from 'lucide-react';
 import type { VexaCopy } from './vexaCopy';
 import type { GlobalSystemState } from './vexaDashboardTypes';
 
@@ -19,10 +20,31 @@ interface Props {
   onOpenProcesses: () => void;
   onOpenConfirmations: () => void;
   onOpenSettings: () => void;
-  /** Opens the Hermes workspace sidebar, which overlays the dashboard. */
-  onOpenAppMenu: () => void;
   openPanel: SidePanel | null;
   onTogglePanel: (panel: SidePanel) => void;
+}
+
+function useFullscreen() {
+  const [active, setActive] = useState(() => Boolean(document.fullscreenElement));
+
+  useEffect(() => {
+    const onChange = () => setActive(Boolean(document.fullscreenElement));
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
+  }, []);
+
+  const toggle = useCallback(() => {
+    if (document.fullscreenElement) {
+      void document.exitFullscreen();
+    } else {
+      void document.documentElement.requestFullscreen().catch(() => {
+        // Some embedders (iframes without allow="fullscreen", certain browsers) reject
+        // the request — the button just stays a no-op rather than throwing.
+      });
+    }
+  }, []);
+
+  return [active, toggle] as const;
 }
 
 function VexaLogo() {
@@ -49,8 +71,10 @@ export function VexaTopHeader({
   onSwitchToSimpleView,
   onOpenAnalytics, onOpenAgents, onOpenProcesses,
   onOpenConfirmations, onOpenSettings,
-  openPanel, onTogglePanel, onOpenAppMenu,
+  openPanel, onTogglePanel,
 }: Props) {
+
+  const [isFullscreen, toggleFullscreen] = useFullscreen();
 
   const statusText: Record<GlobalSystemState, string> = {
     online: copy.systemOnline,
@@ -69,11 +93,11 @@ export function VexaTopHeader({
 
   return (
     <header className="vx-header" role="banner">
-      <button type="button" className="vx-brand" onClick={onOpenAppMenu} title={copy.appMenu} aria-label={copy.appMenu}>
+      <div className="vx-brand">
         <VexaLogo />
         <span className="vx-brand-name">{copy.brand}</span>
         <span className="vx-brand-sub">{copy.brandSub}</span>
-      </button>
+      </div>
 
       <div className={`vx-global-status is-${state}`} role="status" aria-live="polite">
         <i aria-hidden="true" />
@@ -136,6 +160,16 @@ export function VexaTopHeader({
         </button>
         <button type="button" className="vx-quick-btn vx-quick-nav" onClick={onOpenSettings} title={copy.quickSettings} aria-label={copy.quickSettings}>
           <Settings size={17} />
+        </button>
+        <button
+          type="button"
+          className="vx-quick-btn vx-quick-nav"
+          onClick={toggleFullscreen}
+          aria-pressed={isFullscreen}
+          title={isFullscreen ? copy.exitFullscreen : copy.fullscreen}
+          aria-label={isFullscreen ? copy.exitFullscreen : copy.fullscreen}
+        >
+          {isFullscreen ? <Minimize size={17} /> : <Maximize size={17} />}
         </button>
 
         {onSwitchToSimpleView && (

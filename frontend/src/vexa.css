@@ -94,6 +94,8 @@ main.vexa-main {
   color: var(--vexa-text-primary);
   background: var(--vexa-bg-primary);
   font-family: var(--vexa-font);
+  container-type: inline-size;
+  container-name: vxshell;
 }
 
 .vx-background {
@@ -137,34 +139,6 @@ main.vexa-main {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
-/* The Hermes workspace sidebar overlays the dashboard instead of taking a column, so
-   the four-column composition can use the full viewport. Inline styles from styles.ts
-   set width/padding, hence the !important on the transform-based hide. */
-.sidebar-vexa-overlay {
-  position: absolute;
-  z-index: 60;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  transition: transform 220ms cubic-bezier(.4, 0, .2, 1), opacity 220ms ease;
-}
-
-.sidebar-vexa-overlay.is-hidden {
-  transform: translateX(-101%);
-  opacity: 0;
-  pointer-events: none;
-}
-
-.vexa-sidebar-scrim {
-  position: absolute;
-  z-index: 55;
-  inset: 0;
-  border: 0;
-  padding: 0;
-  background: rgba(1, 6, 14, .6);
-  backdrop-filter: blur(3px);
-}
-
 /* ============================================================
    2. DASHBOARD GRID
    ============================================================ */
@@ -179,7 +153,7 @@ main.vexa-main {
   grid-template-columns:
     minmax(252px, 264px)
     minmax(176px, 188px)
-    minmax(620px, 1fr)
+    minmax(0, 1fr)
     minmax(370px, 400px);
   grid-template-rows: 48px minmax(0, 1fr) 48px;
   grid-template-areas:
@@ -360,16 +334,7 @@ main.vexa-main {
   min-width: 0;
   align-items: center;
   gap: 11px;
-  padding: 4px 6px;
-  border: 1px solid transparent;
-  border-radius: var(--vexa-radius-control);
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-  transition: border-color var(--vexa-transition), background var(--vexa-transition);
 }
-
-.vx-brand:hover { border-color: var(--vexa-border-subtle); background: rgba(38, 132, 255, .07); }
 
 .vx-brand-mark {
   display: grid;
@@ -1227,7 +1192,7 @@ main.vexa-main {
    ============================================================ */
 
 /* compact desktop */
-@media (max-width: 1599px) {
+@container vxshell (max-width: 1599px) {
   .vx-dashboard {
     grid-template-columns: minmax(220px, 245px) minmax(165px, 185px) minmax(0, 1fr) minmax(320px, 350px);
     column-gap: 12px;
@@ -1244,7 +1209,7 @@ main.vexa-main {
 
 /* Below 1280px the three side columns no longer fit alongside a usable core, so they
    become drawers opened from the header. The core keeps the full width. */
-@media (max-width: 1279px) {
+@container vxshell (max-width: 1279px) {
   .vx-dashboard {
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
@@ -1277,14 +1242,14 @@ main.vexa-main {
 }
 
 /* tablet */
-@media (max-width: 1023px) {
+@container vxshell (max-width: 1023px) {
   .vx-nav-item span { display: none; }
   .vx-hud-label { display: none; }
   .vx-mode-card { width: auto; flex: 1 1 0; }
 }
 
 /* mobile */
-@media (max-width: 767px) {
+@container vxshell (max-width: 767px) {
   .vx-dashboard { padding: 8px 8px 6px; row-gap: 8px; }
   .vx-brand-name { font-size: 1.2rem; }
   /* The bottom navigation already reaches these sections, and the state pill says what

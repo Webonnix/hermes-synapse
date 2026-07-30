@@ -2096,12 +2096,6 @@ export default function App() {
   }
 
   const vexaImmersive = activeTab === 'vexa' && vexaUiMode === 'immersive';
-  // The Vexa dashboard owns the whole viewport (its own bottom navigation replaces the
-  // workspace nav), so the Hermes sidebar slides out of the way and returns as an overlay
-  // from the VEXA brand mark — the sections the dashboard has no entry for (Dev Runs,
-  // Schedules, Architecture) stay one click away.
-  const sidebarOverlay = vexaImmersive && !sidebarOpen;
-  const railCollapsed = isSidebarCollapsed;
 
   return (
     <div className={`app-container scanlines${activeTab === 'vexa' ? (vexaUiMode === 'immersive' ? ' is-vexa-mode' : ' is-vexa-simple-mode') : ''}`}>
@@ -2149,47 +2143,29 @@ export default function App() {
         />
       )}
 
-      {/* Scrim for the sidebar while it overlays the Vexa dashboard. */}
-      {vexaImmersive && sidebarOpen && (
+      {/* 1. Left Sidebar — always in flow, including on the Vexa dashboard. The dashboard
+          grid sizes itself from the space that is left over (container queries in
+          vexa.css), so collapsing the rail simply gives the core more room. */}
+      <aside
+        style={{ ...styles.sidebar, ...(isSidebarCollapsed ? styles.sidebarCollapsed : {}) }}
+        className={`glass-panel sidebar ${sidebarOpen ? 'sidebar-open' : ''} ${isSidebarCollapsed ? 'sidebar-collapsed' : ''}`}
+      >
         <button
           type="button"
-          className="vexa-sidebar-scrim"
-          onClick={() => setSidebarOpen(false)}
-          aria-label={t('vexaWindowClose')}
-        />
-      )}
-
-      {/* 1. Left Sidebar */}
-      <aside
-        style={{
-          ...styles.sidebar,
-          ...(railCollapsed ? styles.sidebarCollapsed : {}),
-          // styles.sidebar sets `position: relative`, which would keep the sidebar in the
-          // flex flow and steal 320px from the dashboard — override it inline so the CSS
-          // class does not have to fight an inline declaration with !important.
-          ...(vexaImmersive ? { position: 'absolute' as const } : {}),
-        }}
-        className={`glass-panel sidebar ${sidebarOpen ? 'sidebar-open' : ''} ${railCollapsed ? 'sidebar-collapsed' : ''}${vexaImmersive ? ' sidebar-vexa-overlay' : ''}${sidebarOverlay ? ' is-hidden' : ''}`}
-        aria-hidden={sidebarOverlay}
-      >
-        {!vexaImmersive && (
-          <button
-            type="button"
-            onClick={toggleSidebar}
-            style={styles.sidebarToggle}
-            title={isSidebarCollapsed ? 'Развернуть меню' : 'Свернуть меню до иконок'}
-            aria-label={isSidebarCollapsed ? 'Развернуть меню' : 'Свернуть меню до иконок'}
-          >
-            {isSidebarCollapsed ? <ChevronsRight size={17} /> : <ChevronsLeft size={17} />}
-          </button>
-        )}
+          onClick={toggleSidebar}
+          style={styles.sidebarToggle}
+          title={isSidebarCollapsed ? 'Развернуть меню' : 'Свернуть меню до иконок'}
+          aria-label={isSidebarCollapsed ? 'Развернуть меню' : 'Свернуть меню до иконок'}
+        >
+          {isSidebarCollapsed ? <ChevronsRight size={17} /> : <ChevronsLeft size={17} />}
+        </button>
         <div style={styles.logoArea}>
           <HermesMark />
           <h1 className="glow-text-cyan sidebar-title" style={styles.logoTitle}>HERMES</h1>
         </div>
         <p className="sidebar-subtitle" style={styles.logoSubtitle}>{t('appSubtitle')}</p>
         
-        <nav style={{ ...styles.navMenu, ...(railCollapsed ? styles.navMenuCollapsed : {}) }}>
+        <nav style={{ ...styles.navMenu, ...(isSidebarCollapsed ? styles.navMenuCollapsed : {}) }}>
           <button
             style={navStyle('vexa')}
             onClick={() => {
@@ -2354,7 +2330,6 @@ export default function App() {
                   onCreateSession={handleCreateNewSession}
                   onSwitchToSimpleMode={() => setVexaUiMode('simple')}
                   fetchAgents={fetchSubagents}
-                  onOpenAppMenu={() => setSidebarOpen(true)}
                   onNavigate={(route) => {
                     // The dashboard's bottom navigation speaks in route ids; Hermes drives
                     // the workspace from `activeTab`, so translate rather than add a router.

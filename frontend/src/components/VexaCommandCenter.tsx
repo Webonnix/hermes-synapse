@@ -72,8 +72,6 @@ interface VexaCommandCenterProps {
   onSwitchToSimpleMode?: () => void;
   /** Routes the bottom navigation / quick actions onto App.tsx's workspace tabs. */
   onNavigate?: (route: DashboardRoute) => void;
-  /** Reveals the Hermes workspace sidebar, which overlays the dashboard. */
-  onOpenAppMenu?: () => void;
 }
 
 export function phaseFor(
@@ -126,7 +124,6 @@ export function VexaCommandCenter({
   fetchAgents,
   onSwitchToSimpleMode,
   onNavigate,
-  onOpenAppMenu,
 }: VexaCommandCenterProps) {
   const copy = VEXA_COPY[language];
   const phase = phaseFor(isConnected, micState, isGenerating, isSpeaking);
@@ -458,7 +455,6 @@ export function VexaCommandCenter({
             runtimeTone={runtimeTone}
             pendingConfirmations={telemetry.confirmations.length}
             onSwitchToSimpleView={onSwitchToSimpleMode}
-            onOpenAppMenu={() => onOpenAppMenu?.()}
             onOpenAnalytics={() => navigate('analytics')}
             onOpenAgents={() => navigate('agents')}
             onOpenProcesses={() => navigate('protocols')}
