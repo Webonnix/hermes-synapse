@@ -88,6 +88,9 @@ const RING_CONFIGS: RingConfig[] = [
   { radius: 0.47, width: 0.009, ticks: 46, variant: 1, dir: -1, speed: 0.1, opacity: 0.7 },
   { radius: 0.64, width: 0.008, ticks: 64, variant: 2, dir: 1, speed: 0.065, opacity: 0.6 },
   { radius: 0.84, width: 0.007, ticks: 8, variant: 3, dir: -1, speed: 0.045, opacity: 0.55 },
+  // Large outer frame circles — in the reference these bound the whole core stage.
+  { radius: 1.02, width: 0.006, ticks: 96, variant: 2, dir: 1, speed: 0.03, opacity: 0.42 },
+  { radius: 1.18, width: 0.005, ticks: 12, variant: 3, dir: -1, speed: 0.022, opacity: 0.3 },
 ];
 
 interface Orbit3DConfig {

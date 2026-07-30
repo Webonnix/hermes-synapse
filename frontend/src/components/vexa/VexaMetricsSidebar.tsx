@@ -97,7 +97,11 @@ export function DataStreamCard({ copy, rows, onSeeAll }: DataStreamProps) {
       <div className="vx-panel-body">
         {rows.length === 0 && <p className="vx-empty">{copy.noData}</p>}
         {rows.map(row => (
-          <div className={`vx-stream-row${fresh[row.id] ? ' is-fresh' : ''}`} key={row.id}>
+          <div
+            className={`vx-stream-row${fresh[row.id] ? ' is-fresh' : ''}`}
+            key={row.id}
+            title={`${row.label} · ${row.channel}${row.unit ? ` (${row.unit})` : ''}`}
+          >
             <span>{row.label}</span>
             {row.value === null ? (
               <strong className="is-muted">—</strong>

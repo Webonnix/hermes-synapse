@@ -156,6 +156,14 @@ interface HistoryCardProps {
   onSeeAll: () => void;
 }
 
+/** "12:24" for the session's last message; empty when the backend sent no timestamp. */
+function sessionTime(session: ChatSession): string {
+  if (!session.updated_at) return '';
+  const date = new Date(session.updated_at);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
 export function ChatHistoryCard({ copy, sessions, currentChatId, getSessionLabel, onCreate, onSelect, onSeeAll }: HistoryCardProps) {
   const visible = sessions.slice(0, 14);
   return (
@@ -179,6 +187,7 @@ export function ChatHistoryCard({ copy, sessions, currentChatId, getSessionLabel
             >
               <MessageSquare size={12} />
               <span>{session.title || getSessionLabel(session.id)}</span>
+              <time>{sessionTime(session)}</time>
             </button>
           ))}
         </div>

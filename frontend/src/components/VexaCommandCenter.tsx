@@ -72,6 +72,8 @@ interface VexaCommandCenterProps {
   onSwitchToSimpleMode?: () => void;
   /** Routes the bottom navigation / quick actions onto App.tsx's workspace tabs. */
   onNavigate?: (route: DashboardRoute) => void;
+  /** Reveals the Hermes workspace sidebar, which overlays the dashboard. */
+  onOpenAppMenu?: () => void;
 }
 
 export function phaseFor(
@@ -124,6 +126,7 @@ export function VexaCommandCenter({
   fetchAgents,
   onSwitchToSimpleMode,
   onNavigate,
+  onOpenAppMenu,
 }: VexaCommandCenterProps) {
   const copy = VEXA_COPY[language];
   const phase = phaseFor(isConnected, micState, isGenerating, isSpeaking);
@@ -169,6 +172,20 @@ export function VexaCommandCenter({
     : 'ollama';
   const activeProviderName = activeProviders.find(item => item.id === effectiveProviderValue)?.name;
 
+  // Outcomes of the assistant runs present in the loaded history — the only accuracy
+  // signal available on the client, since the backend publishes none.
+  const runOutcomes = useMemo(() => {
+    let completed = 0;
+    let failed = 0;
+    for (const message of messages) {
+      if (message.role !== 'assistant' || message.streaming) continue;
+      const status = String(message.meta?.status ?? '').toLowerCase();
+      if (status === 'error' || status === 'failed' || status === 'cancelled') failed += 1;
+      else completed += 1;
+    }
+    return { completed, failed };
+  }, [messages]);
+
   const activeAgents = useMemo(
     () => agents.filter(agent => ['working', 'running', 'active', 'processing'].includes(String(agent.status || '').toLowerCase())),
     [agents],
@@ -181,6 +198,7 @@ export function VexaCommandCenter({
   // ---- telemetry ------------------------------------------------------------
   const telemetry = useVexaTelemetry({
     enabled: true,
+    runOutcomes,
     isConnected,
     agentsTotal: agents.length,
     agentsActive: activeAgents.length,
@@ -410,7 +428,7 @@ export function VexaCommandCenter({
       : telemetry.overview.stale ? 'degraded' : 'online';
 
   const hud: CoreHudData = {
-    processLabel: isGenerating ? copy.hudDataPatterns : phase === 'listening' ? 'VOICE INPUT' : 'DATA PATTERNS',
+    processLabel: phase === 'listening' ? 'VOICE INPUT' : copy.hudDataPatterns,
     coreStatus: emergencyStopped ? 'HALTED' : isConnected ? 'ACTIVE' : 'OFFLINE',
     linkStrength: telemetry.neuralDensity,
     thoughtFlow: isGenerating ? 'streaming' : isSpeaking ? 'processing' : micState !== 'off' ? 'receiving' : 'idle',
@@ -439,17 +457,13 @@ export function VexaCommandCenter({
             runtimeLabel={runtimeLabel}
             runtimeTone={runtimeTone}
             pendingConfirmations={telemetry.confirmations.length}
-            emergencyStopped={emergencyStopped}
-            simpleMode={simpleGraphics}
-            onToggleGraphics={() => setSimpleGraphics(value => !value)}
             onSwitchToSimpleView={onSwitchToSimpleMode}
+            onOpenAppMenu={() => onOpenAppMenu?.()}
             onOpenAnalytics={() => navigate('analytics')}
             onOpenAgents={() => navigate('agents')}
             onOpenProcesses={() => navigate('protocols')}
             onOpenConfirmations={() => setConfirmationsOpen(true)}
             onOpenSettings={() => navigate('settings')}
-            onEmergencyStop={handleEmergencyStop}
-            onResume={handleResume}
             openPanel={openPanel}
             onTogglePanel={panel => setOpenPanel(current => current === panel ? null : panel)}
           />
@@ -565,6 +579,11 @@ export function VexaCommandCenter({
         onApprove={handleApprove}
         onReject={handleReject}
         onOpenProcesses={() => { setConfirmationsOpen(false); navigate('protocols'); }}
+        emergencyStopped={emergencyStopped}
+        onEmergencyStop={handleEmergencyStop}
+        onResume={handleResume}
+        simpleGraphics={simpleGraphics}
+        onToggleGraphics={() => setSimpleGraphics(value => !value)}
       />
     </div>
   );

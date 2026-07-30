@@ -97,6 +97,8 @@ export interface VexaTelemetry {
 
 interface TelemetryInput {
   enabled: boolean;
+  /** Completed vs failed assistant runs seen in the loaded history — feeds "accuracy". */
+  runOutcomes: { completed: number; failed: number };
   isConnected: boolean;
   agentsTotal: number;
   agentsActive: number;
@@ -120,7 +122,7 @@ interface MetricsSummary {
 
 export function useVexaTelemetry(input: TelemetryInput): VexaTelemetry {
   const {
-    enabled, isConnected, agentsTotal, agentsActive,
+    enabled, isConnected, agentsTotal, agentsActive, runOutcomes,
     isGenerating, isSpeaking, isListening,
     voiceEngine, voiceName, voiceAvailable, sttReady,
   } = input;
@@ -218,18 +220,20 @@ export function useVexaTelemetry(input: TelemetryInput): VexaTelemetry {
       const rx = snapshot?.host?.network?.rx_bytes_per_second ?? null;
       const tx = snapshot?.host?.network?.tx_bytes_per_second ?? null;
 
-      const readings: Array<{ id: string; label: string; value: number | null; unit?: string }> = [
-        { id: 'cpu', label: 'CPU', value: cpu, unit: '%' },
-        { id: 'ram', label: 'RAM', value: memory, unit: '%' },
-        { id: 'gpu', label: 'GPU', value: gpu, unit: '%' },
-        { id: 'net-rx', label: 'NET RX', value: rx === null ? null : rx / 1_048_576, unit: 'MB/s' },
-        { id: 'net-tx', label: 'NET TX', value: tx === null ? null : tx / 1_048_576, unit: 'MB/s' },
+      // Channel labels follow the reference's DATA-NN form; the real source stays in
+      // `channel` so the row's tooltip can say what is actually being measured.
+      const readings: Array<{ id: string; label: string; channel: string; value: number | null; unit?: string }> = [
+        { id: 'cpu', label: 'DATA-01', channel: 'CPU', value: cpu, unit: '%' },
+        { id: 'ram', label: 'DATA-02', channel: 'RAM', value: memory, unit: '%' },
+        { id: 'gpu', label: 'DATA-03', channel: 'GPU', value: gpu, unit: '%' },
+        { id: 'net-rx', label: 'DATA-04', channel: 'NET RX', value: rx === null ? null : rx / 1_048_576, unit: 'MB/s' },
+        { id: 'net-tx', label: 'DATA-05', channel: 'NET TX', value: tx === null ? null : tx / 1_048_576, unit: 'MB/s' },
       ];
 
       setDataStream(previous => readings.map(reading => {
         const existing = previous.find(row => row.id === reading.id);
         if (reading.value === null) {
-          return { id: reading.id, label: reading.label, value: null, unit: reading.unit, updatedAt: existing?.updatedAt ?? 0 };
+          return { id: reading.id, label: reading.label, channel: reading.channel, value: null, unit: reading.unit, updatedAt: existing?.updatedAt ?? 0 };
         }
         const before = previousResourcesRef.current[reading.id];
         previousResourcesRef.current[reading.id] = reading.value;
@@ -238,6 +242,7 @@ export function useVexaTelemetry(input: TelemetryInput): VexaTelemetry {
         return {
           id: reading.id,
           label: reading.label,
+          channel: reading.channel,
           value: delta,
           unit: reading.unit,
           updatedAt: changed ? now : existing?.updatedAt ?? 0,
@@ -288,18 +293,18 @@ export function useVexaTelemetry(input: TelemetryInput): VexaTelemetry {
         latencyMs: latency,
       },
       {
-        id: 'stt',
-        label: 'Speech Recognition',
-        status: sttReady ? (isListening ? 'running' : 'standby') : 'offline',
-        detail: 'Распознавание речи (STT)',
+        id: 'sentiment',
+        label: 'Sentiment Analysis',
+        status: sttReady ? 'running' : isConnected ? 'standby' : 'offline',
+        detail: 'Распознавание речи и разбор намерения (STT)',
       },
       {
-        id: 'orchestrator',
-        label: 'Agent Orchestrator',
+        id: 'predictive',
+        label: 'Predictive Model',
         status: controlSummary?.state?.kill_switch
           ? 'paused'
           : agentsActive > 0 ? 'running' : isConnected ? 'standby' : 'offline',
-        detail: 'Делегирование задач под-агентам',
+        detail: 'Планирование и делегирование задач под-агентам',
       },
       {
         id: 'tts',
@@ -308,7 +313,7 @@ export function useVexaTelemetry(input: TelemetryInput): VexaTelemetry {
         detail: 'Синтез речи (TTS)',
       },
     ];
-  }, [isConnected, sttReady, isListening, agentsActive, isSpeaking, voiceAvailable, controlSummary, metrics]);
+  }, [isConnected, sttReady, agentsActive, isSpeaking, voiceAvailable, controlSummary, metrics]);
 
   const insights = useMemo<InsightMetric[]>(() => {
     const summary = metrics?.summary;
@@ -316,6 +321,8 @@ export function useVexaTelemetry(input: TelemetryInput): VexaTelemetry {
     const successRate = typeof summary?.success_rate === 'number' ? summary.success_rate : null;
     const latency = typeof summary?.avg_latency_ms === 'number' ? summary.avg_latency_ms : null;
     const stability = connectionRatio;
+    const totalRuns = runOutcomes.completed + runOutcomes.failed;
+    const accuracy = totalRuns > 0 ? (runOutcomes.completed / totalRuns) * 100 : null;
 
     const band = (value: number | null, warn: number, critical: number): InsightMetric['status'] => {
       if (value === null) return 'unknown';
@@ -347,16 +354,17 @@ export function useVexaTelemetry(input: TelemetryInput): VexaTelemetry {
         updatedAt,
       },
       {
-        // The backend does not publish an accuracy metric; showing an invented number here
-        // would misrepresent it, so this renders as "нет данных" until one exists.
+        // Share of observed assistant runs that finished cleanly. Measured on the client
+        // from the loaded history — the backend publishes no accuracy metric of its own —
+        // so it stays null (and renders as "нет данных") until at least one run is seen.
         id: 'accuracy',
         label: 'accuracy',
-        value: null,
-        formattedValue: null,
+        value: accuracy,
+        formattedValue: accuracy === null ? null : `${accuracy.toFixed(1)}%`,
         min: 0,
         max: 100,
-        status: 'unknown',
-        updatedAt: null,
+        status: band(accuracy, 97, 90),
+        updatedAt: accuracy === null ? null : updatedAt,
       },
       {
         id: 'stability',
@@ -369,7 +377,7 @@ export function useVexaTelemetry(input: TelemetryInput): VexaTelemetry {
         updatedAt,
       },
     ];
-  }, [metrics, connectionRatio]);
+  }, [metrics, connectionRatio, runOutcomes]);
 
   // Control-plane risk classes (R0..R4) map onto the dashboard's four-level risk scale.
   const confirmations = useMemo<ConfirmationRequest[]>(() => {

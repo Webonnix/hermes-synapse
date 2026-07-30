@@ -2096,7 +2096,12 @@ export default function App() {
   }
 
   const vexaImmersive = activeTab === 'vexa' && vexaUiMode === 'immersive';
-  const railCollapsed = isSidebarCollapsed || vexaImmersive;
+  // The Vexa dashboard owns the whole viewport (its own bottom navigation replaces the
+  // workspace nav), so the Hermes sidebar slides out of the way and returns as an overlay
+  // from the VEXA brand mark — the sections the dashboard has no entry for (Dev Runs,
+  // Schedules, Architecture) stay one click away.
+  const sidebarOverlay = vexaImmersive && !sidebarOpen;
+  const railCollapsed = isSidebarCollapsed;
 
   return (
     <div className={`app-container scanlines${activeTab === 'vexa' ? (vexaUiMode === 'immersive' ? ' is-vexa-mode' : ' is-vexa-simple-mode') : ''}`}>
@@ -2144,12 +2149,28 @@ export default function App() {
         />
       )}
 
-      {/* 1. Left Sidebar — pinned to its icon rail while the Vexa dashboard is up, so the
-          four-column composition gets the width it needs. The user's own collapse
-          preference is untouched and comes back on any other tab. */}
+      {/* Scrim for the sidebar while it overlays the Vexa dashboard. */}
+      {vexaImmersive && sidebarOpen && (
+        <button
+          type="button"
+          className="vexa-sidebar-scrim"
+          onClick={() => setSidebarOpen(false)}
+          aria-label={t('vexaWindowClose')}
+        />
+      )}
+
+      {/* 1. Left Sidebar */}
       <aside
-        style={{ ...styles.sidebar, ...(railCollapsed ? styles.sidebarCollapsed : {}) }}
-        className={`glass-panel sidebar ${sidebarOpen ? 'sidebar-open' : ''} ${railCollapsed ? 'sidebar-collapsed' : ''}`}
+        style={{
+          ...styles.sidebar,
+          ...(railCollapsed ? styles.sidebarCollapsed : {}),
+          // styles.sidebar sets `position: relative`, which would keep the sidebar in the
+          // flex flow and steal 320px from the dashboard — override it inline so the CSS
+          // class does not have to fight an inline declaration with !important.
+          ...(vexaImmersive ? { position: 'absolute' as const } : {}),
+        }}
+        className={`glass-panel sidebar ${sidebarOpen ? 'sidebar-open' : ''} ${railCollapsed ? 'sidebar-collapsed' : ''}${vexaImmersive ? ' sidebar-vexa-overlay' : ''}${sidebarOverlay ? ' is-hidden' : ''}`}
+        aria-hidden={sidebarOverlay}
       >
         {!vexaImmersive && (
           <button
@@ -2333,6 +2354,7 @@ export default function App() {
                   onCreateSession={handleCreateNewSession}
                   onSwitchToSimpleMode={() => setVexaUiMode('simple')}
                   fetchAgents={fetchSubagents}
+                  onOpenAppMenu={() => setSidebarOpen(true)}
                   onNavigate={(route) => {
                     // The dashboard's bottom navigation speaks in route ids; Hermes drives
                     // the workspace from `activeTab`, so translate rather than add a router.

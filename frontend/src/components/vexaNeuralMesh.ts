@@ -33,10 +33,10 @@ interface MeshOptions {
 }
 
 const DEFAULTS: Omit<MeshOptions, 'pointCount' | 'linksPerNode'> = {
-  minRadius: 0.35,
-  maxRadius: 1.85,
-  linkedFraction: 0.42,
-  maxLinkLength: 0.42,
+  minRadius: 0.3,
+  maxRadius: 2.15,
+  linkedFraction: 0.55,
+  maxLinkLength: 0.46,
 };
 
 /** Deterministic PRNG so a reload produces the same core rather than reshuffling it. */

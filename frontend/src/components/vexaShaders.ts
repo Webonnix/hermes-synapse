@@ -189,9 +189,9 @@ void main() {
   float breathe = 1.0 + sin(uTime * 0.5 + aSeed * 6.283) * 0.018 + uAmp * 0.05;
   vec3 pos = position * breathe * uBoot;
   vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
-  gl_PointSize = aSize * (11.0 / -mvPosition.z) * (1.0 + uAmp * 0.4);
+  gl_PointSize = aSize * (13.5 / -mvPosition.z) * (1.0 + uAmp * 0.4);
   float twinkle = 0.55 + 0.45 * sin(uTime * 1.7 + aSeed * 12.0);
-  vAlpha = (0.18 + 0.5 * twinkle) * (0.45 + uEnergy * 0.55) * uBoot;
+  vAlpha = (0.3 + 0.7 * twinkle) * (0.55 + uEnergy * 0.6) * uBoot;
   gl_Position = projectionMatrix * mvPosition;
 }`;
 
@@ -238,7 +238,7 @@ void main() {
   float near = 1.0 - vDepth;
   // Slow per-link shimmer so the mesh never looks like a frozen wireframe.
   float flicker = 0.72 + 0.28 * sin(uTime * 0.9 + vSeed * 21.0);
-  float alpha = (0.05 + near * 0.3) * (0.5 + uEnergy * 0.6) * flicker * uBoot;
+  float alpha = (0.09 + near * 0.46) * (0.55 + uEnergy * 0.7) * flicker * uBoot;
   if (alpha < 0.006) discard;
   gl_FragColor = vec4(mix(uColorFar, uColor, near), alpha);
 }`;

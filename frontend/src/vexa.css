@@ -137,6 +137,34 @@ main.vexa-main {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
+/* The Hermes workspace sidebar overlays the dashboard instead of taking a column, so
+   the four-column composition can use the full viewport. Inline styles from styles.ts
+   set width/padding, hence the !important on the transform-based hide. */
+.sidebar-vexa-overlay {
+  position: absolute;
+  z-index: 60;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  transition: transform 220ms cubic-bezier(.4, 0, .2, 1), opacity 220ms ease;
+}
+
+.sidebar-vexa-overlay.is-hidden {
+  transform: translateX(-101%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.vexa-sidebar-scrim {
+  position: absolute;
+  z-index: 55;
+  inset: 0;
+  border: 0;
+  padding: 0;
+  background: rgba(1, 6, 14, .6);
+  backdrop-filter: blur(3px);
+}
+
 /* ============================================================
    2. DASHBOARD GRID
    ============================================================ */
@@ -145,11 +173,14 @@ main.vexa-main {
   position: relative;
   z-index: var(--vexa-z-panel);
   display: grid;
+  /* Column maxima are the reference composition's measured widths, so at the reference
+     viewport the centre stage lands on its ~716px and the rest sit where the mock puts
+     them; below that the minima take over. */
   grid-template-columns:
-    minmax(252px, 280px)
-    minmax(176px, 205px)
+    minmax(252px, 264px)
+    minmax(176px, 188px)
     minmax(620px, 1fr)
-    minmax(370px, 410px);
+    minmax(370px, 400px);
   grid-template-rows: 48px minmax(0, 1fr) 48px;
   grid-template-areas:
     'header header header header'
@@ -324,7 +355,21 @@ main.vexa-main {
   grid-template-columns: minmax(0, auto) minmax(0, 1fr) minmax(0, auto);
 }
 
-.vx-brand { display: flex; min-width: 0; align-items: center; gap: 11px; }
+.vx-brand {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 11px;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--vexa-radius-control);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--vexa-transition), background var(--vexa-transition);
+}
+
+.vx-brand:hover { border-color: var(--vexa-border-subtle); background: rgba(38, 132, 255, .07); }
 
 .vx-brand-mark {
   display: grid;
@@ -401,9 +446,7 @@ main.vexa-main {
 
 .vx-quick-actions { display: flex; min-width: 0; align-items: center; gap: 6px; }
 
-/* Drawer toggles for the side columns; only reachable once the columns collapse. */
-.vx-panel-toggle { display: none; }
-.vx-panel-toggle.is-open { background: rgba(27, 220, 255, .14); color: var(--vexa-cyan); }
+
 
 .vx-quick-btn {
   position: relative;
@@ -421,6 +464,10 @@ main.vexa-main {
 
 .vx-quick-btn:hover { background: rgba(38, 132, 255, .14); color: var(--vexa-cyan); }
 .vx-quick-btn.is-alert { color: var(--vexa-red); }
+
+/* Drawer toggles for the side columns — only shown once those columns collapse. */
+.vx-quick-btn.vx-panel-toggle { display: none; }
+.vx-quick-btn.vx-panel-toggle.is-open { background: rgba(27, 220, 255, .14); color: var(--vexa-cyan); }
 
 .vx-quick-badge {
   position: absolute;
@@ -751,10 +798,10 @@ main.vexa-main {
 .vx-hud-label span.is-green { color: var(--vexa-green); }
 .vx-hud-label span.is-violet { color: var(--vexa-violet-bright); }
 
-.vx-hud-label.at-tl { top: 9%; left: 2%; }
-.vx-hud-label.at-tr { top: 9%; right: 2%; }
-.vx-hud-label.at-bl { bottom: 30%; left: 0%; }
-.vx-hud-label.at-br { bottom: 30%; right: 0%; }
+.vx-hud-label.at-tl { top: 8%; left: 1%; }
+.vx-hud-label.at-tr { top: 8%; right: 1%; }
+.vx-hud-label.at-bl { top: 46%; left: 0; }
+.vx-hud-label.at-br { top: 46%; right: 0; }
 
 /* voice layer */
 .vx-voice-layer { position: relative; z-index: var(--vexa-z-controls); margin-top: auto; display: flex; align-items: center; justify-content: center; gap: 0; }
@@ -1071,6 +1118,10 @@ main.vexa-main {
 .vx-drawer-head h2 { flex: 1 1 auto; color: var(--vexa-text-primary); font-size: .84rem; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
 .vx-drawer-body { min-height: 0; flex: 1 1 auto; overflow: hidden auto; padding: 14px 16px; }
 
+.vx-drawer-section { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--vexa-border-subtle); }
+.vx-drawer-section h3 { color: var(--vexa-text-title); font-size: .69rem; font-weight: 600; letter-spacing: .045em; text-transform: uppercase; }
+.vx-drawer-section .vx-confirm-actions { flex-wrap: wrap; }
+
 .vx-confirm-card { padding: 12px; border: 1px solid var(--vexa-border-subtle); border-radius: var(--vexa-radius-control); background: rgba(4, 16, 28, .8); }
 .vx-confirm-card + .vx-confirm-card { margin-top: 10px; }
 .vx-confirm-card h3 { color: var(--vexa-text-primary); font-size: .76rem; font-weight: 600; }
@@ -1220,7 +1271,7 @@ main.vexa-main {
   .vx-dashboard.show-system .vx-area-system { left: 14px; }
   .vx-dashboard.show-metrics .vx-area-metrics { right: 14px; }
   .vx-dashboard.show-right .vx-area-right { right: 14px; }
-  .vx-panel-toggle { display: grid; }
+  .vx-quick-btn.vx-panel-toggle { display: grid; }
   .vx-nav-item { min-width: 74px; padding: 0 10px; }
   .vx-hud-label.at-bl, .vx-hud-label.at-br { display: none; }
 }

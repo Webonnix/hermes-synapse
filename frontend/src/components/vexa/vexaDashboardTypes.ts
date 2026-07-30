@@ -49,7 +49,10 @@ export interface ProtocolInfo {
 
 export interface DataStreamRow {
   id: string;
+  /** Display label, e.g. "DATA-01". */
   label: string;
+  /** What the channel actually measures, surfaced in the row's tooltip. */
+  channel: string;
   value: number | null;
   unit?: string;
   updatedAt: number;

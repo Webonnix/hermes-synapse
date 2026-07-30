@@ -96,13 +96,15 @@ describe('DataStreamCard', () => {
         copy={copy}
         onSeeAll={vi.fn()}
         rows={[
-          { id: 'cpu', label: 'CPU', value: 12.6, updatedAt: 1 },
-          { id: 'ram', label: 'RAM', value: -2.1, updatedAt: 1 },
+          { id: 'cpu', label: 'DATA-01', channel: 'CPU', value: 12.6, updatedAt: 1 },
+          { id: 'ram', label: 'DATA-02', channel: 'RAM', value: -2.1, updatedAt: 1 },
         ]}
       />,
     );
     expect(screen.getByText('+12.6')).toBeInTheDocument();
     expect(screen.getByText('-2.1')).toHaveClass('is-negative');
+    // The DATA-NN label matches the reference, but the row must still say what it measures.
+    expect(screen.getByText('DATA-01').closest('.vx-stream-row')).toHaveAttribute('title', expect.stringContaining('CPU'));
   });
 });
 

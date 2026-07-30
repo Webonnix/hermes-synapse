@@ -9,7 +9,7 @@ import type { VoicePhase } from '../VexaCommandCenter';
  * from a throttled rAF loop, so a 30 FPS waveform never triggers a React render.
  */
 
-const BAR_COUNT = 56;
+const SAMPLE_COUNT = 96;
 const TARGET_FPS = 30;
 const SIMPLE_FPS = 15;
 
@@ -36,8 +36,8 @@ export function VoiceWaveform({ phase, audioAnalyser, side, simpleMode }: Props)
     if (!canvas) return;
     const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 
-    const bands = new Float32Array(BAR_COUNT);
-    const smoothed = new Float32Array(BAR_COUNT);
+    const bands = new Float32Array(SAMPLE_COUNT);
+    const smoothed = new Float32Array(SAMPLE_COUNT);
     let frameId = 0;
     let lastPaint = 0;
 
@@ -66,7 +66,7 @@ export function VoiceWaveform({ phase, audioAnalyser, side, simpleMode }: Props)
         const amplitude = currentPhase === 'offline' ? 0.03
           : currentPhase === 'thinking' || currentPhase === 'transcribing' ? 0.34
             : 0.1;
-        for (let index = 0; index < BAR_COUNT; index += 1) {
+        for (let index = 0; index < SAMPLE_COUNT; index += 1) {
           const wave = Math.sin(seconds * 2.2 + index * 0.42) * 0.5 + Math.sin(seconds * 3.7 - index * 0.21) * 0.3;
           bands[index] = Math.max(0.02, amplitude * (0.55 + wave * 0.45));
         }
@@ -74,24 +74,44 @@ export function VoiceWaveform({ phase, audioAnalyser, side, simpleMode }: Props)
 
       ctx.clearRect(0, 0, width, height);
       const centerY = height / 2;
-      const barWidth = width / BAR_COUNT;
-      const gap = Math.max(1, barWidth * 0.35);
+      const step = width / (SAMPLE_COUNT - 1);
 
-      for (let index = 0; index < BAR_COUNT; index += 1) {
+      // A single mirrored polyline, the way the reference draws it: the trace crosses the
+      // centre line and its excursion grows towards the microphone.
+      const gradient = ctx.createLinearGradient(0, 0, width, 0);
+      if (side === 'left') {
+        gradient.addColorStop(0, 'rgba(27, 220, 255, .35)');
+        gradient.addColorStop(1, 'rgba(38, 132, 255, 1)');
+      } else {
+        gradient.addColorStop(0, 'rgba(38, 132, 255, 1)');
+        gradient.addColorStop(1, 'rgba(161, 93, 255, .45)');
+      }
+
+      ctx.beginPath();
+      for (let index = 0; index < SAMPLE_COUNT; index += 1) {
         smoothed[index] += (bands[index] - smoothed[index]) * 0.3;
         // Envelope: tall next to the microphone, tapering towards the outer edge.
-        const distance = side === 'left' ? (index + 1) / BAR_COUNT : 1 - index / BAR_COUNT;
-        const envelope = 0.25 + distance * 0.75;
-        const magnitude = Math.max(0.02, smoothed[index] * envelope);
-        const barHeight = Math.max(dpr * 1.5, magnitude * height * 0.82);
-        const x = index * barWidth;
-        const ratio = index / BAR_COUNT;
-        const hue = side === 'left'
-          ? `rgba(${Math.round(38 + 20 * ratio)}, ${Math.round(150 + 70 * ratio)}, 255, ${0.35 + magnitude * 0.6})`
-          : `rgba(${Math.round(60 + 100 * ratio)}, ${Math.round(190 - 90 * ratio)}, 255, ${0.35 + magnitude * 0.6})`;
-        ctx.fillStyle = hue;
-        ctx.fillRect(x, centerY - barHeight / 2, Math.max(1, barWidth - gap), barHeight);
+        const distance = side === 'left' ? (index + 1) / SAMPLE_COUNT : 1 - index / SAMPLE_COUNT;
+        const envelope = 0.2 + distance * 0.8;
+        // Alternating sign turns the magnitude envelope into the jagged trace of the
+        // reference rather than a smooth hill.
+        const sign = index % 2 === 0 ? 1 : -1;
+        const offset = smoothed[index] * envelope * height * 0.46 * sign;
+        const x = index * step;
+        const y = centerY + offset;
+        if (index === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
       }
+      ctx.strokeStyle = gradient;
+      ctx.lineWidth = Math.max(1, dpr * 1.4);
+      ctx.lineJoin = 'round';
+      ctx.stroke();
+
+      // Soft glow pass under the trace.
+      ctx.globalAlpha = 0.35;
+      ctx.lineWidth = Math.max(2, dpr * 3.2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
     };
 
     frameId = requestAnimationFrame(paint);

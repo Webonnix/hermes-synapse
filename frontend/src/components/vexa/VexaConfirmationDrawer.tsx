@@ -1,5 +1,5 @@
-import { useEffect, useRef } from 'react';
-import { OctagonX, X as XIcon } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Gauge, OctagonX, Play, X as XIcon } from 'lucide-react';
 import type { VexaCopy } from './vexaCopy';
 import type { ConfirmationRequest } from './vexaDashboardTypes';
 
@@ -10,6 +10,9 @@ import type { ConfirmationRequest } from './vexaDashboardTypes';
  * decides anything itself, it only surfaces what the backend is waiting on.
  */
 
+/** Milliseconds the emergency-stop button must be held before it fires. */
+const EMERGENCY_HOLD_MS = 700;
+
 interface Props {
   copy: VexaCopy;
   open: boolean;
@@ -18,9 +21,73 @@ interface Props {
   onApprove: (id: string) => void;
   onReject: (id: string) => void;
   onOpenProcesses: () => void;
+  emergencyStopped: boolean;
+  onEmergencyStop: () => void;
+  onResume: () => void;
+  /** Reduced-graphics profile (fewer particles, no WebGL layer, slower waveform). */
+  simpleGraphics: boolean;
+  onToggleGraphics: () => void;
 }
 
-export function VexaConfirmationDrawer({ copy, open, requests, onClose, onApprove, onReject, onOpenProcesses }: Props) {
+/**
+ * Hold-to-fire emergency stop. Deliberately not a plain click: stopping every agent
+ * mid-flight is disruptive enough to deserve a deliberate gesture, and the ring shows
+ * how far along the hold is.
+ */
+function EmergencyStopButton({ copy, onFire }: { copy: VexaCopy; onFire: () => void }) {
+  const [progress, setProgress] = useState(0);
+  const startRef = useRef(0);
+  const frameRef = useRef(0);
+
+  const cancel = useCallback(() => {
+    cancelAnimationFrame(frameRef.current);
+    startRef.current = 0;
+    setProgress(0);
+  }, []);
+
+  const begin = useCallback(() => {
+    if (startRef.current) return;
+    startRef.current = performance.now();
+    const tick = () => {
+      if (!startRef.current) return;
+      const ratio = Math.min(1, (performance.now() - startRef.current) / EMERGENCY_HOLD_MS);
+      setProgress(ratio);
+      if (ratio >= 1) {
+        startRef.current = 0;
+        setProgress(0);
+        onFire();
+        return;
+      }
+      frameRef.current = requestAnimationFrame(tick);
+    };
+    frameRef.current = requestAnimationFrame(tick);
+  }, [onFire]);
+
+  useEffect(() => () => cancelAnimationFrame(frameRef.current), []);
+
+  return (
+    <button
+      type="button"
+      className="vx-btn is-reject vx-estop"
+      onPointerDown={begin}
+      onPointerUp={cancel}
+      onPointerLeave={cancel}
+      onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') begin(); }}
+      onKeyUp={cancel}
+      title={copy.emergencyHold}
+      aria-label={`${copy.emergencyStop}. ${copy.emergencyHold}`}
+    >
+      <OctagonX size={15} />
+      {copy.emergencyStop}
+      {progress > 0 && <i className="vx-estop-progress" style={{ width: `${progress * 100}%` }} />}
+    </button>
+  );
+}
+
+export function VexaConfirmationDrawer({
+  copy, open, requests, onClose, onApprove, onReject, onOpenProcesses,
+  emergencyStopped, onEmergencyStop, onResume, simpleGraphics, onToggleGraphics,
+}: Props) {
   const panelRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
 
@@ -85,6 +152,27 @@ export function VexaConfirmationDrawer({ copy, open, requests, onClose, onApprov
             </article>
           ))}
           <button type="button" className="vx-link" onClick={onOpenProcesses}>{copy.quickSecurity} ›</button>
+
+          <section className="vx-drawer-section">
+            <h3>{copy.riskControl}</h3>
+            <div className="vx-confirm-actions">
+              {emergencyStopped
+                ? (
+                  <button type="button" className="vx-btn is-approve" onClick={onResume}>
+                    <Play size={15} />{copy.resume}
+                  </button>
+                )
+                : <EmergencyStopButton copy={copy} onFire={onEmergencyStop} />}
+              <button
+                type="button"
+                className={`vx-btn${simpleGraphics ? ' is-approve' : ''}`}
+                onClick={onToggleGraphics}
+                aria-pressed={simpleGraphics}
+              >
+                <Gauge size={15} />{copy.lightGraphics}
+              </button>
+            </div>
+          </section>
         </div>
       </div>
     </>
