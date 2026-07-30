@@ -16,6 +16,7 @@ than being plain local config like agent_tiers.py.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import sqlite3
