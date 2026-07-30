@@ -1662,9 +1662,9 @@ async def create_agent_telegram_binding_api(agent_id: str, payload: AgentTelegra
 
 @app.delete("/api/agents/telegram/{binding_id}")
 async def delete_agent_telegram_binding_api(binding_id: str):
-    from backend.agent_messenger_governance import revoke_telegram_binding
+    from backend.agent_messenger_governance import disable_binding
     try:
-        await revoke_telegram_binding(binding_id)
+        await disable_binding(binding_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Binding not found")
     return {"status": "success", "id": binding_id}
@@ -1699,9 +1699,9 @@ async def create_agent_matrix_binding_api(agent_id: str, payload: AgentMatrixBin
 
 @app.delete("/api/agents/matrix/{binding_id}")
 async def delete_agent_matrix_binding_api(binding_id: str):
-    from backend.agent_messenger_governance import revoke_matrix_binding
+    from backend.agent_messenger_governance import disable_binding
     try:
-        await revoke_matrix_binding(binding_id)
+        await disable_binding(binding_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Binding not found")
     return {"status": "success", "id": binding_id}
@@ -1734,9 +1734,9 @@ async def create_agent_discord_binding_api(agent_id: str, payload: AgentDiscordB
 
 @app.delete("/api/agents/discord/{binding_id}")
 async def delete_agent_discord_binding_api(binding_id: str):
-    from backend.agent_messenger_governance import revoke_discord_binding
+    from backend.agent_messenger_governance import disable_binding
     try:
-        await revoke_discord_binding(binding_id)
+        await disable_binding(binding_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Binding not found")
     return {"status": "success", "id": binding_id}
@@ -1769,9 +1769,9 @@ async def create_agent_slack_binding_api(agent_id: str, payload: AgentSlackBindi
 
 @app.delete("/api/agents/slack/{binding_id}")
 async def delete_agent_slack_binding_api(binding_id: str):
-    from backend.agent_messenger_governance import revoke_slack_binding
+    from backend.agent_messenger_governance import disable_binding
     try:
-        await revoke_slack_binding(binding_id)
+        await disable_binding(binding_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Binding not found")
     return {"status": "success", "id": binding_id}
@@ -1807,9 +1807,9 @@ async def create_agent_email_binding_api(agent_id: str, payload: AgentEmailBindi
 
 @app.delete("/api/agents/email/{binding_id}")
 async def delete_agent_email_binding_api(binding_id: str):
-    from backend.agent_messenger_governance import revoke_email_binding
+    from backend.agent_messenger_governance import disable_binding
     try:
-        await revoke_email_binding(binding_id)
+        await disable_binding(binding_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Binding not found")
     return {"status": "success", "id": binding_id}
@@ -1854,6 +1854,42 @@ async def update_messenger_binding_api(binding_id: str, payload: MessengerBindin
         raise HTTPException(status_code=404, detail="Binding not found")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/messenger-bindings/{binding_id}/disable")
+async def disable_messenger_binding_api(binding_id: str):
+    """Stops the binding's bot but keeps its stored credential, so it can be
+    re-enabled later — unlike DELETE below, this is reversible."""
+    from backend.agent_messenger_governance import disable_binding
+    try:
+        return await disable_binding(binding_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Binding not found")
+
+
+@app.post("/api/messenger-bindings/{binding_id}/enable")
+async def enable_messenger_binding_api(binding_id: str):
+    """Restarts a disabled binding's bot using its still-stored credential."""
+    from backend.agent_messenger_governance import enable_binding
+    try:
+        return await enable_binding(binding_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Binding not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/messenger-bindings/{binding_id}")
+async def delete_messenger_binding_api(binding_id: str):
+    """Permanently removes the binding: stops its bot, destroys the stored
+    credential, and deletes the row. Not reversible — reconnecting the channel
+    afterwards means entering fresh credentials."""
+    from backend.agent_messenger_governance import delete_binding_permanently
+    try:
+        await delete_binding_permanently(binding_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Binding not found")
+    return {"status": "success", "id": binding_id}
 
 
 @app.get("/api/channel-replies")

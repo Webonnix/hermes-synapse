@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Check, ChevronDown, ChevronUp, MessageCircle, Plus, Send, Trash2, X } from 'lucide-react';
+import { Check, ChevronDown, ChevronUp, MessageCircle, Plus, Power, PowerOff, Send, Trash2, X } from 'lucide-react';
 import { styles } from '../styles';
 import type { AgentModel, MessengerBinding, PendingChannelReply } from '../types';
 
@@ -95,6 +95,8 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
   const [editPrompt, setEditPrompt] = useState('');
   const [editMode, setEditMode] = useState<ResponseMode>('draft');
   const [savingEdit, setSavingEdit] = useState(false);
+  /** Binding id currently mid enable/disable/delete, so its row can disable its own buttons. */
+  const [busyBindingId, setBusyBindingId] = useState('');
 
   const [replies, setReplies] = useState<PendingChannelReply[]>([]);
   const [repliesLoading, setRepliesLoading] = useState(true);
@@ -194,11 +196,57 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
     }
   };
 
-  const deleteBinding = async (binding: MessengerBinding) => {
-    if (!window.confirm(`Отключить канал ${PLATFORM_LABELS[binding.platform as Platform] || binding.platform} для агента "${binding.agent_name}"?`)) return;
-    const path = `/api/agents/${PLATFORM_PATHS[binding.platform as Platform] || binding.platform}/${binding.id}`;
-    await fetch(path, { method: 'DELETE', headers: authHeaders() });
-    fetchBindings();
+  const disableBinding = async (binding: MessengerBinding) => {
+    if (!window.confirm(`Выключить канал ${PLATFORM_LABELS[binding.platform as Platform] || binding.platform} для агента "${binding.agent_name}"? Бот перестанет отвечать, но подключение можно будет включить обратно.`)) return;
+    setBusyBindingId(binding.id);
+    setError('');
+    try {
+      const response = await fetch(`/api/messenger-bindings/${binding.id}/disable`, { method: 'POST', headers: authHeaders() });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || 'Не удалось выключить канал');
+      }
+      await fetchBindings();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось выключить канал');
+    } finally {
+      setBusyBindingId('');
+    }
+  };
+
+  const enableBinding = async (binding: MessengerBinding) => {
+    setBusyBindingId(binding.id);
+    setError('');
+    try {
+      const response = await fetch(`/api/messenger-bindings/${binding.id}/enable`, { method: 'POST', headers: authHeaders() });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || 'Не удалось включить канал');
+      }
+      await fetchBindings();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось включить канал');
+    } finally {
+      setBusyBindingId('');
+    }
+  };
+
+  const deleteBindingPermanently = async (binding: MessengerBinding) => {
+    if (!window.confirm(`Удалить канал ${PLATFORM_LABELS[binding.platform as Platform] || binding.platform} для агента "${binding.agent_name}" НАВСЕГДА? Учётные данные будут уничтожены — подключение придётся настраивать заново.`)) return;
+    setBusyBindingId(binding.id);
+    setError('');
+    try {
+      const response = await fetch(`/api/messenger-bindings/${binding.id}`, { method: 'DELETE', headers: authHeaders() });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || 'Не удалось удалить канал');
+      }
+      await fetchBindings();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось удалить канал');
+    } finally {
+      setBusyBindingId('');
+    }
   };
 
   const openEdit = (binding: MessengerBinding) => {
@@ -447,10 +495,12 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
           <button type="button" className="btn-primary" onClick={addBinding} disabled={saving || !canSubmit} style={{ alignSelf: 'flex-start' }}>
             <span>{saving ? '...' : 'Подключить'}</span>
           </button>
-          {error && <div style={{ color: 'var(--danger)', fontSize: '0.85rem' }}>{error}</div>}
         </div>
       )}
 
+      {/* Rendered outside the add-binding form so it also surfaces failures from
+          enable/disable/delete on the list below, which can happen with the form closed. */}
+      {error && <div className="glass-panel" style={{ padding: '10px 14px', marginBottom: '14px', color: 'var(--danger)', fontSize: '0.85rem' }}>{error}</div>}
       {notice && <div className="glass-panel" style={{ padding: '10px 14px', marginBottom: '14px', color: 'var(--success)', fontSize: '0.85rem' }}>{notice}</div>}
 
       {loading ? (
@@ -480,7 +530,35 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
                       {expandedId === binding.id ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                     </button>
                   )}
-                  <button type="button" className="icon-btn danger" title="Отключить" onClick={() => deleteBinding(binding)}>
+                  {binding.status === 'active' && (
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      title="Выключить (можно будет включить обратно)"
+                      disabled={busyBindingId === binding.id}
+                      onClick={() => void disableBinding(binding)}
+                    >
+                      <Power size={14} />
+                    </button>
+                  )}
+                  {binding.status === 'revoked' && (
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      title="Включить"
+                      disabled={busyBindingId === binding.id}
+                      onClick={() => void enableBinding(binding)}
+                    >
+                      <PowerOff size={14} />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="icon-btn danger"
+                    title="Удалить навсегда"
+                    disabled={busyBindingId === binding.id}
+                    onClick={() => void deleteBindingPermanently(binding)}
+                  >
                     <Trash2 size={14} />
                   </button>
                 </div>

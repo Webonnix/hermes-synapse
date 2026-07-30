@@ -356,17 +356,6 @@ def resolve_telegram_binding_token(binding_id: str) -> Optional[str]:
     return get_value(dict(row)["valkey_secret_key"])
 
 
-async def revoke_telegram_binding(binding_id: str) -> None:
-    binding = get_telegram_binding(binding_id)
-    if not binding:
-        raise KeyError(binding_id)
-    from backend import agent_bot
-    from backend.valkey_client import delete_value
-
-    await agent_bot.manager.stop(binding_id)
-    delete_value(f"agent_bot_secret:{binding_id}")
-    _set_status(binding_id, "revoked")
-
 
 def _verify_matrix_credentials(
     homeserver_url: str, user_id: str, password: str = "", access_token: str = ""
@@ -589,17 +578,6 @@ def resolve_matrix_binding_credentials(binding_id: str) -> Optional[dict[str, An
     return json.loads(credentials_json) if credentials_json else None
 
 
-async def revoke_matrix_binding(binding_id: str) -> None:
-    binding = get_matrix_binding(binding_id)
-    if not binding:
-        raise KeyError(binding_id)
-    from backend import agent_matrix_bot
-    from backend.valkey_client import delete_value
-
-    await agent_matrix_bot.manager.stop(binding_id)
-    delete_value(binding.get("valkey_secret_key") or f"agent_matrix_secret:{binding_id}")
-    _set_status(binding_id, "revoked")
-
 
 async def update_binding_settings(
     binding_id: str,
@@ -645,6 +623,90 @@ async def update_binding_settings(
     with _connect() as connection:
         row = connection.execute("SELECT * FROM agent_messenger_bindings WHERE id = ?", (binding_id,)).fetchone()
     return _row_to_dict(row)
+
+
+def _binding_or_raise(binding_id: str) -> dict[str, Any]:
+    with _connect() as connection:
+        row = connection.execute("SELECT * FROM agent_messenger_bindings WHERE id = ?", (binding_id,)).fetchone()
+    if not row:
+        raise KeyError(binding_id)
+    return dict(row)
+
+
+async def disable_binding(binding_id: str) -> dict[str, Any]:
+    """Stops a binding's bot without touching its stored credential, so it can be
+    re-enabled later without the owner re-entering a token/password. This is the
+    generic, platform-agnostic replacement for the old per-platform
+    revoke_*_binding() calls, which also destroyed the Valkey secret — making
+    'disable' actually irreversible and indistinguishable from a real delete."""
+    binding = _binding_or_raise(binding_id)
+    runtime = _runtime_module_for_platform(binding["platform"])
+    await runtime.manager.stop(binding_id)
+    _set_status(binding_id, "revoked")
+    return _row_to_dict(_binding_or_raise(binding_id))
+
+
+async def enable_binding(binding_id: str) -> dict[str, Any]:
+    """Restarts a disabled ('revoked') binding's bot using its still-stored
+    credential. Raises ValueError if there's nothing to resolve (e.g. the
+    binding predates this function and had its secret destroyed by the old
+    revoke_*_binding behaviour — the channel must be reconnected from scratch)."""
+    binding = _binding_or_raise(binding_id)
+    if binding["status"] == "active":
+        return _row_to_dict(binding)
+    if binding["status"] != "revoked":
+        raise ValueError(f"Cannot enable a binding with status '{binding['status']}'")
+
+    platform = binding["platform"]
+    runtime = _runtime_module_for_platform(platform)
+    overrides = {
+        "system_prompt": binding.get("system_prompt_override"),
+        "model": binding.get("model_override"),
+        "model_provider": binding.get("model_provider_override"),
+    }
+    allowed = json.loads(binding.get("allowed_chat_ids") or "[]")
+    response_mode = _clean_response_mode(binding.get("response_mode"))
+
+    # The resolve_*_credentials/token helpers only return a value for a row whose
+    # status is already 'active' (the same guard that keeps a disabled binding's
+    # secret from being read elsewhere) — flip the status first, then resolve.
+    _set_status(binding_id, "active")
+    try:
+        if platform == "telegram":
+            credential_or_token = resolve_telegram_binding_token(binding_id)
+        elif platform == "discord":
+            credential_or_token = resolve_discord_binding_token(binding_id)
+        elif platform == "matrix":
+            credential_or_token = resolve_matrix_binding_credentials(binding_id)
+        elif platform == "slack":
+            credential_or_token = resolve_slack_binding_credentials(binding_id)
+        elif platform == "email":
+            credential_or_token = resolve_email_binding_credentials(binding_id)
+        else:
+            raise ValueError(f"Unknown platform: {platform}")
+        if not credential_or_token:
+            raise ValueError("Stored credential is no longer available — reconnect this channel instead.")
+        await runtime.manager.start(
+            binding_id, binding["subagent_id"], credential_or_token, allowed, overrides, response_mode,
+        )
+    except Exception:
+        _set_status(binding_id, "revoked")
+        raise
+    return _row_to_dict(_binding_or_raise(binding_id))
+
+
+async def delete_binding_permanently(binding_id: str) -> None:
+    """Actually removes a binding: stops its bot if running, destroys the stored
+    credential, and deletes the row — unlike disable_binding(), this cannot be
+    undone from the dashboard; the channel would need to be reconnected from
+    scratch with fresh credentials."""
+    binding = _binding_or_raise(binding_id)
+    runtime = _runtime_module_for_platform(binding["platform"])
+    await runtime.manager.stop(binding_id)
+    from backend.valkey_client import delete_value
+    delete_value(binding["valkey_secret_key"])
+    with _connect() as connection:
+        connection.execute("DELETE FROM agent_messenger_bindings WHERE id = ?", (binding_id,))
 
 
 def _verify_discord_token(bot_token: str) -> str:
@@ -837,17 +899,6 @@ def resolve_discord_binding_token(binding_id: str) -> Optional[str]:
 
     return get_value(dict(row)["valkey_secret_key"])
 
-
-async def revoke_discord_binding(binding_id: str) -> None:
-    binding = get_discord_binding(binding_id)
-    if not binding:
-        raise KeyError(binding_id)
-    from backend import agent_discord_bot
-    from backend.valkey_client import delete_value
-
-    await agent_discord_bot.manager.stop(binding_id)
-    delete_value(binding.get("valkey_secret_key") or f"agent_discord_secret:{binding_id}")
-    _set_status(binding_id, "revoked")
 
 
 def _verify_slack_tokens(bot_token: str, app_token: str) -> str:
@@ -1048,17 +1099,6 @@ def resolve_slack_binding_credentials(binding_id: str) -> Optional[dict[str, Any
     credentials_json = get_value(dict(row)["valkey_secret_key"])
     return json.loads(credentials_json) if credentials_json else None
 
-
-async def revoke_slack_binding(binding_id: str) -> None:
-    binding = get_slack_binding(binding_id)
-    if not binding:
-        raise KeyError(binding_id)
-    from backend import agent_slack_bot
-    from backend.valkey_client import delete_value
-
-    await agent_slack_bot.manager.stop(binding_id)
-    delete_value(binding.get("valkey_secret_key") or f"agent_slack_secret:{binding_id}")
-    _set_status(binding_id, "revoked")
 
 
 def _verify_email_credentials(
@@ -1274,17 +1314,6 @@ def resolve_email_binding_credentials(binding_id: str) -> Optional[dict[str, Any
     credentials_json = get_value(dict(row)["valkey_secret_key"])
     return json.loads(credentials_json) if credentials_json else None
 
-
-async def revoke_email_binding(binding_id: str) -> None:
-    binding = get_email_binding(binding_id)
-    if not binding:
-        raise KeyError(binding_id)
-    from backend import agent_email_channel
-    from backend.valkey_client import delete_value
-
-    await agent_email_channel.manager.stop(binding_id)
-    delete_value(binding.get("valkey_secret_key") or f"agent_email_secret:{binding_id}")
-    _set_status(binding_id, "revoked")
 
 
 _init_schema()
