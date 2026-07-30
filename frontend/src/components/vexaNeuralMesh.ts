@@ -11,6 +11,8 @@ export interface NeuralMeshData {
   positions: Float32Array;
   sizes: Float32Array;
   seeds: Float32Array;
+  /** 0 = phase colour, 1 = violet. Gives the cloud the reference's mixed hues. */
+  tints: Float32Array;
   /** Two endpoints per link, flattened as xyzxyz. */
   linkPositions: Float32Array;
   /** Per-vertex normalised distance of the link's midpoint from the core (0 = centre). */
@@ -56,6 +58,7 @@ export function buildNeuralMesh(options: Pick<MeshOptions, 'pointCount' | 'links
   const positions = new Float32Array(pointCount * 3);
   const sizes = new Float32Array(pointCount);
   const seeds = new Float32Array(pointCount);
+  const tints = new Float32Array(pointCount);
 
   for (let index = 0; index < pointCount; index += 1) {
     // Uniform direction on the sphere, then a radius biased outward so the shell reads
@@ -63,12 +66,17 @@ export function buildNeuralMesh(options: Pick<MeshOptions, 'pointCount' | 'links
     const u = random() * 2 - 1;
     const theta = random() * Math.PI * 2;
     const planar = Math.sqrt(Math.max(0, 1 - u * u));
-    const radius = minRadius + Math.pow(random(), 0.65) * (maxRadius - minRadius);
+    // Exponent < 1 pushes points outward, but not so far that the mid-shell thins out —
+    // the reference's web is continuous from the kernel to the rim.
+    const radius = minRadius + Math.pow(random(), 0.5) * (maxRadius - minRadius);
     positions[index * 3] = planar * Math.cos(theta) * radius;
     positions[index * 3 + 1] = planar * Math.sin(theta) * radius;
     positions[index * 3 + 2] = u * radius;
     sizes[index] = 0.45 + random() * 1.15;
     seeds[index] = random();
+    // Violet nodes cluster further out, where the reference shows the purple fringe.
+    const outward = (radius - minRadius) / (maxRadius - minRadius);
+    tints[index] = random() < 0.18 + outward * 0.42 ? 0.55 + random() * 0.45 : random() * 0.2;
   }
 
   // ── spatial hash ──────────────────────────────────────────────────────────
@@ -157,6 +165,7 @@ export function buildNeuralMesh(options: Pick<MeshOptions, 'pointCount' | 'links
     positions,
     sizes,
     seeds,
+    tints,
     linkPositions: linkPositions.subarray(0, linkCount * 6),
     linkDepths: linkDepths.subarray(0, linkCount * 2),
     linkSeeds: linkSeeds.subarray(0, linkCount * 2),

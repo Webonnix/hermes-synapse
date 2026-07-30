@@ -61,7 +61,7 @@ const ERROR_PULSE_COLOR = new THREE.Color(1.0, 0.42, 0.32);
 
 const PHASE_COLOR: Record<VoicePhase, [number, number, number]> = {
   offline: [0.22, 0.26, 0.32],
-  ready: [0.18, 0.58, 0.95],
+  ready: [0.16, 0.52, 1.0],
   listening: [0.32, 0.86, 1.0],
   transcribing: [0.42, 0.78, 0.99],
   thinking: [0.52, 0.56, 0.97],
@@ -111,12 +111,12 @@ interface Orbit3DConfig {
 // flat spin (a torus is rotationally symmetric around its own normal, so what reads as
 // motion here is this precession plus the shader's traveling dash).
 const ORBIT_CONFIGS: Orbit3DConfig[] = [
-  { radius: 1.5, tubeRadius: 0.006, tiltX: 0.4, tiltZ: 0.15, dashCount: 3, dashSpeed: 0.35, speed: 0.05, dir: 1, opacity: 0.55 },
-  { radius: 1.75, tubeRadius: 0.005, tiltX: -0.6, tiltZ: 0.45, dashCount: 4, dashSpeed: -0.28, speed: 0.04, dir: -1, opacity: 0.48 },
-  { radius: 2.0, tubeRadius: 0.005, tiltX: 1.0, tiltZ: -0.3, dashCount: 2, dashSpeed: 0.42, speed: 0.035, dir: 1, opacity: 0.42 },
-  { radius: 2.25, tubeRadius: 0.004, tiltX: -0.25, tiltZ: -0.85, dashCount: 5, dashSpeed: -0.22, speed: 0.03, dir: -1, opacity: 0.36 },
-  { radius: 2.5, tubeRadius: 0.004, tiltX: 1.2, tiltZ: 0.55, dashCount: 3, dashSpeed: 0.3, speed: 0.025, dir: 1, opacity: 0.3 },
-  { radius: 2.75, tubeRadius: 0.0035, tiltX: -1.05, tiltZ: 0.2, dashCount: 6, dashSpeed: -0.18, speed: 0.02, dir: -1, opacity: 0.24 },
+  { radius: 1.5, tubeRadius: 0.006, tiltX: 0.4, tiltZ: 0.15, dashCount: 3, dashSpeed: 0.35, speed: 0.05, dir: 1, opacity: 0.8 },
+  { radius: 1.75, tubeRadius: 0.005, tiltX: -0.6, tiltZ: 0.45, dashCount: 4, dashSpeed: -0.28, speed: 0.04, dir: -1, opacity: 0.72 },
+  { radius: 2.0, tubeRadius: 0.005, tiltX: 1.0, tiltZ: -0.3, dashCount: 2, dashSpeed: 0.42, speed: 0.035, dir: 1, opacity: 0.66 },
+  { radius: 2.25, tubeRadius: 0.004, tiltX: -0.25, tiltZ: -0.85, dashCount: 5, dashSpeed: -0.22, speed: 0.03, dir: -1, opacity: 0.58 },
+  { radius: 2.5, tubeRadius: 0.004, tiltX: 1.2, tiltZ: 0.55, dashCount: 3, dashSpeed: 0.3, speed: 0.025, dir: 1, opacity: 0.5 },
+  { radius: 2.75, tubeRadius: 0.0035, tiltX: -1.05, tiltZ: 0.2, dashCount: 6, dashSpeed: -0.18, speed: 0.02, dir: -1, opacity: 0.42 },
 ];
 
 interface FilamentConfig {
@@ -423,11 +423,13 @@ export default function VexaEnergyCore({ phase, audioAnalyser, pulseKey, errorPu
       uEnergy: { value: 0.4 },
       uBoot: { value: 0 },
       uColor: { value: new THREE.Color(0.45, 0.82, 1) },
+      uColorAlt: { value: new THREE.Color(0.68, 0.4, 1) },
     };
     const neuralGeometry = new THREE.BufferGeometry();
     neuralGeometry.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3));
     neuralGeometry.setAttribute('aSize', new THREE.BufferAttribute(mesh.sizes, 1));
     neuralGeometry.setAttribute('aSeed', new THREE.BufferAttribute(mesh.seeds, 1));
+    neuralGeometry.setAttribute('aTint', new THREE.BufferAttribute(mesh.tints, 1));
     disposables.push(neuralGeometry);
     const neuralMaterial = new THREE.ShaderMaterial({
       uniforms: neuralUniforms,
@@ -448,7 +450,7 @@ export default function VexaEnergyCore({ phase, audioAnalyser, pulseKey, errorPu
       uEnergy: { value: 0.4 },
       uBoot: { value: 0 },
       uColor: { value: new THREE.Color(0.35, 0.78, 1) },
-      uColorFar: { value: new THREE.Color(0.32, 0.28, 0.72) },
+      uColorFar: { value: new THREE.Color(0.42, 0.26, 0.9) },
     };
     const linkGeometry = new THREE.BufferGeometry();
     linkGeometry.setAttribute('position', new THREE.BufferAttribute(mesh.linkPositions, 3));
@@ -488,6 +490,8 @@ export default function VexaEnergyCore({ phase, audioAnalyser, pulseKey, errorPu
     pulseGeometry.setAttribute('position', new THREE.BufferAttribute(pulsePositions, 3));
     pulseGeometry.setAttribute('aSize', new THREE.BufferAttribute(pulseSizes, 1));
     pulseGeometry.setAttribute('aSeed', new THREE.BufferAttribute(pulseSeeds, 1));
+    // Pulses stay on the phase colour: they read as signals, not as part of the cloud.
+    pulseGeometry.setAttribute('aTint', new THREE.BufferAttribute(new Float32Array(pulseCount), 1));
     disposables.push(pulseGeometry);
     const signalUniforms = {
       uTime: { value: 0 },
@@ -495,6 +499,7 @@ export default function VexaEnergyCore({ phase, audioAnalyser, pulseKey, errorPu
       uEnergy: { value: 0.9 },
       uBoot: { value: 1 },
       uColor: { value: new THREE.Color(0.7, 0.95, 1) },
+      uColorAlt: { value: new THREE.Color(0.7, 0.95, 1) },
     };
     const signalMaterial = new THREE.ShaderMaterial({
       uniforms: signalUniforms,

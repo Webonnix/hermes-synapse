@@ -63,9 +63,9 @@ export function VoiceWaveform({ phase, audioAnalyser, side, simpleMode }: Props)
         // Synthetic trace: a barely-moving idle ripple, or a steadier "working" pattern
         // while Vexa is thinking, so the control never looks frozen.
         const seconds = reduceMotion ? 0 : time / 1000;
-        const amplitude = currentPhase === 'offline' ? 0.03
-          : currentPhase === 'thinking' || currentPhase === 'transcribing' ? 0.34
-            : 0.1;
+        const amplitude = currentPhase === 'offline' ? 0.05
+          : currentPhase === 'thinking' || currentPhase === 'transcribing' ? 0.55
+            : 0.34;
         for (let index = 0; index < SAMPLE_COUNT; index += 1) {
           const wave = Math.sin(seconds * 2.2 + index * 0.42) * 0.5 + Math.sin(seconds * 3.7 - index * 0.21) * 0.3;
           bands[index] = Math.max(0.02, amplitude * (0.55 + wave * 0.45));

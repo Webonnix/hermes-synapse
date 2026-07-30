@@ -20,35 +20,36 @@ uniform float uEnergy;
 uniform vec3 uColor;
 varying vec2 vUv;
 
+// The core's own light: a compact white-hot kernel, a tight containment ring around it and
+// a soft halo falling off into the node cloud. Deliberately radially symmetric — an
+// earlier spiral-armed version read as a flat swirl rather than a lit sphere, which is not
+// what the reference composition shows.
 void main() {
   vec2 uv = vUv * 2.0 - 1.0;
   float r = length(uv);
-  float theta = atan(uv.y, uv.x);
-  // Subtle audio-driven ripple on the radius itself, distinct from the vortex.scale
-  // breathing applied on the JS side — this one distorts the spiral shape, not just size.
-  r += sin(theta * 7.0 + uTime * 2.0) * uAmp * 0.015;
 
-  // Thin spiral filaments winding into the centre — no filled disc, just sharp lines.
-  float arms = 5.0;
-  float spiralPhase = theta * arms + r * 10.0 - uTime * (0.5 + uAmp * 1.1);
-  float spiral = abs(sin(spiralPhase));
-  float filament = smoothstep(0.965, 1.0, spiral) * smoothstep(0.62, 0.04, r);
+  float breathe = 1.0 + sin(uTime * 1.1) * 0.03 + uAmp * 0.12;
 
-  // Fine crosshatch to read as a data lattice rather than empty space near the centre.
-  float lattice = abs(sin(theta * 24.0 + uTime * 0.4)) * abs(sin(r * 26.0 - uTime * 0.6));
-  float latticeLine = smoothstep(0.985, 1.0, lattice) * smoothstep(0.5, 0.05, r) * 0.5;
+  // White-hot centre. Two stacked falloffs: a tiny saturated core plus a wider bleed, so
+  // it stays a point of light instead of a flat disc.
+  float kernel = smoothstep(0.075 * breathe, 0.0, r);
+  float bleed = smoothstep(0.17 * breathe, 0.02, r) * 0.42;
 
-  // Small bright kernel at the very centre.
-  float kernel = smoothstep(0.1, 0.0, r) * (0.55 + uAmp * 0.9);
+  // Thin containment ring just outside the kernel.
+  float ringRadius = 0.145 * breathe;
+  float ring = smoothstep(0.012, 0.0, abs(r - ringRadius)) * (0.45 + uEnergy * 0.5);
 
-  // A wide, very faint ambient aura behind the sharp lines — the only "glow", baked in
-  // directly rather than via a post-process bloom pass (kept deliberately subtle).
-  float aura = smoothstep(0.9, 0.0, r) * 0.035 * (0.6 + uEnergy * 0.4);
+  // Soft halo bridging the kernel and the surrounding point cloud.
+  float halo = smoothstep(0.62, 0.05, r) * (0.1 + uEnergy * 0.16);
+  float ambient = smoothstep(1.0, 0.1, r) * 0.05 * (0.5 + uEnergy * 0.5);
 
-  float alpha = clamp(filament * (0.5 + uEnergy * 0.3) + latticeLine + kernel + aura, 0.0, 1.0);
-  if (alpha < 0.015) discard;
-  vec3 color = uColor * (0.55 + filament * 0.9 + kernel * 1.3);
-  gl_FragColor = vec4(color, alpha * 0.85);
+  float alpha = clamp(kernel + bleed + ring + halo + ambient, 0.0, 1.0);
+  if (alpha < 0.012) discard;
+
+  // Toward white at the centre, toward the phase colour further out.
+  vec3 hot = mix(uColor, vec3(1.0), clamp(kernel * 1.1 + bleed * 0.55, 0.0, 1.0));
+  vec3 color = hot * (0.6 + uEnergy * 0.5 + kernel * 1.6 + ring * 0.8);
+  gl_FragColor = vec4(color, alpha);
 }`;
 
 export const RING_FRAGMENT_SHADER = `
@@ -183,9 +184,12 @@ uniform float uEnergy;
 uniform float uBoot;
 attribute float aSize;
 attribute float aSeed;
+attribute float aTint;
 varying float vAlpha;
+varying float vTint;
 
 void main() {
+  vTint = aTint;
   float breathe = 1.0 + sin(uTime * 0.5 + aSeed * 6.283) * 0.018 + uAmp * 0.05;
   vec3 pos = position * breathe * uBoot;
   vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
@@ -197,13 +201,16 @@ void main() {
 
 export const NEURAL_POINT_FRAGMENT_SHADER = `
 uniform vec3 uColor;
+uniform vec3 uColorAlt;
 varying float vAlpha;
+varying float vTint;
 void main() {
   vec2 uv = gl_PointCoord - 0.5;
   float d = length(uv);
   if (d > 0.5) discard;
   float core = smoothstep(0.5, 0.08, d);
-  gl_FragColor = vec4(uColor + vec3(core * 0.35), core * vAlpha);
+  vec3 tinted = mix(uColor, uColorAlt, vTint);
+  gl_FragColor = vec4(tinted + vec3(core * 0.4), core * vAlpha);
 }`;
 
 // Link segments between neighbouring nodes. `aDepth` is the midpoint's normalised
@@ -238,7 +245,7 @@ void main() {
   float near = 1.0 - vDepth;
   // Slow per-link shimmer so the mesh never looks like a frozen wireframe.
   float flicker = 0.72 + 0.28 * sin(uTime * 0.9 + vSeed * 21.0);
-  float alpha = (0.09 + near * 0.46) * (0.55 + uEnergy * 0.7) * flicker * uBoot;
+  float alpha = (0.18 + near * 0.78) * (0.6 + uEnergy * 0.8) * flicker * uBoot;
   if (alpha < 0.006) discard;
   gl_FragColor = vec4(mix(uColorFar, uColor, near), alpha);
 }`;

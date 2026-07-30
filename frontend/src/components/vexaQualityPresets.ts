@@ -30,14 +30,14 @@ export function getVexaQualityPreset(): VexaQualityPreset {
   if (isNarrow || lowCores) {
     return {
       particleCount: 160, orbitCount: 4, filamentCount: 2,
-      neuralPointCount: 700, linksPerNode: 2, pulseCount: 20,
+      neuralPointCount: 900, linksPerNode: 3, pulseCount: 24,
       dprCap: 1.5, bloomEnabled: false, reduceMotion: false,
     };
   }
 
   return {
     particleCount: 320, orbitCount: 6, filamentCount: 4,
-    neuralPointCount: 2000, linksPerNode: 3, pulseCount: 48,
+    neuralPointCount: 2400, linksPerNode: 4, pulseCount: 56,
     dprCap: 2, bloomEnabled: true, reduceMotion: false,
   };
 }
