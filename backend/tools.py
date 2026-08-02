@@ -1270,6 +1270,46 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "browser_read",
+            "description": (
+                "Открывает сайт в headless-браузере и читает/извлекает с него информацию (заголовки, текст, "
+                "результаты JS-рендеринга). Только чтение — клики, ввод текста и отправка форм структурно "
+                "недоступны в этом режиме, поэтому не требует подтверждения. Используйте для исследования сайтов, "
+                "которые обычный web_search не может прочитать (SPA, страницы за JS-рендером)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Что нужно найти/прочитать на сайте, на естественном языке."},
+                    "start_url": {"type": "string", "description": "Необязательный стартовый URL. Если не указан, агент сам найдёт нужную страницу."}
+                },
+                "required": ["task"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_task",
+            "description": (
+                "Полноценный браузерный агент: может кликать, заполнять формы, скачивать файлы и проходить "
+                "многошаговые сценарии на реальных сайтах. Необратимо/видимо снаружи — требует подтверждения "
+                "владельца перед выполнением (Control Plane, R3). Используйте только когда простого чтения "
+                "(browser_read) недостаточно."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Пошаговая задача на естественном языке: что открыть, что заполнить, что нажать."},
+                    "allowed_domains": {"type": "string", "description": "Необязательный список доменов через запятую, к которым ограничена навигация, например 'example.com,another.com'."}
+                },
+                "required": ["task"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_obsidian",
             "description": (
                 "Семантический поиск по заметкам Obsidian через базу знаний (RAG). "
@@ -2032,6 +2072,64 @@ def dev_run_tests(runner: str = "auto") -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# BROWSER AUTOMATION — thin httpx proxy to the browser-runner container, which
+# runs a full browser-use Agent loop against a headless Chromium session
+# pointed at Hermes's own configured LLM. One natural-language sub-task per
+# call rather than granular click/type primitives: browser-use already runs
+# its own DOM-indexing perception/action loop internally, so re-exposing that
+# loop step-by-step over HTTP would just duplicate it here.
+#
+# browser_read is structurally read-only (click/input/upload/submit actions
+# are excluded server-side, not just discouraged) — R1 in control_plane.py.
+# browser_task is the full interactive agent (can click/fill/submit/download
+# on arbitrary third-party sites) — R3, gated behind one owner approval via
+# the same Control Plane flow every other tool call goes through.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+BROWSER_RUNNER_URL = os.getenv("BROWSER_RUNNER_URL", "http://browser-runner:8800")
+
+
+def _browser_runner_request(payload: Dict[str, Any], timeout: float = 300.0) -> str:
+    if os.getenv("BROWSER_AGENT_ENABLED", "false").strip().lower() != "true":
+        return json.dumps(
+            {"error": "Browser automation is disabled (set BROWSER_AGENT_ENABLED=true and start the browser-runner service)."},
+            ensure_ascii=False,
+        )
+    token = os.getenv("BROWSER_RUNNER_TOKEN", "")
+    if not token:
+        return json.dumps({"error": "BROWSER_RUNNER_TOKEN is not configured on the backend."}, ensure_ascii=False)
+    try:
+        response = httpx.post(
+            f"{BROWSER_RUNNER_URL}/run",
+            json=payload,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=timeout,
+        )
+    except httpx.HTTPError as exc:
+        return json.dumps({
+            "error": f"Browser runner is unreachable ({type(exc).__name__}). "
+                     "Check that the browser-runner container is up (docker compose --profile browser up -d)."
+        }, ensure_ascii=False)
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("detail", "")
+        except Exception:
+            detail = response.text[:300]
+        return json.dumps({"error": f"Browser runner rejected the request ({response.status_code}): {detail}"},
+                          ensure_ascii=False)
+    return json.dumps(response.json(), ensure_ascii=False)
+
+
+def browser_read(task: str, start_url: Optional[str] = None) -> str:
+    return _browser_runner_request({"task": task, "mode": "read_only", "start_url": start_url or None})
+
+
+def browser_task(task: str, allowed_domains: str = "") -> str:
+    domains = [d.strip() for d in allowed_domains.split(",") if d.strip()] if allowed_domains else None
+    return _browser_runner_request({"task": task, "mode": "interactive", "allowed_domains": domains}, timeout=300.0)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # TOOL ROUTER
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -2264,6 +2362,12 @@ def execute_tool(name: str, arguments: Dict[str, Any], chat_id: str = "default")
 
     elif name == "dev_run_tests":
         return dev_run_tests(arguments.get("runner", "auto"))
+
+    elif name == "browser_read":
+        return browser_read(arguments.get("task", ""), arguments.get("start_url"))
+
+    elif name == "browser_task":
+        return browser_task(arguments.get("task", ""), arguments.get("allowed_domains", ""))
 
     else:
         # Check if it is an MCP tool

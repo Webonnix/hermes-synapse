@@ -74,6 +74,16 @@ TOOL_RISKS = {
     # a Control Plane approval click, defeating autonomous use by e.g. the
     # Senior Web Developer agent. The budget cap is the actual safety net.
     "generate_image": "R2",
+    # Read-only browser reconnaissance: click/input/upload/select/send_keys/
+    # evaluate actions are structurally excluded server-side (mode="read_only"
+    # in browser_runner/server.py), not just discouraged — matches web_search's
+    # R1.
+    "browser_read": "R1",
+    # Full interactive browser agent — can click, fill forms, submit and
+    # download on arbitrary third-party sites. Irreversible/externally-visible,
+    # matches add_calendar_event/create_subagent's R3 (one owner approval
+    # before it runs).
+    "browser_task": "R3",
 }
 
 _SECRET_KEY = re.compile(r"(password|passwd|secret|token|api[_-]?key|authorization|cookie|private[_-]?key)", re.I)

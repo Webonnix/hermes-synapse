@@ -128,6 +128,12 @@ TOOL_INTENT_KEYWORDS = {
     "execute_command": [
         "выполни команду", "запусти команду", "curl", "shell", "terminal"
     ],
+    "browser_read": [
+        "открой сайт", "открой страницу", "зайди на сайт", "прочитай сайт", "browser", "website", "open the page"
+    ],
+    "browser_task": [
+        "заполни форму", "нажми кнопку", "кликни", "заполни на сайте", "оформи заказ на сайте", "fill in the form", "submit the form"
+    ],
 }
 
 
@@ -267,12 +273,14 @@ def _provider_cost(api_base: str, provider: str, model: str, input_tokens: int, 
 
 
 # ─── PAID TOOL BUDGET GATING ────────────────────────────────────────────────
-# Tools with a real per-call $ cost (currently just generate_image) bypass the
-# LLM-token cost accounting above entirely — their spend is only known after
-# tools.py returns a "cost_usd" field in the result. Gate + record it here,
-# right where each tool loop already has the calling agent's id in scope,
-# instead of retrofitting the multi-exit-point turn-level cost bookkeeping.
-PAID_TOOLS = {"generate_image"}
+# Tools with a real per-call $ cost (generate_image; browser_read/browser_task
+# each drive their own internal multi-step LLM loop in browser-runner) bypass
+# the LLM-token cost accounting above entirely — their spend is only known
+# after tools.py returns a "cost_usd" field in the result. Gate + record it
+# here, right where each tool loop already has the calling agent's id in
+# scope, instead of retrofitting the multi-exit-point turn-level cost
+# bookkeeping.
+PAID_TOOLS = {"generate_image", "browser_read", "browser_task"}
 
 def _paid_tool_budget_block(agent_id: str, tool_name: str) -> Optional[str]:
     """Returns a JSON error string if agent_id has no budget left, else None."""
@@ -2041,6 +2049,7 @@ class JarvisAgent:
             "python_sandbox": ["execute_command"],
             "git_dev": ["git_status", "git_diff", "git_commit", "git_push"],
             "image_generation": ["generate_image"],
+            "browser_automation": ["browser_read", "browser_task"],
         }
 
         skills_str = subagent.get("skills", "")

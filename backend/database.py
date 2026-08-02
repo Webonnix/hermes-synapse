@@ -427,6 +427,15 @@ def _init_sqlite_schema():
                 SENIOR_WEB_DEV_PROMPT,
                 default_model, "agent", "jarvis", "git_dev,python_sandbox,image_generation", 450, 1060
             ),
+            (
+                "browser", "Web Browser Agent",
+                "You are a Web Browser Agent. Use browser_read to research and extract information from websites "
+                "(read-only — no owner approval needed). Use browser_task only when the goal genuinely requires "
+                "clicking, filling in forms, or submitting something on a real site — it needs owner approval before "
+                "it runs, so prefer browser_read whenever a simple lookup is enough. Always explain what you found "
+                "or did, and never guess at page content you have not actually read.",
+                default_model, "agent", "jarvis", "browser_automation,web_search", 450, 1180
+            ),
         ]
         cursor.executemany("""
             INSERT INTO subagents (id, name, system_prompt, model, agent_type, parent_id, skills, x, y, temperature)
@@ -467,6 +476,13 @@ def _init_sqlite_schema():
             ("web_dev", "Senior Web Developer",
              SENIOR_WEB_DEV_PROMPT,
              "agent", "jarvis", "git_dev,python_sandbox,image_generation", 450, 1060),
+            ("browser", "Web Browser Agent",
+             "You are a Web Browser Agent. Use browser_read to research and extract information from websites "
+             "(read-only — no owner approval needed). Use browser_task only when the goal genuinely requires "
+             "clicking, filling in forms, or submitting something on a real site — it needs owner approval before "
+             "it runs, so prefer browser_read whenever a simple lookup is enough. Always explain what you found "
+             "or did, and never guess at page content you have not actually read.",
+             "agent", "jarvis", "browser_automation,web_search", 450, 1180),
         ]
         default_model = os.environ.get("LLM_MODEL", "qwen3:8b")
         for agent_id, name, prompt, agent_type, parent_id, skills, x, y in upserts:
@@ -939,6 +955,15 @@ def _get_default_agents(default_model: str) -> list:
             "You are a Football Analyst Agent. You have deep knowledge of football (soccer): tactics, player performance, match statistics, league standings, and transfer news. Use web_search to fetch the latest match results, lineups, and news. Provide detailed tactical breakdowns, score predictions, and injury updates. Support all major leagues: Premier League, La Liga, Serie A, Bundesliga, Champions League, and others.",
             default_model, "agent", "jarvis", "web_search", 450, 940
         ),
+        (
+            "browser", "Web Browser Agent",
+            "You are a Web Browser Agent. Use browser_read to research and extract information from websites "
+            "(read-only — no owner approval needed). Use browser_task only when the goal genuinely requires "
+            "clicking, filling in forms, or submitting something on a real site — it needs owner approval before "
+            "it runs, so prefer browser_read whenever a simple lookup is enough. Always explain what you found "
+            "or did, and never guess at page content you have not actually read.",
+            default_model, "agent", "jarvis", "browser_automation,web_search", 450, 1060
+        ),
     ]
 
 
@@ -1029,6 +1054,13 @@ def _get_default_agents_migrations() -> list:
         ("football", "Football Analyst",
          "You are a Football Analyst Agent. You have deep knowledge of football (soccer): tactics, player performance, match statistics, league standings, and transfer news. Use web_search to fetch the latest match results, lineups, and news. Provide detailed tactical breakdowns, score predictions, and injury updates. Support all major leagues: Premier League, La Liga, Serie A, Bundesliga, Champions League, and others.",
          "agent", "jarvis", "web_search", 450, 940),
+        ("browser", "Web Browser Agent",
+         "You are a Web Browser Agent. Use browser_read to research and extract information from websites "
+         "(read-only — no owner approval needed). Use browser_task only when the goal genuinely requires "
+         "clicking, filling in forms, or submitting something on a real site — it needs owner approval before "
+         "it runs, so prefer browser_read whenever a simple lookup is enough. Always explain what you found "
+         "or did, and never guess at page content you have not actually read.",
+         "agent", "jarvis", "browser_automation,web_search", 450, 1060),
     ]
 
 

@@ -48,7 +48,7 @@ def _active_llm_runtime() -> tuple[str, Dict[str, Any]]:
 def get_agent_model(agent_role: str, fallback_model: str) -> str:
     """
     Returns the model configured for a specific agent role.
-    Reads from env: AGENT_MODEL_RESEARCH, AGENT_MODEL_CODE, AGENT_MODEL_ANALYST, AGENT_MODEL_PLANNER.
+    Reads from env: AGENT_MODEL_RESEARCH, AGENT_MODEL_CODE, AGENT_MODEL_ANALYST, AGENT_MODEL_PLANNER, AGENT_MODEL_BROWSER.
     Falls back to `fallback_model` (the main LLM_MODEL) if the env var is not set.
     """
     env_map = {
@@ -56,6 +56,7 @@ def get_agent_model(agent_role: str, fallback_model: str) -> str:
         "code":     "AGENT_MODEL_CODE",
         "analyst":  "AGENT_MODEL_ANALYST",
         "planner":  "AGENT_MODEL_PLANNER",
+        "browser":  "AGENT_MODEL_BROWSER",
     }
     env_key = env_map.get(agent_role.lower())
     if env_key:

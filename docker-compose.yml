@@ -140,6 +140,38 @@ services:
     networks:
       - hermes-net
 
+  # Browser-automation agent (browser-use driving a headless Chromium session).
+  # Opt-in via `--profile browser` — a Chromium session is CPU/RAM-heavy and
+  # this host already runs dual-GPU Ollama + xtts, so it does not start with a
+  # plain `docker-compose up -d`. Also gated at the application layer by
+  # BROWSER_AGENT_ENABLED (backend/tools.py refuses to call out even if this
+  # container happens to be up). Needs egress to the internet (that's the
+  # point) and a route to `ollama`, so unlike dev-runner it cannot run on an
+  # egress-less network — see browser_runner/server.py's INTERNAL_HOSTS
+  # deny-list + block_ip_addresses for the actual containment control.
+  browser-runner:
+    build:
+      context: .
+      dockerfile: browser_runner/Dockerfile
+    container_name: hermes-browser-runner
+    restart: unless-stopped
+    profiles: ["browser"]
+    environment:
+      - BROWSER_RUNNER_TOKEN=${BROWSER_RUNNER_TOKEN:-}
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - LLM_API_BASE=${LLM_API_BASE:-https://openrouter.ai/api/v1}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M}
+      - AGENT_MODEL_BROWSER=${AGENT_MODEL_BROWSER:-}
+      - BROWSER_AGENT_MAX_STEPS=${BROWSER_AGENT_MAX_STEPS:-25}
+      - BROWSER_AGENT_TIMEOUT_SECONDS=${BROWSER_AGENT_TIMEOUT_SECONDS:-240}
+    mem_limit: 2g
+    cpus: 2
+    logging: *default-logging
+    networks:
+      - hermes-net
+
   frontend:
     build:
       context: ./frontend

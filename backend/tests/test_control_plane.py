@@ -24,6 +24,22 @@ def test_risk_policy_defaults_unknown_tools_to_r4(control_db):
     assert control_plane.classify_tool_risk("untrusted_plugin_action") == "R4"
 
 
+def test_browser_read_is_zero_approval_browser_task_requires_one(control_db):
+    # browser_read excludes click/input/submit actions server-side, matches
+    # web_search's R1 (no approval). browser_task is the full interactive
+    # agent, matches add_calendar_event/create_subagent's R3 (one approval).
+    assert control_plane.classify_tool_risk("browser_read") == "R1"
+    assert control_plane.classify_tool_risk("browser_task") == "R3"
+
+    read_task = control_plane.create_tool_task("browser_read", {"task": "read a page"}, chat_id="test")
+    assert read_task["approvals_required"] == 0
+    assert read_task["status"] == "queued"
+
+    interactive_task = control_plane.create_tool_task("browser_task", {"task": "fill a form"}, chat_id="test")
+    assert interactive_task["approvals_required"] == 1
+    assert interactive_task["status"] == "awaiting_approval"
+
+
 def test_r3_action_is_queued_until_approved(control_db):
     tools_module = ModuleType("backend.tools")
     execute = MagicMock()
