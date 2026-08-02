@@ -2129,6 +2129,31 @@ def browser_task(task: str, allowed_domains: str = "") -> str:
     return _browser_runner_request({"task": task, "mode": "interactive", "allowed_domains": domains}, timeout=300.0)
 
 
+def get_browser_live_frame() -> Dict[str, Any]:
+    """Latest screenshot + current step of a running browser_read/browser_task
+    call, for the dashboard's "watch the browser" viewer. Not a tool the LLM
+    calls — plain passthrough for main.py's /api/browser/live-frame route,
+    same shape as get_tts_status()/get_voice_status() proxying to their
+    sidecars.
+    """
+    if os.getenv("BROWSER_AGENT_ENABLED", "false").strip().lower() != "true":
+        return {"active": False}
+    token = os.getenv("BROWSER_RUNNER_TOKEN", "")
+    if not token:
+        return {"active": False}
+    try:
+        response = httpx.get(
+            f"{BROWSER_RUNNER_URL}/live-frame",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=5.0,
+        )
+        if response.status_code >= 400:
+            return {"active": False}
+        return response.json()
+    except httpx.HTTPError:
+        return {"active": False}
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # TOOL ROUTER
 # ═══════════════════════════════════════════════════════════════════════════════

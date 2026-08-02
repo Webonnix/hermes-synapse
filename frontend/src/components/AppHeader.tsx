@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
-import { BellRing, OctagonX, Play } from 'lucide-react';
+import { BellRing, Eye, OctagonX, Play } from 'lucide-react';
 import type { ControlPlaneSummary } from '../types';
+import { translate } from '../i18n';
 
 type Props = {
   language: 'ru' | 'en';
   onOpenProcesses: () => void;
+  onOpenBrowserView: () => void;
   /** When the parent already polls /api/control-plane/summary, pass the data
    * here to reuse it; the header then skips its own polling. */
   summary?: ControlPlaneSummary | null;
@@ -21,10 +23,11 @@ const COPY = {
   },
 } as const;
 
-export function AppHeader({ language, onOpenProcesses, summary: externalSummary }: Props) {
+export function AppHeader({ language, onOpenProcesses, onOpenBrowserView, summary: externalSummary }: Props) {
   const copy = COPY[language];
   const [ownSummary, setOwnSummary] = useState<ControlPlaneSummary | null>(null);
   const summary = externalSummary ?? ownSummary;
+  const [browserActive, setBrowserActive] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -42,6 +45,22 @@ export function AppHeader({ language, onOpenProcesses, summary: externalSummary 
     const interval = window.setInterval(() => void load(), 15000);
     return () => window.clearInterval(interval);
   }, [externalSummary, load]);
+
+  useEffect(() => {
+    const loadBrowserState = async () => {
+      try {
+        const response = await fetch('/api/browser/live-frame');
+        if (!response.ok) return;
+        const data = await response.json();
+        setBrowserActive(Boolean(data?.active));
+      } catch {
+        /* header indicator is best-effort */
+      }
+    };
+    void loadBrowserState();
+    const interval = window.setInterval(() => void loadBrowserState(), 10000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   const pending = summary?.counts?.awaiting_approval || 0;
   const stopped = Boolean(summary?.state?.kill_switch);
@@ -89,6 +108,17 @@ export function AppHeader({ language, onOpenProcesses, summary: externalSummary 
       >
         {stopped ? <><Play size={15} />{copy.resume}</> : <><OctagonX size={15} />{copy.killSwitch}</>}
         {stopped && <em>{copy.stopped}</em>}
+      </button>
+
+      <button
+        type="button"
+        className={`app-header-browser-view${browserActive ? ' is-active' : ''}`}
+        onClick={onOpenBrowserView}
+        title={translate(language, 'browserViewOpen')}
+        aria-label={translate(language, 'browserViewOpen')}
+      >
+        <Eye size={15} />
+        {browserActive && <span className="app-header-badge-dot" aria-hidden="true" />}
       </button>
     </header>
   );

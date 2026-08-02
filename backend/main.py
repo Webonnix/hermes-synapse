@@ -768,6 +768,11 @@ async def voice_tts_status_api():
     from backend.tts import get_tts_status
     return get_tts_status()
 
+@app.get("/api/browser/live-frame")
+async def browser_live_frame_api():
+    from backend.tools import get_browser_live_frame
+    return await asyncio.to_thread(get_browser_live_frame)
+
 
 @app.post("/api/voice/synthesize")
 async def synthesize_voice_api(payload: VoiceSynthesisRequest):

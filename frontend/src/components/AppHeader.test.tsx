@@ -19,7 +19,7 @@ describe('AppHeader', () => {
     const fetchMock = vi.fn(async () => ({ ok: true, json: async () => summary }));
     vi.stubGlobal('fetch', fetchMock);
     const onOpen = vi.fn();
-    render(<AppHeader language="en" onOpenProcesses={onOpen} />);
+    render(<AppHeader language="en" onOpenProcesses={onOpen} onOpenBrowserView={() => undefined} />);
     await waitFor(() => expect(screen.getByTestId('approvals-badge')).toHaveTextContent('3'));
     fireEvent.click(screen.getByRole('button', { name: /awaiting approval/i }));
     expect(onOpen).toHaveBeenCalled();
@@ -29,7 +29,7 @@ describe('AppHeader', () => {
     const fetchMock = vi.fn(async () => ({ ok: true, json: async () => summary }));
     vi.stubGlobal('fetch', fetchMock);
     vi.spyOn(window, 'confirm').mockReturnValue(false);
-    render(<AppHeader language="en" onOpenProcesses={() => undefined} />);
+    render(<AppHeader language="en" onOpenProcesses={() => undefined} onOpenBrowserView={() => undefined} />);
     const killButton = await screen.findByRole('button', { name: /emergency stop/i });
     fireEvent.click(killButton);
     expect(window.confirm).toHaveBeenCalled();
@@ -39,7 +39,7 @@ describe('AppHeader', () => {
   it('reuses an externally provided summary without polling', () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
-    render(<AppHeader language="en" onOpenProcesses={() => undefined} summary={summary} />);
+    render(<AppHeader language="en" onOpenProcesses={() => undefined} onOpenBrowserView={() => undefined} summary={summary} />);
     expect(screen.getByTestId('approvals-badge')).toHaveTextContent('3');
     expect(fetchMock).not.toHaveBeenCalled();
   });

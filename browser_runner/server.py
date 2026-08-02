@@ -18,7 +18,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import List, Literal, Optional
+import time
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -54,6 +55,13 @@ app = FastAPI(title="Hermes Browser Runner", docs_url=None, redoc_url=None, open
 
 _run_lock = asyncio.Lock()
 
+# Latest step's screenshot + what the agent is doing with it, for the "watch
+# the browser" viewer. Only one run is ever in flight (_run_lock), so a single
+# module-level slot is enough — no per-task keying needed. Cleared at the
+# start of every run so a finished/idle sidecar reports nothing to look at
+# rather than a stale frame from the last task.
+_last_frame: Dict[str, Any] = {"active": False}
+
 
 def _require_token(request: Request) -> None:
     expected = os.getenv("BROWSER_RUNNER_TOKEN", "")
@@ -88,7 +96,9 @@ def _build_llm():
         return ChatOllama(model=model, host=host)
 
     if provider == "openrouter":
-        from browser_use import ChatOpenRouter
+        # Not re-exported from the top-level `browser_use` package in this
+        # pinned release — only from its own submodule.
+        from browser_use.llm.openrouter.chat import ChatOpenRouter
         api_key = os.getenv("OPENROUTER_API_KEY", "")
         return ChatOpenRouter(model=model, api_key=api_key)
 
@@ -125,6 +135,32 @@ async def health() -> dict:
     return {"status": "ok", "busy": _run_lock.locked(), "max_steps": MAX_STEPS}
 
 
+@app.get("/live-frame", dependencies=[Depends(_require_token)])
+async def live_frame() -> dict:
+    """Latest step's screenshot + what the agent is currently doing, for the
+    dashboard's "watch the browser" viewer. Meant to be polled every second or
+    two while a run is active; {"active": False} once it finishes or before
+    one has started."""
+    return _last_frame
+
+
+async def _on_step(state: Any, output: Any, step_number: int) -> None:
+    screenshot = getattr(state, "screenshot", None)
+    if not screenshot and hasattr(state, "get_screenshot"):
+        try:
+            screenshot = state.get_screenshot()
+        except Exception:  # noqa: BLE001 — a missing screenshot must not fail the step
+            screenshot = None
+    _last_frame.update({
+        "active": True,
+        "step": step_number,
+        "url": getattr(state, "url", None),
+        "goal": getattr(output, "next_goal", None) or getattr(output, "thinking", None) or "",
+        "screenshot_b64": screenshot,
+        "ts": time.time(),
+    })
+
+
 @app.post("/run", dependencies=[Depends(_require_token)])
 async def run(req: RunRequest) -> dict:
     if _run_lock.locked():
@@ -145,6 +181,9 @@ async def run(req: RunRequest) -> dict:
         if req.start_url:
             task_text = f"Start by navigating to {req.start_url}. {task_text}"
 
+        _last_frame.clear()
+        _last_frame.update({"active": True, "step": 0, "url": req.start_url, "goal": "Starting…", "screenshot_b64": None, "ts": time.time()})
+
         agent = Agent(
             task=task_text,
             llm=llm,
@@ -153,6 +192,7 @@ async def run(req: RunRequest) -> dict:
             calculate_cost=True,
             use_vision=True,
             enable_signal_handler=False,
+            register_new_step_callback=_on_step,
         )
 
         try:
@@ -168,6 +208,7 @@ async def run(req: RunRequest) -> dict:
                 await agent.close()
             except Exception:  # noqa: BLE001 — cleanup must never mask the real result/error
                 logger.warning("Error while closing the browser session", exc_info=True)
+            _last_frame.update({"active": False})
 
         errors = [e for e in history.errors() if e]
         return {

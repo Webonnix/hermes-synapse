@@ -976,6 +976,19 @@ body::after {
 .is-vexa-simple-mode .app-header { position: fixed; top: auto; bottom: 16px; right: 16px; z-index: 30; padding: 0; flex-direction: column; align-items: flex-end; }
 @media (max-width: 640px) { .app-header { padding: 6px 10px 0; flex-wrap: wrap; } .app-header-badge-label { display: none; } .is-vexa-mode .app-header { bottom: 168px; right: 12px; } }
 
+.app-header-browser-view { position: relative; display: inline-flex; align-items: center; justify-content: center; min-height: 30px; min-width: 30px; padding: 0 8px; border: 1px solid rgba(255,255,255,.12); border-radius: 5px; color: var(--text-muted); background: rgba(255,255,255,.03); cursor: pointer; }
+.app-header-browser-view.is-active { border-color: rgba(95,240,191,.35); color: var(--success); background: rgba(95,240,191,.07); }
+.app-header-badge-dot { position: absolute; top: -3px; right: -3px; width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 2px var(--bg, #0b0f17); }
+
+/* ── Browser agent live view ─────────────────────────────────────────────── */
+.browser-live-view { display: flex; flex-direction: column; gap: 10px; height: 100%; }
+.browser-live-view-idle { align-items: center; justify-content: center; color: var(--text-muted); font: 500 .8rem var(--font-sans); text-align: center; padding: 24px; }
+.browser-live-view-frame { width: 100%; border-radius: 6px; border: 1px solid rgba(255,255,255,.1); background: #000; object-fit: contain; }
+.browser-live-view-placeholder { width: 100%; min-height: 160px; display: flex; align-items: center; justify-content: center; border-radius: 6px; border: 1px dashed rgba(255,255,255,.15); color: var(--text-muted); }
+.browser-live-view-caption { display: flex; flex-direction: column; gap: 4px; font: 500 .72rem var(--font-sans); color: var(--text-muted); }
+.browser-live-view-url { font: 500 .68rem var(--font-mono); word-break: break-all; opacity: .8; }
+.browser-live-view-goal { color: var(--text); }
+
 /* ── Dev Runs — Mission Control ─────────────────────────────────────────── */
 .devruns-page { padding: 18px 20px 26px; overflow: auto; height: 100%; }
 .devrun-create { display: flex; align-items: center; gap: 9px; margin: 16px 0; padding: 10px 12px; border: 1px solid rgba(0,240,255,.16); border-radius: 6px; background: rgba(0,240,255,.04); color: var(--accent-cyan); }
