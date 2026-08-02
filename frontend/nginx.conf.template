@@ -91,6 +91,31 @@ server {
         proxy_read_timeout 300s;
     }
 
+    # Vite fingerprints every file under /assets/ with a content hash, so a given
+    # URL's bytes can never change — cache it hard and skip the revalidation
+    # round-trip entirely. A new build produces new filenames, not new contents.
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        try_files $uri =404;
+    }
+
+    # index.html is the one file whose URL is stable while its contents change on
+    # every deploy — it's what points at the hashed bundles. Served with no
+    # Cache-Control at all, browsers fall back to RFC 9111 heuristic freshness and
+    # may reuse a cached copy without ever asking the server, so a deployed fix can
+    # sit unused in a tab that is never hard-reloaded (this happened: a voice fix
+    # looked like it "changed nothing" for an hour while the old bundle kept
+    # running). "no-cache" still allows caching but forces revalidation, so the
+    # 304 path keeps it cheap.
+    #
+    # Permissions-Policy is repeated here on purpose: nginx's add_header is only
+    # inherited by a location that declares none of its own, so without this line
+    # the microphone grant would be silently dropped from the HTML document.
+    location = /index.html {
+        add_header Permissions-Policy "microphone=(self)" always;
+        add_header Cache-Control "no-cache" always;
+    }
+
     # SPA fallback — all other routes serve index.html
     location / {
         try_files $uri $uri/ /index.html;
