@@ -47,6 +47,7 @@ import { NetworkTab } from './components/NetworkTab';
 import { MCPTab } from './components/MCPTab';
 import { AgentsAdminTab } from './components/AgentsAdminTab';
 import { ApiKeysTab } from './components/ApiKeysTab';
+import { splitForSpeech } from './speechChunks';
 import { MessengerChannelsTab } from './components/MessengerChannelsTab';
 import { ProcessesTab } from './components/ProcessesTab';
 import { HermesMark } from './components/HermesMark';
@@ -381,13 +382,16 @@ export default function App() {
     beginTtsPending();
     if (msgIndex !== undefined) setPlayingMsgIndex(msgIndex);
 
-    const browserFallback = () => {
+    // Takes the text to speak so a mid-queue failure can voice just the part that has
+    // not been played yet, rather than repeating the whole answer from the top.
+    const browserFallback = (pending: string = clean) => {
       if (requestId !== ttsRequestRef.current) return;
+      if (!pending.trim()) return;
       if (!('speechSynthesis' in window)) {
         showVoiceError('Голосовой движок недоступен в этом браузере.');
         return;
       }
-      const utter = new SpeechSynthesisUtterance(clean);
+      const utter = new SpeechSynthesisUtterance(pending);
       const locale = langToLocale[appSettingsRef.current.language] || 'ru-RU';
       utter.lang = locale;
       utter.rate = 1;
@@ -442,6 +446,15 @@ export default function App() {
     };
 
     void (async () => {
+      const chunks = splitForSpeech(clean);
+      if (!chunks.length) return;
+      // How many chunks actually reached the speakers — a mid-queue failure resumes the
+      // browser voice from here instead of restarting the whole answer.
+      let spoken = 0;
+      // The chunk being synthesised ahead of playback. If we bail before awaiting it, its
+      // rejection still has to be observed or the browser logs an unhandled rejection.
+      let lookahead: Promise<Blob> | null = null;
+
       try {
         const authToken = localStorage.getItem('jarvis_auth_token');
         const authHeaders: Record<string, string> = authToken ? { 'Authorization': `Bearer ${authToken}` } : {};
@@ -455,41 +468,64 @@ export default function App() {
           return;
         }
 
-        const response = await fetch('/api/voice/synthesize', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...authHeaders },
-          body: JSON.stringify({ text: clean, rate: 1 }),
-        });
-        if (!response.ok) throw new Error('Local TTS provider is unavailable.');
-        const blob = await response.blob();
-        if (requestId !== ttsRequestRef.current) return;
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        ttsAudioUrlRef.current = url;
+        const synthesize = async (part: string): Promise<Blob> => {
+          const response = await fetch('/api/voice/synthesize', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeaders },
+            body: JSON.stringify({ text: part, rate: 1 }),
+          });
+          if (!response.ok) throw new Error('Local TTS provider is unavailable.');
+          return response.blob();
+        };
+
+        // One <audio> element reused for every chunk: VexaAudioAnalyser may only wrap a
+        // given element in a MediaElementAudioSourceNode once, so an element per chunk
+        // would leak nodes and leave the core animation reading a dead source.
+        const audio = new Audio();
         ttsAudioRef.current = audio;
         audio.onplay = () => {
           endTtsPending();
           setIsSpeaking(true);
         };
-        audio.onended = stopSpeech;
-        audio.onerror = () => {
-          // Reset to null (not false) — a single failure shouldn't permanently
-          // downgrade every future reply to the browser's robotic fallback voice
-          // for the rest of the page session. null makes the next speakText call
-          // re-probe /api/voice/tts/status and retry the real server voice.
-          serverTtsAvailableRef.current = null;
-          ttsAudioRef.current = null;
-          if (ttsAudioUrlRef.current) {
-            URL.revokeObjectURL(ttsAudioUrlRef.current);
-            ttsAudioUrlRef.current = '';
-          }
-          setIsSpeaking(false);
-          browserFallback();
-        };
-        await audio.play();
+
+        const playBlob = (blob: Blob) => new Promise<void>((resolve, reject) => {
+          const url = URL.createObjectURL(blob);
+          if (ttsAudioUrlRef.current) URL.revokeObjectURL(ttsAudioUrlRef.current);
+          ttsAudioUrlRef.current = url;
+          audio.onended = () => resolve();
+          audio.onerror = () => reject(new Error('TTS playback failed.'));
+          audio.src = url;
+          audio.play().catch(reject);
+        });
+
+        lookahead = synthesize(chunks[0]);
+        for (let index = 0; index < chunks.length; index += 1) {
+          const pending = lookahead;
+          lookahead = null;
+          const blob = await pending!;
+          if (requestId !== ttsRequestRef.current) return;
+          // Start the next chunk's synthesis *before* playing this one, so generation
+          // overlaps playback. Synthesis runs ~2x faster than speech, so after the first
+          // chunk the queue stays ahead of the speaker and the seams are inaudible.
+          if (index + 1 < chunks.length) lookahead = synthesize(chunks[index + 1]);
+          await playBlob(blob);
+          if (requestId !== ttsRequestRef.current) return;
+          spoken = index + 1;
+        }
+        if (requestId === ttsRequestRef.current) stopSpeech();
       } catch {
+        // A superseded request is not a failure: stopSpeech() clearing audio.src is what
+        // rejected us. Falling through here would reset serverTtsAvailableRef and make
+        // every following reply pay for a pointless /api/voice/tts/status probe.
+        if (requestId !== ttsRequestRef.current) return;
+        // Reset to null (not false) — a single failure shouldn't permanently downgrade
+        // every future reply to the browser's robotic fallback voice for the rest of the
+        // page session. null makes the next speakText call re-probe and retry.
         serverTtsAvailableRef.current = null;
-        browserFallback();
+        setIsSpeaking(false);
+        browserFallback(chunks.slice(spoken).join(' '));
+      } finally {
+        lookahead?.catch(() => {});
       }
     })();
   }, [playingMsgIndex, stopSpeech, showVoiceError, beginTtsPending, endTtsPending]);
@@ -597,8 +633,10 @@ export default function App() {
 
       // Show what was recognized before it's auto-sent, so the user can actually see
       // their dictated text rather than it silently vanishing straight into the chat.
+      // Long enough to register as "Vexa heard this", short enough not to be felt as
+      // lag — in dialog mode this sits on the critical path of every single turn.
       setInputValue(text);
-      await new Promise(resolve => setTimeout(resolve, 550));
+      await new Promise(resolve => setTimeout(resolve, 200));
 
       const vexaMode = localStorage.getItem('jarvis_active_tab') === 'vexa';
       if (vexaMode && currentChatIdRef.current !== 'dashboard') {
