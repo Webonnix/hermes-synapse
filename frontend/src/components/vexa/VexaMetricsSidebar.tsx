@@ -10,6 +10,8 @@ interface ResourceRow {
   id: string;
   label: string;
   value: number | null;
+  /** Optional secondary reading shown next to the value, e.g. GPU temperature. */
+  detail?: string | null;
 }
 
 export function SystemResourcesCard({ copy, rows }: { copy: VexaCopy; rows: ResourceRow[] }) {
@@ -27,7 +29,10 @@ export function SystemResourcesCard({ copy, rows }: { copy: VexaCopy; rows: Reso
               <ResourceGauge value={row.value} label={row.label} />
               <div>
                 <span>{row.label}</span>
-                <strong className={tone}>{row.value === null ? copy.noData : `${Math.round(row.value)}%`}</strong>
+                <strong className={tone}>
+                  {row.value === null ? copy.noData : `${Math.round(row.value)}%`}
+                  {row.detail && <em className="vx-resource-detail">{row.detail}</em>}
+                </strong>
               </div>
             </div>
           );

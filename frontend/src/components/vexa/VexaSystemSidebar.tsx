@@ -174,7 +174,7 @@ export function ChatHistoryCard({ copy, sessions, currentChatId, getSessionLabel
           <Plus size={13} />
         </button>
       </div>
-      <div className="vx-panel-body is-scroll">
+      <div className="vx-panel-body is-scroll is-grow">
         <div className="vx-history-list">
           {visible.length === 0 && <p className="vx-empty">{copy.noHistory}</p>}
           {visible.map(session => (

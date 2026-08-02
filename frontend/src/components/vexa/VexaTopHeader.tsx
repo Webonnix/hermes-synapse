@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { BarChart3, Bell, Maximize, MessageSquare, Minimize, Package, PanelLeft, PanelRight, Settings, Sparkles, Users, Zap } from 'lucide-react';
+import { ArrowLeftRight, BarChart3, Bell, Maximize, MessageSquare, Minimize, Package, PanelLeft, PanelRight, Settings, Sparkles, Users, Zap } from 'lucide-react';
+import { VexaLogo } from '../VexaLogo';
 import type { VexaCopy } from './vexaCopy';
 import type { GlobalSystemState } from './vexaDashboardTypes';
 
@@ -22,6 +23,9 @@ interface Props {
   onOpenSettings: () => void;
   openPanel: SidePanel | null;
   onTogglePanel: (panel: SidePanel) => void;
+  /** Whether the system/metrics flank and the agent/conversation flank have swapped corners. */
+  panelsSwapped: boolean;
+  onToggleSwapPanels: () => void;
 }
 
 function useFullscreen() {
@@ -47,24 +51,6 @@ function useFullscreen() {
   return [active, toggle] as const;
 }
 
-function VexaLogo() {
-  return (
-    <span className="vx-brand-mark" aria-hidden="true">
-      <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
-        <defs>
-          <linearGradient id="vx-logo-gradient" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stopColor="#1bdcff" />
-            <stop offset="52%" stopColor="#2684ff" />
-            <stop offset="100%" stopColor="#8958ff" />
-          </linearGradient>
-        </defs>
-        <path d="M14 2 L26 7 L14 26 L2 7 Z" stroke="url(#vx-logo-gradient)" strokeWidth="1.6" fill="rgba(27,220,255,.08)" strokeLinejoin="round" />
-        <path d="M8.5 9 L14 19.5 L19.5 9" stroke="url(#vx-logo-gradient)" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    </span>
-  );
-}
-
 export function VexaTopHeader({
   copy, state, stale, runtimeLabel, runtimeTone,
   pendingConfirmations,
@@ -72,6 +58,7 @@ export function VexaTopHeader({
   onOpenAnalytics, onOpenAgents, onOpenProcesses,
   onOpenConfirmations, onOpenSettings,
   openPanel, onTogglePanel,
+  panelsSwapped, onToggleSwapPanels,
 }: Props) {
 
   const [isFullscreen, toggleFullscreen] = useFullscreen();
@@ -137,6 +124,16 @@ export function VexaTopHeader({
           aria-label={copy.agentCircuit}
         >
           <PanelRight size={17} />
+        </button>
+        <button
+          type="button"
+          className={`vx-quick-btn${panelsSwapped ? ' is-open' : ''}`}
+          onClick={onToggleSwapPanels}
+          aria-pressed={panelsSwapped}
+          title={copy.swapPanels}
+          aria-label={copy.swapPanels}
+        >
+          <ArrowLeftRight size={17} />
         </button>
 
         <button type="button" className="vx-quick-btn vx-quick-nav" onClick={onOpenAnalytics} title={copy.quickTelemetry} aria-label={copy.quickTelemetry}>

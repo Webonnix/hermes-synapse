@@ -63,22 +63,32 @@ function clampPercent(value: unknown): number | null {
   return Math.max(0, Math.min(100, value));
 }
 
-/** Network "health" percentage: bytes/s mapped onto a 1 Gbit/s reference link. */
-function networkHealth(stats: SystemStats | null): number | null {
+/** Network load percentage: bytes/s mapped onto a 1 Gbit/s reference link. */
+function networkLoad(stats: SystemStats | null): number | null {
   const network = stats?.host?.network;
   if (!network) return null;
   const rx = network.rx_bytes_per_second ?? 0;
   const tx = network.tx_bytes_per_second ?? 0;
   if (!Number.isFinite(rx) || !Number.isFinite(tx)) return null;
-  // Reported as link headroom so 100% means "unsaturated", matching the reference layout.
   const saturation = Math.min(1, (rx + tx) / (125_000_000));
-  return Math.round((1 - saturation) * 100);
+  return Math.round(saturation * 100);
 }
 
-function firstGpuUtilization(stats: SystemStats | null): number | null {
-  const gpu = stats?.host?.gpus?.[0];
-  if (!gpu) return null;
-  return clampPercent(gpu.utilization_percent);
+/** Averages a numeric GPU field across every reported GPU (hosts here have more than one). */
+function averageGpuMetric(stats: SystemStats | null, field: 'utilization_percent' | 'temperature_celsius'): number | null {
+  const gpus = stats?.host?.gpus;
+  if (!gpus || gpus.length === 0) return null;
+  const values = gpus.map(gpu => gpu[field]).filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  if (values.length === 0) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function averageGpuUtilization(stats: SystemStats | null): number | null {
+  return clampPercent(averageGpuMetric(stats, 'utilization_percent'));
+}
+
+function averageGpuTemperature(stats: SystemStats | null): number | null {
+  return averageGpuMetric(stats, 'temperature_celsius');
 }
 
 export interface VexaTelemetry {
@@ -216,7 +226,7 @@ export function useVexaTelemetry(input: TelemetryInput): VexaTelemetry {
 
       const now = Date.now();
       const memory = clampPercent(snapshot?.host?.memory?.usage_percent ?? snapshot?.ram_used_percent);
-      const gpu = firstGpuUtilization(snapshot);
+      const gpu = averageGpuUtilization(snapshot);
       const rx = snapshot?.host?.network?.rx_bytes_per_second ?? null;
       const tx = snapshot?.host?.network?.tx_bytes_per_second ?? null;
 
@@ -273,8 +283,9 @@ export function useVexaTelemetry(input: TelemetryInput): VexaTelemetry {
       resources: {
         cpu,
         memory,
-        gpu: firstGpuUtilization(stats),
-        network: networkHealth(stats),
+        gpu: averageGpuUtilization(stats),
+        gpuTemperature: averageGpuTemperature(stats),
+        network: networkLoad(stats),
       },
       uptimeSeconds: typeof host?.uptime_seconds === 'number' ? host.uptime_seconds : null,
       updatedAt: stats?.collected_at ?? null,

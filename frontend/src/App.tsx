@@ -50,9 +50,11 @@ import { ApiKeysTab } from './components/ApiKeysTab';
 import { MessengerChannelsTab } from './components/MessengerChannelsTab';
 import { ProcessesTab } from './components/ProcessesTab';
 import { HermesMark } from './components/HermesMark';
+import { VexaLogo } from './components/VexaLogo';
 import { MetricsTab } from './components/MetricsTab';
 import { FloatingWindow } from './components/FloatingWindow';
 import { VexaCommandCenter } from './components/VexaCommandCenter';
+import type { DashboardRoute } from './components/vexa/vexaDashboardTypes';
 import { DevRunsTab } from './components/DevRunsTab';
 import { AppHeader } from './components/AppHeader';
 import type { DevRunEvent } from './types';
@@ -64,6 +66,12 @@ initFetchInterceptor();
 const langToLocale: Record<string, string> = {
   ru: 'ru-RU', en: 'en-US', he: 'he-IL', de: 'de-DE', es: 'es-ES', fr: 'fr-FR'
 };
+
+// Hard ceiling on how long a reply may stay flagged as "speech on its way". XTTS on the
+// GPU needs ~3-8s for a normal answer, but nginx would let a stuck /api/voice/synthesize
+// hang for up to 120s — and Vexa's dialog mode refuses to reopen the microphone while the
+// flag is set. Without this ceiling one hung request would freeze the conversation loop.
+const TTS_PENDING_TIMEOUT_MS = 25000;
 
 export default function App() {
   const legacySettingsTabs = ['config', 'logs', 'activity', 'memory', 'tools', 'subagents', 'obsidian', 'mcp'];
@@ -80,6 +88,8 @@ export default function App() {
     return (savedTab && legacySettingsTabs.includes(savedTab) ? savedTab : 'config') as any;
   });
   const [vexaTranscriptOpen, setVexaTranscriptOpen] = useState(false);
+  /** Which bottom-nav destination is open as a floating window over the Vexa dashboard. */
+  const [vexaFloatingPanel, setVexaFloatingPanel] = useState<Exclude<DashboardRoute, 'terminal'> | null>(null);
   const [vexaUiMode, setVexaUiMode] = useState<'immersive' | 'simple'>(
     () => (localStorage.getItem('hermes_vexa_ui_mode') === 'simple' ? 'simple' : 'immersive')
   );
@@ -178,6 +188,11 @@ export default function App() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isTTSEnabled, setIsTTSEnabled] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  // True from the moment a spoken reply starts being fetched until it actually begins
+  // playing (or fails). `isSpeaking` only flips on the audio element's `play` event, so
+  // between the answer arriving and the synthesised wav coming back there are several
+  // seconds where speech is very much on its way while `isSpeaking` is still false.
+  const [isTtsPending, setIsTtsPending] = useState(false);
   const [playingMsgIndex, setPlayingMsgIndex] = useState<number | null>(null);
   const [micEnabled, setMicEnabled] = useState(false);
   const [micState, setMicState] = useState<'off' | 'listening' | 'capturing' | 'transcribing' | 'error'>('off');
@@ -215,6 +230,7 @@ export default function App() {
   const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
   const ttsAudioUrlRef = useRef('');
   const ttsRequestRef = useRef(0);
+  const ttsPendingTimerRef = useRef<number | null>(null);
   const serverTtsAvailableRef = useRef<boolean | null>(null);
   // Last user message per session, used by the "Retry" action (P0 UX).
   const lastUserMessageRef = useRef<Record<string, string>>({});
@@ -270,6 +286,23 @@ export default function App() {
   useEffect(() => { ttsEnabledRef.current = isTTSEnabled; }, [isTTSEnabled]);
   useEffect(() => { appSettingsRef.current = appSettings; }, [appSettings]);
 
+  const endTtsPending = useCallback(() => {
+    if (ttsPendingTimerRef.current !== null) {
+      window.clearTimeout(ttsPendingTimerRef.current);
+      ttsPendingTimerRef.current = null;
+    }
+    setIsTtsPending(false);
+  }, []);
+
+  const beginTtsPending = useCallback(() => {
+    if (ttsPendingTimerRef.current !== null) window.clearTimeout(ttsPendingTimerRef.current);
+    setIsTtsPending(true);
+    ttsPendingTimerRef.current = window.setTimeout(() => {
+      ttsPendingTimerRef.current = null;
+      setIsTtsPending(false);
+    }, TTS_PENDING_TIMEOUT_MS);
+  }, []);
+
   const stopSpeech = useCallback(() => {
     ttsRequestRef.current += 1;
     window.speechSynthesis?.cancel();
@@ -282,20 +315,24 @@ export default function App() {
       URL.revokeObjectURL(ttsAudioUrlRef.current);
       ttsAudioUrlRef.current = '';
     }
+    endTtsPending();
     setIsSpeaking(false);
     setPlayingMsgIndex(null);
-  }, []);
+  }, [endTtsPending]);
 
   // Shared "voice pipeline failed" indicator — same inline pill used by both the mic
   // (STT) and speech (TTS) paths, auto-clearing so it never lingers as a stale state.
   const showVoiceError = useCallback((message: string) => {
+    // Every TTS failure path funnels through here, so this is also where a reply that
+    // will never be spoken stops counting as "speech on its way".
+    endTtsPending();
     setMicState('error');
     setMicErrorMessage(message);
     setTimeout(() => {
       setMicState(current => (current === 'error' ? 'off' : current));
       setMicErrorMessage('');
     }, 3500);
-  }, []);
+  }, [endTtsPending]);
 
   // ── TTS helper ─────────────────────────────────────────────────────────────
   const speakText = useCallback((rawText: string, msgIndex?: number) => {
@@ -337,6 +374,11 @@ export default function App() {
 
     stopSpeech();
     const requestId = ttsRequestRef.current;
+    // stopSpeech() just cleared the previous reply's flag; from here until playback
+    // actually starts, this reply owns it. Vexa's dialog mode reads it to know a spoken
+    // answer is still coming — otherwise it reopens the microphone 1.1s after the text
+    // lands, and the stopSpeech() inside startVoiceRecording() aborts this very fetch.
+    beginTtsPending();
     if (msgIndex !== undefined) setPlayingMsgIndex(msgIndex);
 
     const browserFallback = () => {
@@ -377,6 +419,7 @@ export default function App() {
       let started = false;
       utter.onstart = () => {
         started = true;
+        endTtsPending();
         setIsSpeaking(true);
       };
       utter.onend = () => {
@@ -424,7 +467,10 @@ export default function App() {
         const audio = new Audio(url);
         ttsAudioUrlRef.current = url;
         ttsAudioRef.current = audio;
-        audio.onplay = () => setIsSpeaking(true);
+        audio.onplay = () => {
+          endTtsPending();
+          setIsSpeaking(true);
+        };
         audio.onended = stopSpeech;
         audio.onerror = () => {
           // Reset to null (not false) — a single failure shouldn't permanently
@@ -446,7 +492,7 @@ export default function App() {
         browserFallback();
       }
     })();
-  }, [playingMsgIndex, stopSpeech, showVoiceError]);
+  }, [playingMsgIndex, stopSpeech, showVoiceError, beginTtsPending, endTtsPending]);
 
   // ── Voice command helpers ───────────────────────────────────────────────────
   useEffect(() => {
@@ -572,6 +618,12 @@ export default function App() {
       console.error('Voice transcription error:', err);
       setMicEnabled(false);
       showVoiceError(err instanceof Error ? err.message : 'Voice transcription failed.');
+      // Same reasoning as the "recognised nothing" branch above: this turn produced no
+      // answer, and dialog mode only re-arms on a new answer or an idle tick. Without
+      // this, a single transcription failure (e.g. the server's own VAD found no speech
+      // even though the client thought it heard some, or a transient STT error) would
+      // silently end the conversation loop instead of retrying like a real idle turn.
+      setVoiceIdleTick(tick => tick + 1);
     }
   }, [sendChatText, showVoiceError]);
 
@@ -2160,8 +2212,8 @@ export default function App() {
           {isSidebarCollapsed ? <ChevronsRight size={17} /> : <ChevronsLeft size={17} />}
         </button>
         <div style={styles.logoArea}>
-          <HermesMark />
-          <h1 className="glow-text-cyan sidebar-title" style={styles.logoTitle}>HERMES</h1>
+          <VexaLogo className="hermes-logo-mark" />
+          <h1 className="glow-text-cyan sidebar-title" style={styles.logoTitle}>VEXA</h1>
         </div>
         <p className="sidebar-subtitle" style={styles.logoSubtitle}>{t('appSubtitle')}</p>
         
@@ -2311,6 +2363,7 @@ export default function App() {
                   isConnected={isConnected}
                   isGenerating={isGenerating}
                   isSpeaking={isSpeaking}
+                  isTtsPending={isTtsPending}
                   micState={micState}
                   micErrorMessage={micErrorMessage}
                   voiceIdleTick={voiceIdleTick}
@@ -2331,13 +2384,10 @@ export default function App() {
                   onSwitchToSimpleMode={() => setVexaUiMode('simple')}
                   fetchAgents={fetchSubagents}
                   onNavigate={(route) => {
-                    // The dashboard's bottom navigation speaks in route ids; Hermes drives
-                    // the workspace from `activeTab`, so translate rather than add a router.
-                    const tab = route === 'analytics' ? 'metrics'
-                      : route === 'protocols' ? 'processes'
-                        : route === 'agents' ? 'agents'
-                          : route === 'settings' ? 'settings' : 'vexa';
-                    setActiveTab(tab);
+                    // The dashboard's bottom navigation and quick-action icons open their
+                    // destination as a floating window over the dashboard, rather than
+                    // navigating away from it — "terminal" just closes whichever is open.
+                    setVexaFloatingPanel(route === 'terminal' ? null : route);
                   }}
                 />
                 {vexaTranscriptOpen && (
@@ -2397,6 +2447,31 @@ export default function App() {
                     />
                   </FloatingWindow>
                 )}
+                {vexaFloatingPanel && vexaFloatingPanel !== 'settings' && (
+                  <FloatingWindow
+                    title={
+                      vexaFloatingPanel === 'analytics' ? t('navAnalytics')
+                        : vexaFloatingPanel === 'agents' ? t('navAgents') : t('navProcesses')
+                    }
+                    storageKey={`hermes_vexa_panel_${vexaFloatingPanel}_window`}
+                    onClose={() => setVexaFloatingPanel(null)}
+                    labels={{
+                      minimize: t('vexaWindowMinimize'),
+                      restore: t('vexaWindowRestore'),
+                      fullscreen: t('vexaWindowFullscreen'),
+                      exitFullscreen: t('vexaWindowExitFullscreen'),
+                      close: t('vexaWindowCloseGeneric'),
+                    }}
+                  >
+                    {vexaFloatingPanel === 'analytics' && (
+                      <MetricsTab metrics={metrics} isLoading={isMetricsLoading} onRefresh={fetchMetrics} />
+                    )}
+                    {vexaFloatingPanel === 'agents' && (
+                      <AgentsAdminTab agents={subagents} models={models} fetchAgents={fetchSubagents} t={t} />
+                    )}
+                    {vexaFloatingPanel === 'protocols' && <ProcessesTab language={language} />}
+                  </FloatingWindow>
+                )}
               </>
             )}
           </>
@@ -2446,7 +2521,8 @@ export default function App() {
           <NetworkTab subagents={subagents} setSubagents={setSubagents} fetchSubagents={fetchSubagents} models={models} />
         )}
 
-        {activeTab === 'settings' && (
+        {(activeTab === 'settings' || vexaFloatingPanel === 'settings') && (() => {
+          const settingsBody = (
           <div style={styles.tabWrapper}>
             <nav className="admin-subnav">
               <button type="button" className={settingsSection === 'config' ? 'is-active' : ''} onClick={() => setSettingsSection('config')}>
@@ -2625,7 +2701,26 @@ export default function App() {
               <MCPTab />
             )}
           </div>
-        )}
+          );
+          return vexaFloatingPanel === 'settings' ? (
+            <FloatingWindow
+              title={t('navSettings')}
+              storageKey="hermes_vexa_panel_settings_window"
+              onClose={() => setVexaFloatingPanel(null)}
+              labels={{
+                minimize: t('vexaWindowMinimize'),
+                restore: t('vexaWindowRestore'),
+                fullscreen: t('vexaWindowFullscreen'),
+                exitFullscreen: t('vexaWindowExitFullscreen'),
+                close: t('vexaWindowCloseGeneric'),
+              }}
+            >
+              {settingsBody}
+            </FloatingWindow>
+          ) : (
+            activeTab === 'settings' && settingsBody
+          );
+        })()}
 
       </main>
 

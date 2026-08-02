@@ -8,9 +8,9 @@ export const styles: Record<string, any> = {
     display: 'flex',
     flexDirection: 'column' as const,
     overflow: 'hidden',
-    borderRight: '1px solid rgba(255, 255, 255, 0.08)',
+    borderRight: '1px solid rgba(45, 145, 212, 0.16)',
     borderRadius: '0px',
-    background: 'linear-gradient(180deg, rgba(26, 22, 46, 0.9), rgba(12, 13, 23, 0.78))',
+    background: 'linear-gradient(180deg, rgba(6, 18, 32, 0.94), rgba(2, 8, 18, 0.88))',
     boxShadow: '18px 0 70px rgba(0, 0, 0, 0.22), inset -1px 0 0 rgba(255, 255, 255, 0.03)',
     zIndex: 10
   },
@@ -27,8 +27,8 @@ export const styles: Record<string, any> = {
     width: '32px',
     height: '32px',
     borderRadius: '8px',
-    border: '1px solid rgba(255, 255, 255, 0.12)',
-    background: 'rgba(24, 23, 38, 0.92)',
+    border: '1px solid rgba(45, 145, 212, 0.28)',
+    background: 'rgba(6, 20, 34, 0.92)',
     color: 'var(--text-muted)',
     display: 'inline-flex',
     alignItems: 'center',
@@ -95,10 +95,10 @@ export const styles: Record<string, any> = {
     textTransform: 'uppercase' as const
   },
   navBtnActive: {
-    background: '#f7f4ff',
-    border: '1px solid rgba(255, 255, 255, 0.85)',
-    color: '#11121c',
-    boxShadow: '0 14px 34px rgba(155, 136, 255, 0.24)'
+    background: 'linear-gradient(135deg, rgba(27, 220, 255, 0.32), rgba(20, 100, 170, 0.62))',
+    border: '1px solid rgba(56, 220, 255, 0.8)',
+    color: '#f4fcff',
+    boxShadow: '0 14px 34px rgba(27, 220, 255, 0.3), inset 0 0 0 1px rgba(56, 220, 255, 0.14)'
   },
   navBtnCollapsed: {
     width: '48px',
@@ -133,8 +133,8 @@ export const styles: Record<string, any> = {
     gap: '6px',
     padding: '4px 8px',
     borderRadius: '6px',
-    backgroundColor: 'rgba(155, 136, 255, 0.1)',
-    border: '1px solid rgba(155, 136, 255, 0.24)'
+    backgroundColor: 'rgba(38, 132, 255, 0.12)',
+    border: '1px solid rgba(45, 145, 212, 0.32)'
   },
   modelName: {
     fontFamily: 'var(--font-mono)',

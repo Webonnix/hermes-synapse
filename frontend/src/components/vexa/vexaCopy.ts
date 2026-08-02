@@ -30,6 +30,9 @@ export const VEXA_COPY = {
     quickSecurity: 'Процессы и контроль рисков',
     quickNotifications: 'Очередь подтверждений',
     quickSettings: 'Настройки',
+    swapPanels: 'Поменять боковые панели местами',
+    resizeMetricsPanel: 'Изменить ширину левой панели (потяните)',
+    resizeRightPanel: 'Изменить ширину правой панели (потяните)',
 
     // runtime state pill
     ready: 'Готова к команде',
@@ -196,6 +199,9 @@ export const VEXA_COPY = {
     quickSecurity: 'Processes & risk control',
     quickNotifications: 'Confirmation queue',
     quickSettings: 'Settings',
+    swapPanels: 'Swap side panels',
+    resizeMetricsPanel: 'Resize the left panel (drag)',
+    resizeRightPanel: 'Resize the right panel (drag)',
 
     ready: 'Ready for a command',
     listening: 'Listening',

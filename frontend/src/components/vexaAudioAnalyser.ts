@@ -68,6 +68,20 @@ export class VexaAudioAnalyser {
     }
   }
 
+  /**
+   * Resumes the shared AudioContext from a real click handler. `sync()` also calls
+   * `resume()`, but it runs inside a requestAnimationFrame loop rather than a user
+   * gesture, which is a weaker claim on autoplay policy. This matters because
+   * `syncTts()` reroutes the TTS <audio> element through this context — if it were ever
+   * left suspended, that audio would be inaudible while the element still reported
+   * itself as playing. Precautionary: no confirmed case of it sticking, but the
+   * mic/dialog-mode buttons are the natural gesture to anchor it to.
+   */
+  unlock() {
+    const ctx = this.ensureContext();
+    if (ctx?.state === 'suspended') void ctx.resume().catch(() => {});
+  }
+
   /** Call once per animation frame with the current voice phase to keep the source graph in sync. */
   sync(phase: string) {
     const ctx = this.ensureContext();

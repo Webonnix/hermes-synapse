@@ -16,7 +16,7 @@ const overview: SystemOverview = {
   agentsTotal: 10,
   agentsActive: 8,
   voice: { mode: 'local', engine: 'xtts', voice: 'v-exa', status: 'ready' },
-  resources: { cpu: 68, memory: 72, gpu: 63, network: 100 },
+  resources: { cpu: 68, memory: 72, gpu: 63, gpuTemperature: 45, network: 100 },
   uptimeSeconds: 24 * 86400 + 7 * 3600,
   updatedAt: '2026-07-29T12:00:00Z',
   stale: false,
@@ -73,7 +73,7 @@ describe('SystemStatusCard', () => {
     render(
       <SystemStatusCard
         copy={copy}
-        overview={{ ...overview, resources: { cpu: null, memory: null, gpu: null, network: null }, uptimeSeconds: null }}
+        overview={{ ...overview, resources: { cpu: null, memory: null, gpu: null, gpuTemperature: null, network: null }, uptimeSeconds: null }}
       />,
     );
     expect(screen.getAllByText('Нет данных').length).toBe(4);

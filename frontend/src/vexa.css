@@ -149,12 +149,14 @@ main.vexa-main {
   display: grid;
   /* Column maxima are the reference composition's measured widths, so at the reference
      viewport the centre stage lands on its ~716px and the rest sit where the mock puts
-     them; below that the minima take over. */
+     them; below that the minima take over. The two flank widths are user-adjustable via
+     the resize handles (--vx-col-metrics/--vx-col-right, set inline by VexaCommandCenter)
+     and default to the reference values when unset. */
   grid-template-columns:
     minmax(252px, 264px)
-    minmax(176px, 188px)
+    minmax(160px, var(--vx-col-metrics, 188px))
     minmax(0, 1fr)
-    minmax(370px, 400px);
+    minmax(300px, var(--vx-col-right, 400px));
   grid-template-rows: 48px minmax(0, 1fr) 48px;
   grid-template-areas:
     'header header header header'
@@ -168,6 +170,20 @@ main.vexa-main {
   overflow: hidden;
 }
 
+/* "Move to the other corner": mirrors the flank order left<->right. The system/metrics
+   flank and the right flank swap positions; the centre stage and bottom nav stay put. */
+.vx-dashboard.is-swapped {
+  grid-template-columns:
+    minmax(300px, var(--vx-col-right, 400px))
+    minmax(0, 1fr)
+    minmax(160px, var(--vx-col-metrics, 188px))
+    minmax(252px, 264px);
+  grid-template-areas:
+    'header header header header'
+    'right core metrics system'
+    'right nav    metrics system';
+}
+
 .vx-area-header { grid-area: header; min-width: 0; }
 .vx-area-system { grid-area: system; min-width: 0; min-height: 0; }
 .vx-area-metrics { grid-area: metrics; min-width: 0; min-height: 0; }
@@ -176,12 +192,61 @@ main.vexa-main {
 .vx-area-right { grid-area: right; min-width: 0; min-height: 0; }
 
 .vx-column {
+  position: relative;
   display: flex;
   min-height: 0;
   flex-direction: column;
   gap: var(--vexa-gap-row);
   overflow: hidden;
 }
+
+/* Drag handles that resize the flank columns via --vx-col-metrics/--vx-col-right (set by
+   VexaCommandCenter). Each sits on the edge of its flank that touches the centre stage —
+   which side that is flips with .is-swapped, since the flank itself moves to the other
+   corner. */
+.vx-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: var(--vexa-z-controls);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  margin: 0 -7px;
+  cursor: col-resize;
+  touch-action: none;
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+
+.vx-resize-handle::before {
+  content: '';
+  width: 3px;
+  height: 34px;
+  border-radius: 3px;
+  background: rgba(45, 145, 212, .28);
+  transition: background var(--vexa-transition), height var(--vexa-transition);
+}
+
+.vx-resize-handle:hover::before,
+.vx-resize-handle.is-active::before {
+  background: var(--vexa-cyan);
+  height: 52px;
+  box-shadow: 0 0 10px rgba(27, 220, 255, .55);
+}
+
+.vx-area-metrics .vx-resize-handle[data-edge='metrics'] { right: 0; left: auto; }
+.vx-dashboard.is-swapped .vx-area-metrics .vx-resize-handle[data-edge='metrics'] { right: auto; left: 0; }
+
+.vx-area-right .vx-resize-handle[data-edge='right'] { left: 0; right: auto; }
+.vx-dashboard.is-swapped .vx-area-right .vx-resize-handle[data-edge='right'] { left: auto; right: 0; }
+
+/* While a handle drag is in progress: keep the resize cursor and stop text selection even
+   when the pointer strays off the thin handle mid-drag. */
+body.vx-resizing { cursor: col-resize !important; user-select: none; }
+body.vx-resizing * { cursor: col-resize !important; user-select: none; }
 
 /* ============================================================
    3. PANELS
@@ -224,7 +289,9 @@ main.vexa-main {
 
 .vx-panel:hover { border-color: var(--vexa-border-default); }
 .vx-panel.is-flex { display: flex; flex-direction: column; }
-.vx-panel.is-grow { flex: 1 1 auto; }
+/* flex-basis 0: see the note on .vx-panel-body.is-scroll below — content should never set
+   this item's minimum size, or it grows past its siblings instead of scrolling internally. */
+.vx-panel.is-grow { flex: 1 1 0; }
 .vx-panel.is-analytics { border-color: rgba(139, 91, 255, .3); }
 .vx-panel.is-analytics::before { background: linear-gradient(90deg, transparent, rgba(161, 93, 255, .4), transparent); }
 
@@ -274,7 +341,15 @@ main.vexa-main {
   padding: 10px var(--vexa-pad-panel) var(--vexa-pad-panel);
 }
 
+/* flex-basis 0, not auto: an "auto" basis is measured from content, so a long chat/history
+   list would demand its full content height and squeeze its fixed-size siblings (e.g. the
+   insights/density card below it) down to a sliver instead of scrolling internally. */
+/* Default stays content-sized (auto): AgentCircuitCard's list also uses this class, capped
+   by its own inline max-height — an auto basis there is what lets the *outer* flex column
+   correctly reserve that capped height for it. Only ChatHistoryCard's uncapped list (below)
+   needs the basis:0 treatment, since it — not its parent card — is the one growing. */
 .vx-panel-body.is-scroll { overflow: hidden auto; flex: 1 1 auto; }
+.vx-panel-body.is-scroll.is-grow { flex: 1 1 0; }
 
 .vx-icon-btn {
   display: grid;
@@ -373,6 +448,7 @@ main.vexa-main {
   border: 1px solid var(--vexa-border-subtle);
   border-radius: var(--vexa-radius-control);
   background: rgba(4, 16, 28, .82);
+  overflow: hidden;
 }
 
 .vx-global-status i {
@@ -429,6 +505,7 @@ main.vexa-main {
 
 .vx-quick-btn:hover { background: rgba(38, 132, 255, .14); color: var(--vexa-cyan); }
 .vx-quick-btn.is-alert { color: var(--vexa-red); }
+.vx-quick-btn.is-open { background: rgba(27, 220, 255, .14); color: var(--vexa-cyan); }
 
 /* Drawer toggles for the side columns — only shown once those columns collapse. */
 .vx-quick-btn.vx-panel-toggle { display: none; }
@@ -639,10 +716,11 @@ main.vexa-main {
   text-transform: uppercase;
 }
 
-.vx-resource-row strong { display: block; color: var(--vexa-text-primary); font: 700 .84rem var(--vexa-font-mono); font-variant-numeric: tabular-nums; }
+.vx-resource-row strong { display: flex; align-items: baseline; gap: 6px; color: var(--vexa-text-primary); font: 700 .84rem var(--vexa-font-mono); font-variant-numeric: tabular-nums; }
 .vx-resource-row strong.is-amber { color: var(--vexa-amber); }
 .vx-resource-row strong.is-red { color: var(--vexa-red); }
 .vx-resource-row strong.is-muted { color: var(--vexa-text-muted); font-size: .7rem; }
+.vx-resource-detail { color: var(--vexa-text-muted); font: 600 .68rem var(--vexa-font-mono); font-style: normal; }
 
 .vx-gauge { display: block; width: 30px; height: 30px; }
 
@@ -988,8 +1066,8 @@ main.vexa-main {
 .vx-agent-row small { display: block; overflow: hidden; color: var(--vexa-text-muted); font-size: .62rem; text-overflow: ellipsis; white-space: nowrap; }
 
 /* conversation */
-.vx-conversation { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; }
-.vx-messages { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; gap: 8px; overflow: hidden auto; padding: 0 var(--vexa-pad-panel); }
+.vx-conversation { display: flex; min-height: 0; flex: 1 1 0; flex-direction: column; }
+.vx-messages { display: flex; min-height: 0; flex: 1 1 0; flex-direction: column; gap: 8px; overflow: hidden auto; padding: 0 var(--vexa-pad-panel); }
 
 .vx-message { max-width: 84%; padding: 8px 11px; border-radius: 8px; }
 .vx-message.is-user { align-self: flex-end; background: rgba(112, 63, 218, .34); border: 1px solid rgba(139, 91, 255, .3); }
@@ -1194,10 +1272,13 @@ main.vexa-main {
 /* compact desktop */
 @container vxshell (max-width: 1599px) {
   .vx-dashboard {
-    grid-template-columns: minmax(220px, 245px) minmax(165px, 185px) minmax(0, 1fr) minmax(320px, 350px);
+    grid-template-columns: minmax(220px, 245px) minmax(150px, var(--vx-col-metrics, 185px)) minmax(0, 1fr) minmax(280px, var(--vx-col-right, 350px));
     column-gap: 12px;
     padding: 12px 12px 8px;
     --vexa-pad-panel: 12px;
+  }
+  .vx-dashboard.is-swapped {
+    grid-template-columns: minmax(280px, var(--vx-col-right, 350px)) minmax(0, 1fr) minmax(150px, var(--vx-col-metrics, 185px)) minmax(220px, 245px);
   }
   .vx-brand-name { font-size: 1.5rem; }
   .vx-brand-sub { display: none; }
@@ -1218,6 +1299,7 @@ main.vexa-main {
       'nav';
   }
   .vx-area-system, .vx-area-metrics, .vx-area-right { display: none; }
+  .vx-resize-handle { display: none; }
   .vx-dashboard.show-system .vx-area-system,
   .vx-dashboard.show-metrics .vx-area-metrics,
   .vx-dashboard.show-right .vx-area-right {
@@ -1239,6 +1321,12 @@ main.vexa-main {
   .vx-quick-btn.vx-panel-toggle { display: grid; }
   .vx-nav-item { min-width: 74px; padding: 0 10px; }
   .vx-hud-label.at-bl, .vx-hud-label.at-br { display: none; }
+  /* The 3 drawer toggles added just above push .vx-quick-actions past the point where the
+     centre .vx-global-status column still fits its full text — it used to overflow its
+     shrunk grid track and visually bleed into .vx-brand's "VEXA" wordmark. Drop the label,
+     keep the status dot. */
+  .vx-global-status strong { display: none; }
+  .vx-global-status { padding: 0 10px; gap: 6px; }
 }
 
 /* tablet */

@@ -4,6 +4,7 @@ import { VexaAudioAnalyser } from './vexaAudioAnalyser';
 import { VEXA_COPY } from './vexa/vexaCopy';
 import type { CoreHudData, DashboardRoute, GlobalSystemState } from './vexa/vexaDashboardTypes';
 import { useVexaTelemetry } from './vexa/useVexaTelemetry';
+import { useVexaPanelLayout } from './vexa/useVexaPanelLayout';
 import { VexaTopHeader, type SidePanel } from './vexa/VexaTopHeader';
 import { ChatHistoryCard, ModelSelectorCard, NeuralDensityCard, SystemStatusCard } from './vexa/VexaSystemSidebar';
 import { ActiveProtocolsCard, DataStreamCard, NeuralActivityCard, SystemResourcesCard } from './vexa/VexaMetricsSidebar';
@@ -48,6 +49,12 @@ interface VexaCommandCenterProps {
   isConnected: boolean;
   isGenerating: boolean;
   isSpeaking: boolean;
+  /**
+   * A spoken reply is being fetched but has not started playing yet. `isSpeaking` alone
+   * is not enough for dialog mode: the synthesised audio takes seconds to arrive, and
+   * reopening the microphone in that window aborts the reply before a word is heard.
+   */
+  isTtsPending?: boolean;
   micState: 'off' | 'listening' | 'capturing' | 'transcribing' | 'error';
   micErrorMessage?: string;
   /** Increments whenever a listening turn ended with nothing recognised — dialog mode re-arms on it. */
@@ -107,6 +114,7 @@ export function VexaCommandCenter({
   isConnected,
   isGenerating,
   isSpeaking,
+  isTtsPending = false,
   micState,
   micErrorMessage,
   voiceIdleTick = 0,
@@ -209,6 +217,7 @@ export function VexaCommandCenter({
   });
 
   const { emergencyStopped } = telemetry;
+  const panelLayout = useVexaPanelLayout();
 
   // ---- remote status --------------------------------------------------------
   useEffect(() => {
@@ -287,14 +296,17 @@ export function VexaCommandCenter({
 
   useEffect(() => {
     if (!conversationMode || !conversationKey || conversationKey === lastAutoListenRef.current) return;
-    if (!isConnected || isGenerating || isSpeaking || micState !== 'off') return;
+    // isTtsPending is what closes the window between the answer's text arriving and its
+    // audio starting to play. Guarding on isSpeaking alone was not enough: XTTS needs
+    // several seconds to synthesise a reply, this timer fires after 1.1s, and the
+    // startVoiceRecording() it triggers calls stopSpeech() — which aborted the in-flight
+    // synthesis every single turn, so dialog mode answered in text and never in voice.
+    if (!isConnected || isGenerating || isSpeaking || isTtsPending || micState !== 'off') return;
     const answerKey = conversationKey;
-    // Only stamp lastAutoListenRef once the mic actually restarts. speakText() fetches
-    // TTS audio asynchronously, so `isSpeaking` can still be false for a brief window
-    // right after the answer arrives — if we stamped the ref here (before the timeout
-    // fires) and isSpeaking then flips true (cancelling this timer via cleanup, correctly
-    // deferring the relisten), the ref would already mark this answer as "handled" and
-    // the effect would never reschedule once isSpeaking goes false again for real.
+    // Only stamp lastAutoListenRef once the mic actually restarts. If we stamped the ref
+    // here (before the timeout fires) and speech then starts — cancelling this timer via
+    // cleanup, correctly deferring the relisten — the ref would already mark this answer
+    // as "handled" and the effect would never reschedule once the reply finishes.
     // 650ms wasn't enough of a buffer past isSpeaking going false — the physical
     // reverb/echo tail in the room can still be audible after audio.onended fires,
     // and re-arming the mic into that tail both sounds distorted and can trip the
@@ -305,7 +317,7 @@ export function VexaCommandCenter({
       onVoiceToggle();
     }, 1100);
     return () => window.clearTimeout(timer);
-  }, [conversationKey, conversationMode, isConnected, isGenerating, isSpeaking, micState, onVoiceToggle]);
+  }, [conversationKey, conversationMode, isConnected, isGenerating, isSpeaking, isTtsPending, micState, onVoiceToggle]);
 
   // A turn where nothing was recognised produces no answer, and the effect above
   // only re-arms on a new answer — so a single unheard phrase used to end the
@@ -317,9 +329,10 @@ export function VexaCommandCenter({
       lastIdleTickRef.current = voiceIdleTick;
       return;
     }
-    // Not consuming the tick here: if the mic is still winding down, this effect
-    // re-runs on the next state change and picks the retry up then.
-    if (!isConnected || isGenerating || isSpeaking || micState !== 'off') return;
+    // Not consuming the tick here: if the mic is still winding down — or a reply is
+    // being synthesised — this effect re-runs on the next state change and picks the
+    // retry up then.
+    if (!isConnected || isGenerating || isSpeaking || isTtsPending || micState !== 'off') return;
 
     const tick = voiceIdleTick;
     const retries = idleRetriesRef.current + 1;
@@ -335,9 +348,10 @@ export function VexaCommandCenter({
       onVoiceToggle();
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [voiceIdleTick, conversationMode, isConnected, isGenerating, isSpeaking, micState, onVoiceToggle]);
+  }, [voiceIdleTick, conversationMode, isConnected, isGenerating, isSpeaking, isTtsPending, micState, onVoiceToggle]);
 
   const toggleConversation = () => {
+    audioAnalyser.unlock();
     if (!secureMicrophone) {
       onVoiceToggle();
       return;
@@ -346,8 +360,16 @@ export function VexaCommandCenter({
     setConversationMode(next);
     lastAutoListenRef.current = conversationKey;
     idleRetriesRef.current = 0;
-    if (next && micState === 'off' && !isGenerating && !isSpeaking) onVoiceToggle();
+    if (next && micState === 'off' && !isGenerating && !isSpeaking && !isTtsPending) onVoiceToggle();
   };
+
+  // The mic button is the other real click gesture in this view — unlock the shared
+  // AudioContext here too, not just when dialog mode is toggled on, since a listener
+  // can also start dialog mode's very first turn by clicking the mic directly.
+  const handleMicButtonClick = useCallback(() => {
+    audioAnalyser.unlock();
+    onVoiceToggle();
+  }, [audioAnalyser, onVoiceToggle]);
 
   // ---- command submission ---------------------------------------------------
   const sendingRef = useRef(false);
@@ -431,10 +453,11 @@ export function VexaCommandCenter({
     thoughtFlow: isGenerating ? 'streaming' : isSpeaking ? 'processing' : micState !== 'off' ? 'receiving' : 'idle',
   };
 
+  const gpuTemperature = telemetry.overview.resources.gpuTemperature;
   const resourceRows = [
     { id: 'cpu', label: 'CPU', value: telemetry.overview.resources.cpu },
     { id: 'ram', label: 'RAM', value: telemetry.overview.resources.memory },
-    { id: 'gpu', label: 'GPU', value: telemetry.overview.resources.gpu },
+    { id: 'gpu', label: 'GPU', value: telemetry.overview.resources.gpu, detail: gpuTemperature === null ? null : `${Math.round(gpuTemperature)}°C` },
     { id: 'network', label: 'NETWORK', value: telemetry.overview.resources.network },
   ];
 
@@ -445,7 +468,10 @@ export function VexaCommandCenter({
       <div className="vx-background" aria-hidden="true" />
       <div className="vx-noise" aria-hidden="true" />
 
-      <div className={`vx-dashboard${openPanel ? ` show-${openPanel}` : ''}`}>
+      <div
+        className={`vx-dashboard${openPanel ? ` show-${openPanel}` : ''}${panelLayout.swapped ? ' is-swapped' : ''}`}
+        style={panelLayout.cssVars}
+      >
         <div className="vx-area-header">
           <VexaTopHeader
             copy={copy}
@@ -462,6 +488,8 @@ export function VexaCommandCenter({
             onOpenSettings={() => navigate('settings')}
             openPanel={openPanel}
             onTogglePanel={panel => setOpenPanel(current => current === panel ? null : panel)}
+            panelsSwapped={panelLayout.swapped}
+            onToggleSwapPanels={panelLayout.toggleSwapped}
           />
         </div>
 
@@ -495,6 +523,14 @@ export function VexaCommandCenter({
         </div>
 
         <div className="vx-area-metrics vx-column">
+          <div
+            className={`vx-resize-handle${panelLayout.activeEdge === 'metrics' ? ' is-active' : ''}`}
+            data-edge="metrics"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={copy.resizeMetricsPanel}
+            {...panelLayout.metricsHandleProps}
+          />
           <SystemResourcesCard copy={copy} rows={resourceRows} />
           <NeuralActivityCard copy={copy} series={telemetry.activitySeries} live={isConnected} />
           <DataStreamCard copy={copy} rows={telemetry.dataStream} onSeeAll={() => navigate('analytics')} />
@@ -513,7 +549,7 @@ export function VexaCommandCenter({
             micErrorMessage={micErrorMessage || (!secureMicrophone ? copy.secureContextRequired : undefined)}
             conversationMode={conversationMode}
             onToggleConversation={toggleConversation}
-            onVoiceToggle={onVoiceToggle}
+            onVoiceToggle={handleMicButtonClick}
             riskEnabled
             pendingConfirmations={telemetry.confirmations.length}
             emergencyStopped={emergencyStopped}
@@ -540,6 +576,14 @@ export function VexaCommandCenter({
         </div>
 
         <div className="vx-area-right vx-column">
+          <div
+            className={`vx-resize-handle${panelLayout.activeEdge === 'right' ? ' is-active' : ''}`}
+            data-edge="right"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={copy.resizeRightPanel}
+            {...panelLayout.rightHandleProps}
+          />
           <AgentCircuitCard
             copy={copy}
             agents={agents}

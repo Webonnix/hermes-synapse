@@ -28,6 +28,7 @@ export interface SystemOverview {
     cpu: number | null;
     memory: number | null;
     gpu: number | null;
+    gpuTemperature: number | null;
     network: number | null;
   };
   uptimeSeconds: number | null;

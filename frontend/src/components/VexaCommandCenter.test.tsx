@@ -151,6 +151,81 @@ describe('VexaCommandCenter', () => {
     }
   });
 
+  it('does not reopen the microphone while a spoken reply is still being synthesised', async () => {
+    // Regression: XTTS takes seconds to return the wav, and `isSpeaking` only flips once
+    // playback starts. Dialog mode used to re-arm 1.1s after the text landed, and the
+    // stopSpeech() inside startVoiceRecording() then aborted the reply — every answer
+    // arrived as text and none was ever heard.
+    const onVoiceToggle = vi.fn();
+    const props = {
+      agents,
+      messages,
+      isConnected: true,
+      isGenerating: false,
+      isSpeaking: false,
+      micState: 'off' as const,
+      onVoiceToggle,
+      onCommand: vi.fn().mockReturnValue(true),
+      onStop: vi.fn(),
+      language: 'ru' as const,
+      micStreamRef: { current: null },
+      ttsAudioElRef: { current: null },
+      onOpenAgentChat: vi.fn(),
+      chatSessions: [],
+      currentChatId: 'dashboard',
+      getSessionLabel: (id: string) => id,
+      onCreateSession: vi.fn(),
+    };
+    const answered: ChatMessage[] = [
+      ...messages,
+      { role: 'user', content: 'Что дальше?', id: 3 },
+      { role: 'assistant', content: 'Следующий шаг — прогнать тесты.', id: 4 },
+    ];
+
+    vi.stubGlobal('isSecureContext', true);
+    let rerender: (ui: React.ReactElement) => void = () => {};
+    await act(async () => {
+      ({ rerender } = render(<VexaCommandCenter {...props} isTtsPending={false} />));
+    });
+
+    // Arming dialog mode starts the first listening turn itself.
+    fireEvent.click(screen.getByRole('button', { name: /Режим диалога/ }));
+    expect(onVoiceToggle).toHaveBeenCalledTimes(1);
+
+    vi.useFakeTimers();
+    try {
+      // The answer's text arrives; its audio is still being fetched.
+      act(() => {
+        rerender(<VexaCommandCenter {...props} messages={answered} isTtsPending />);
+      });
+      act(() => {
+        vi.advanceTimersByTime(5000);
+      });
+      expect(onVoiceToggle).toHaveBeenCalledTimes(1);
+
+      // Audio starts playing — still Vexa's turn, so the mic stays shut.
+      act(() => {
+        rerender(<VexaCommandCenter {...props} messages={answered} isTtsPending={false} isSpeaking />);
+      });
+      act(() => {
+        vi.advanceTimersByTime(5000);
+      });
+      expect(onVoiceToggle).toHaveBeenCalledTimes(1);
+
+      // Vexa finishes speaking — only now does the next turn begin.
+      act(() => {
+        rerender(<VexaCommandCenter {...props} messages={answered} isTtsPending={false} />);
+      });
+      act(() => {
+        vi.advanceTimersByTime(1200);
+      });
+      expect(onVoiceToggle).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('opens the agent channel window from the mesh panel and from an agent row', async () => {
     const onOpenAgentChat = vi.fn();
     await act(async () => {
