@@ -72,13 +72,14 @@ def test_locked_provider_endpoint_ignores_persisted_dashboard_url(monkeypatch):
     assert locked_agent.ollama_base_url == "http://hermes-ollama:11434"
     assert locked_agent.get_runtime_config()["provider_endpoint_locked"] is True
 
-def test_clear_history(agent):
+@pytest.mark.asyncio
+async def test_clear_history(agent):
     session_id = "user_123"
     database.save_message(session_id, "user", "Hi")
-    
-    assert len(agent.get_history(session_id)) == 1
+
+    assert len(await agent.get_history(session_id)) == 1
     agent.clear_history(session_id)
-    assert len(agent.get_history(session_id)) == 0
+    assert len(await agent.get_history(session_id)) == 0
 
 @pytest.mark.asyncio
 @patch("httpx.AsyncClient.post")
@@ -103,7 +104,7 @@ async def test_respond_success(mock_post, agent):
     assert response == "Здравствуйте, Сэр. Чем могу помочь?"
     
     # Check if history is updated in the database
-    history = agent.get_history("test_session")
+    history = await agent.get_history("test_session")
     assert len(history) == 2
     assert history[0]["role"] == "user"
     assert history[0]["content"] == "Привет"

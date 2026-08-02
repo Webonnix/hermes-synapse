@@ -54,6 +54,7 @@ import { HermesMark } from './components/HermesMark';
 import { VexaLogo } from './components/VexaLogo';
 import { MetricsTab } from './components/MetricsTab';
 import { FloatingWindow } from './components/FloatingWindow';
+import { BrowserLiveView } from './components/BrowserLiveView';
 import { VexaCommandCenter } from './components/VexaCommandCenter';
 import type { DashboardRoute } from './components/vexa/vexaDashboardTypes';
 import { DevRunsTab } from './components/DevRunsTab';
@@ -91,6 +92,7 @@ export default function App() {
   const [vexaTranscriptOpen, setVexaTranscriptOpen] = useState(false);
   /** Which bottom-nav destination is open as a floating window over the Vexa dashboard. */
   const [vexaFloatingPanel, setVexaFloatingPanel] = useState<Exclude<DashboardRoute, 'terminal'> | null>(null);
+  const [browserViewOpen, setBrowserViewOpen] = useState(false);
   const [vexaUiMode, setVexaUiMode] = useState<'immersive' | 'simple'>(
     () => (localStorage.getItem('hermes_vexa_ui_mode') === 'simple' ? 'simple' : 'immersive')
   );
@@ -160,6 +162,8 @@ export default function App() {
     ollama_think: false,
     fast_mode: false,
     max_history_len: 6,
+    condenser_enabled: false,
+    condense_trigger_extra: 10,
     max_tokens: 2048,
     tool_max_tokens: 2048,
     temperature: 0.7,
@@ -2521,7 +2525,25 @@ export default function App() {
           <AppHeader
             language={language}
             onOpenProcesses={() => setActiveTab('processes')}
+            onOpenBrowserView={() => setBrowserViewOpen(true)}
           />
+        )}
+
+        {browserViewOpen && (
+          <FloatingWindow
+            title={t('browserViewTitle')}
+            storageKey="hermes_browser_view_window"
+            onClose={() => setBrowserViewOpen(false)}
+            labels={{
+              minimize: t('vexaWindowMinimize'),
+              restore: t('vexaWindowRestore'),
+              fullscreen: t('vexaWindowFullscreen'),
+              exitFullscreen: t('vexaWindowExitFullscreen'),
+              close: t('vexaWindowCloseGeneric'),
+            }}
+          >
+            <BrowserLiveView language={language} />
+          </FloatingWindow>
         )}
 
         {activeTab === 'processes' && <ProcessesTab language={language} />}

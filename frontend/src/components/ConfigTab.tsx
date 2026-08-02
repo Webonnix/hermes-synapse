@@ -530,6 +530,33 @@ export function ConfigTab({
               />
             </label>
 
+            <label style={toggleRowStyle}>
+              <span>
+                <strong>Condense older history</strong>
+                <span style={{ ...styles.formHelp, display: 'block' }}>Summarize messages that fall out of the window instead of dropping them (costs one extra LLM call per condense).</span>
+              </span>
+              <input
+                type="checkbox"
+                checked={boolValue('condenser_enabled', false)}
+                onChange={e => updateRuntime({ condenser_enabled: e.target.checked })}
+              />
+            </label>
+
+            {runtimeConfig.condenser_enabled && (
+              <label style={styles.formGroup}>
+                <span style={styles.formLabel}>Condense trigger (messages)</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={numberValue('condense_trigger_extra', 10)}
+                  onChange={e => updateRuntime({ condense_trigger_extra: Number(e.target.value) })}
+                  style={compactInputStyle}
+                  className="form-input"
+                />
+              </label>
+            )}
+
             <label style={styles.formGroup}>
               <span style={styles.formLabel}>Max answer tokens</span>
               <input

@@ -214,7 +214,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = update.effective_chat.id
-    history_len = len(agent_instance.get_history(str(chat_id)))
+    history_len = len(await agent_instance.get_history(str(chat_id)))
     from backend.tools import get_system_stats
     import json
     stats = json.loads(get_system_stats())

@@ -53,6 +53,8 @@ export interface SystemConfig {
   model: string;
   fast_mode?: boolean;
   max_history_len?: number;
+  condenser_enabled?: boolean;
+  condense_trigger_extra?: number;
   max_tokens?: number;
   tool_max_tokens?: number;
   temperature?: number;

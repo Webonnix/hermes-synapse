@@ -721,6 +721,19 @@ def _init_sqlite_schema():
         ON dev_run_steps (run_id, seq)
     """)
 
+    # Running per-session summary of chat history that has fallen out of the
+    # verbatim get_chat_history() window (see condenser.py). One row per
+    # session: covered_through_id is the highest message id already folded
+    # into `summary`, so re-condensing only has to summarize what's new.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS condensed_summaries (
+            session_id TEXT PRIMARY KEY,
+            summary TEXT NOT NULL,
+            covered_through_id INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
     conn.commit()
     conn.close()
     logger.info("SQLite Database initialized successfully.")
@@ -903,6 +916,15 @@ def _init_postgres_schema():
         if not cursor.fetchone():
             cursor.execute("ALTER TABLE session_metadata ADD COLUMN agent_id TEXT")
             logger.info("PostgreSQL Migration: added column agent_id to session_metadata table.")
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS condensed_summaries (
+                session_id TEXT PRIMARY KEY,
+                summary TEXT NOT NULL,
+                covered_through_id INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
 
         conn.commit()
     logger.info("PostgreSQL Database initialized successfully.")
@@ -1094,9 +1116,77 @@ def clear_chat_history(session_id: str):
     """Deletes all messages in the database for a session."""
     try:
         _rowcount("DELETE FROM messages WHERE session_id = ?", (session_id,))
+        _rowcount("DELETE FROM condensed_summaries WHERE session_id = ?", (session_id,))
         logger.info(f"Cleared database history for session: {session_id}")
     except Exception as e:
         logger.error(f"Error clearing chat history: {e}")
+
+
+def get_keep_from_message_id(session_id: str, keep_n: int) -> Optional[int]:
+    """Returns the id of the oldest message still inside the last `keep_n`
+    messages for this session (i.e. the verbatim get_chat_history() window),
+    or None if the session has fewer than `keep_n` messages. Messages with a
+    smaller id than this are the ones condenser.py folds into a summary."""
+    if keep_n <= 0:
+        return None
+    try:
+        rows = _execute(
+            "SELECT id FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+            (session_id, keep_n),
+        )
+        if len(rows) < keep_n:
+            return None
+        return min(r[0] for r in rows)
+    except Exception as e:
+        logger.error(f"Error resolving keep-from message id: {e}")
+        return None
+
+
+def get_messages_in_range(session_id: str, after_id: int, before_id: int) -> List[Dict[str, Any]]:
+    """Messages with after_id < id < before_id, oldest first -- the batch
+    condenser.py has not folded into the running summary yet."""
+    try:
+        rows = _execute(
+            "SELECT id, role, content FROM messages WHERE session_id = ? AND id > ? AND id < ? ORDER BY id ASC",
+            (session_id, after_id, before_id),
+        )
+        return [{"id": r[0], "role": r[1], "content": r[2]} for r in rows]
+    except Exception as e:
+        logger.error(f"Error retrieving message range: {e}")
+        return []
+
+
+def get_condensed_summary(session_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        rows = _execute(
+            "SELECT summary, covered_through_id, updated_at FROM condensed_summaries WHERE session_id = ?",
+            (session_id,),
+        )
+        if not rows:
+            return None
+        return {"summary": rows[0][0], "covered_through_id": rows[0][1], "updated_at": rows[0][2]}
+    except Exception as e:
+        logger.error(f"Error reading condensed summary: {e}")
+        return None
+
+
+def save_condensed_summary(session_id: str, summary: str, covered_through_id: int) -> None:
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    backend = _get_backend()
+    upsert = (
+        "INSERT INTO condensed_summaries (session_id, summary, covered_through_id, updated_at) "
+        "VALUES (?, ?, ?, ?) ON CONFLICT (session_id) DO UPDATE SET "
+        "summary = excluded.summary, covered_through_id = excluded.covered_through_id, updated_at = excluded.updated_at"
+    )
+    try:
+        with backend.connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(backend.translate_placeholder(upsert), (session_id, summary, covered_through_id, now))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Error saving condensed summary: {e}")
 
 def save_user_memory(key: str, value: str, session_id: str = "global", source: str = "auto") -> Optional[int]:
     """Stores a durable user memory fact. Existing keys are updated in place."""

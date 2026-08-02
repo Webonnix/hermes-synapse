@@ -919,6 +919,11 @@ class JarvisAgent:
         self.system_prompt = DEFAULT_SYSTEM_PROMPT
         self.fast_mode = _env_bool("LLM_FAST_MODE", False)
         self.max_history_len = _env_int("LLM_MAX_HISTORY_MESSAGES", 6 if self.fast_mode else 20)
+        # Off by default: replaces the hard-truncate above with a running summary
+        # of what falls out of the window, at the cost of one extra LLM call per
+        # condense cycle. See condenser.py.
+        self.condenser_enabled = _env_bool("LLM_CONDENSER_ENABLED", False)
+        self.condense_trigger_extra = _env_int("LLM_CONDENSE_TRIGGER_MESSAGES", 10)
         self.max_tokens = _env_int("LLM_MAX_TOKENS", 1024 if self.fast_mode else 2048)
         self.tool_max_tokens = _env_int("LLM_TOOL_MAX_TOKENS", 1024 if self.fast_mode else 2048)
         self.temperature = _env_float("LLM_TEMPERATURE", 0.3 if self.fast_mode else 0.7)
@@ -961,6 +966,8 @@ class JarvisAgent:
                 ollama_think=settings.get("ollama_think"),
                 fast_mode=settings.get("fast_mode"),
                 max_history_len=settings.get("max_history_len"),
+                condenser_enabled=settings.get("condenser_enabled"),
+                condense_trigger_extra=settings.get("condense_trigger_extra"),
                 max_tokens=settings.get("max_tokens"),
                 tool_max_tokens=settings.get("tool_max_tokens"),
                 temperature=settings.get("temperature"),
@@ -1004,6 +1011,8 @@ class JarvisAgent:
             "ollama_think": self.ollama_think,
             "fast_mode": self.fast_mode,
             "max_history_len": self.max_history_len,
+            "condenser_enabled": self.condenser_enabled,
+            "condense_trigger_extra": self.condense_trigger_extra,
             "max_tokens": self.max_tokens,
             "tool_max_tokens": self.tool_max_tokens,
             "temperature": self.temperature,
@@ -1049,6 +1058,10 @@ class JarvisAgent:
             self.fast_mode = bool(kwargs["fast_mode"])
         if kwargs.get("max_history_len") is not None:
             self.max_history_len = max(0, min(50, int(kwargs["max_history_len"])))
+        if kwargs.get("condenser_enabled") is not None:
+            self.condenser_enabled = bool(kwargs["condenser_enabled"])
+        if kwargs.get("condense_trigger_extra") is not None:
+            self.condense_trigger_extra = max(1, min(50, int(kwargs["condense_trigger_extra"])))
         if kwargs.get("max_tokens") is not None:
             self.max_tokens = max(32, min(4096, int(kwargs["max_tokens"])))
         if kwargs.get("tool_max_tokens") is not None:
@@ -1095,8 +1108,14 @@ class JarvisAgent:
         logger.info("Runtime config updated: %s (system_prompt len=%d)",
                     safe_config, len(self.system_prompt or ""))
 
-    def get_history(self, session_id: str) -> List[Dict[str, str]]:
+    async def get_history(self, session_id: str) -> List[Dict[str, str]]:
         from backend import database as db
+        if self.condenser_enabled:
+            from backend import condenser
+            await condenser.maybe_condense(self, session_id)
+            summary = condenser.summary_message(session_id)
+            if summary:
+                return [summary] + db.get_chat_history(session_id, limit=self.max_history_len)
         return db.get_chat_history(session_id, limit=self.max_history_len)
 
     def clear_history(self, session_id: str):
@@ -1451,7 +1470,7 @@ class JarvisAgent:
 
         # Fallback to single-agent execution for simple queries / legacy tools
         self.last_run_metadata[session_id] = {"is_complex": False, "complexity": complexity}
-        history = self.get_history(session_id)
+        history = await self.get_history(session_id)
         
         # RAG is intentionally opt-in for chat speed. Explicit Obsidian requests use tools instead.
         hits = []
@@ -1949,7 +1968,7 @@ class JarvisAgent:
             message=f"👤 Получен запрос для субагента '{subagent_name}': '{user_message}'"
         )
 
-        history = self.get_history(session_id)
+        history = await self.get_history(session_id)
         from backend import database as db
         db.save_message(session_id, "user", user_message)
         
