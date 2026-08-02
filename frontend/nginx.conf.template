@@ -8,17 +8,22 @@ server {
     add_header Permissions-Policy "microphone=(self)" always;
 
     # Redirect true plain-HTTP browser traffic to the encrypted port, but
-    # exempt two things that also arrive as plain HTTP on :80 and must NOT be
-    # redirected: (1) a Cloudflare tunnel — it terminates TLS at Cloudflare's
-    # edge and forwards to this origin over plain HTTP, marking the request
-    # with X-Forwarded-Proto: https; redirecting those would break public
-    # access. (2) the container's own Docker healthcheck, which curls
-    # http://127.0.0.1/ from inside the container and can't follow a redirect
-    # to an HTTPS port with a self-signed cert.
+    # exempt three things that also arrive as plain HTTP on :80 and must NOT
+    # be redirected: (1) a Cloudflare tunnel — it terminates TLS at
+    # Cloudflare's edge and forwards to this origin over plain HTTP, marking
+    # the request with X-Forwarded-Proto: https; redirecting those would
+    # break public access. (2) the container's own Docker healthcheck, which
+    # curls http://127.0.0.1/ from inside the container and can't follow a
+    # redirect to an HTTPS port with a self-signed cert. (3) /ollama/ — the
+    # token-gated Ollama proxy below: LAN clients like Cline's Ollama
+    # provider reject our self-signed cert outright with no override, so
+    # this path is deliberately reachable over plain HTTP; the bearer-token
+    # check in the location block is the only auth for it either way.
     set $needs_https_redirect 0;
     if ($scheme = "http") { set $needs_https_redirect 1; }
     if ($http_x_forwarded_proto = "https") { set $needs_https_redirect 0; }
     if ($remote_addr = "127.0.0.1") { set $needs_https_redirect 0; }
+    if ($request_uri ~ "^/ollama/") { set $needs_https_redirect 0; }
     if ($needs_https_redirect) {
         return 301 https://$host:9443$request_uri;
     }
@@ -33,6 +38,7 @@ server {
     # live 502 outage on every backend-only deploy.
     resolver 127.0.0.11 valid=10s;
     set $backend_upstream http://backend:8000;
+    set $ollama_upstream http://hermes-ollama:11434;
 
     # Proxy API requests to backend
     # NOTE: proxy_pass has no URI part here on purpose. With a variable in
@@ -61,6 +67,28 @@ server {
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
         proxy_read_timeout 3600s;
+    }
+
+    # Token-gated reverse proxy onto the internal Ollama server, so external
+    # OpenAI/Ollama-compatible clients (Cline, etc.) can reach it with a
+    # single bearer token instead of an SSH tunnel. ${OLLAMA_PROXY_TOKEN} is
+    # baked in at container start by nginx's own envsubst-on-templates
+    # entrypoint (this file lives under /etc/nginx/templates/), so by the
+    # time nginx parses the config it's a fixed literal, not a live variable.
+    # The rewrite+break before a URI-less proxy_pass is nginx's documented
+    # way to strip the /ollama prefix without hitting the proxy_pass-with-
+    # variable trap noted above (variable + literal suffix silently drops
+    # the rest of the path) — rewrite ... break followed by a bare
+    # proxy_pass $var forwards the *rewritten* URI, not the original one.
+    location /ollama/ {
+        if ($http_authorization != "Bearer ${OLLAMA_PROXY_TOKEN}") {
+            return 401;
+        }
+        rewrite ^/ollama/(.*)$ /$1 break;
+        proxy_pass $ollama_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_read_timeout 300s;
     }
 
     # SPA fallback — all other routes serve index.html
