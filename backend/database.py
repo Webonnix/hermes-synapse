@@ -703,6 +703,18 @@ def _init_sqlite_schema():
         CREATE INDEX IF NOT EXISTS idx_dev_runs_status
         ON dev_runs (status, created_at)
     """)
+    # Kanban board additions: who owns the card, where its published demo lives,
+    # and which ephemeral sandbox container is currently running it.
+    for col, definition in [
+        ("assignee_agent_id", "TEXT"),
+        ("demo_url", "TEXT"),
+        ("sandbox_container", "TEXT"),
+    ]:
+        try:
+            cursor.execute(f"ALTER TABLE dev_runs ADD COLUMN {col} {definition}")
+            logger.info(f"Added column {col} to dev_runs table.")
+        except sqlite3.OperationalError:
+            pass
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS dev_run_steps (
             id TEXT PRIMARY KEY,

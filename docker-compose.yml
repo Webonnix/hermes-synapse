@@ -51,6 +51,17 @@ services:
       - VOICE_TTS_VOICE_EN=${VOICE_TTS_VOICE_EN:-slt}
       - VOICE_TTS_XTTS_URL=${VOICE_TTS_XTTS_URL:-http://xtts:8700}
       - VOICE_TTS_XTTS_TIMEOUT_SECONDS=${VOICE_TTS_XTTS_TIMEOUT_SECONDS:-120}
+      # backend/dev_sandbox.py talks to the HOST Docker daemon over the mounted
+      # docker.sock (sibling-container pattern) to give each parallel Kanban
+      # dev-run its own runner container, so this must be a HOST path (this
+      # container's own /app/backend/data/... view is not visible to the host
+      # daemon). ${PWD} is this compose file's directory (src/) at `docker
+      # compose up` time — override if you invoke compose from somewhere else,
+      # or on a deployment whose backend/data mount lives at a different host
+      # path (see dev_sandbox.py's docstring — this is deliberately not
+      # derived from a project-root guess).
+      - DEV_SANDBOX_HOST_RUNS_ROOT=${DEV_SANDBOX_HOST_RUNS_ROOT:-${PWD}/backend/data/dev-repo-runs}
+      - DEV_SANDBOX_MAX_CONCURRENT=${DEV_SANDBOX_MAX_CONCURRENT:-3}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -180,6 +191,10 @@ services:
     restart: unless-stopped
     ports:
       - "9119:80"
+    volumes:
+      # Kanban dev-run demo previews (see nginx.conf.template's /demo/ location).
+      # Backend writes here via dev_publish_demo; nginx only ever reads.
+      - ./backend/data/dev-previews:/usr/share/nginx/dev-previews:ro
     depends_on:
       backend:
         condition: service_healthy

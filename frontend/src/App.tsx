@@ -19,7 +19,8 @@ import {
   ShieldCheck,
   AudioWaveform,
   KeyRound,
-  MessageCircle
+  MessageCircle,
+  Trello
 } from 'lucide-react';
 
 import type { AppSettings, ChatMessage, ChatSession, DecisionLog, ActivityLog, SystemConfig, AgentModel, SystemStats } from './types';
@@ -58,6 +59,7 @@ import { BrowserLiveView } from './components/BrowserLiveView';
 import { VexaCommandCenter } from './components/VexaCommandCenter';
 import type { DashboardRoute } from './components/vexa/vexaDashboardTypes';
 import { DevRunsTab } from './components/DevRunsTab';
+import { KanbanTab } from './components/KanbanTab';
 import { AppHeader } from './components/AppHeader';
 import type { DevRunEvent } from './types';
 
@@ -77,7 +79,7 @@ const TTS_PENDING_TIMEOUT_MS = 25000;
 
 export default function App() {
   const legacySettingsTabs = ['config', 'logs', 'activity', 'memory', 'tools', 'subagents', 'obsidian', 'mcp'];
-  const [activeTab, setActiveTab] = useState<'vexa' | 'processes' | 'devruns' | 'agents' | 'schedule' | 'settings' | 'network' | 'metrics'>(() => {
+  const [activeTab, setActiveTab] = useState<'vexa' | 'processes' | 'devruns' | 'kanban' | 'agents' | 'schedule' | 'settings' | 'network' | 'metrics'>(() => {
     const saved = localStorage.getItem('jarvis_active_tab');
     if (saved === 'chat') return 'vexa';
     if (saved === 'settings' || (saved && legacySettingsTabs.includes(saved))) return 'settings';
@@ -2292,6 +2294,15 @@ export default function App() {
           </button>
 
           <button
+            style={navStyle('kanban')}
+            onClick={() => { setActiveTab('kanban'); setSidebarOpen(false); }}
+            title={t('navKanban')}
+          >
+            <Trello size={18} />
+            <span>{t('navKanban')}</span>
+          </button>
+
+          <button
             style={navStyle('agents')}
             onClick={() => { setActiveTab('agents'); setSidebarOpen(false); }}
             title={t('navAgents')}
@@ -2299,7 +2310,7 @@ export default function App() {
             <UserCog size={18} />
             <span>{t('navAgents')}</span>
           </button>
-          
+
           <button
             style={navStyle('schedule')}
             onClick={() => { setActiveTab('schedule'); setSidebarOpen(false); }}
@@ -2550,6 +2561,10 @@ export default function App() {
 
         {activeTab === 'devruns' && (
           <DevRunsTab language={language} lastEvent={lastDevRunEvent} />
+        )}
+
+        {activeTab === 'kanban' && (
+          <KanbanTab language={language} lastEvent={lastDevRunEvent} agents={subagents} />
         )}
 
         {activeTab === 'agents' && (

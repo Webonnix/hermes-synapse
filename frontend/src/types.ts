@@ -197,6 +197,24 @@ export interface MessengerBinding {
   updated_at: string;
   system_prompt_override?: string | null;
   response_mode: 'draft' | 'auto_labeled' | string;
+  /** 'owner_only' answers the allow-list only; 'token' opens the bot to anyone
+   * holding an access token issued in the "Доступ к ботам" panel. */
+  access_mode: 'owner_only' | 'token' | string;
+  default_plan_id?: string | null;
+  welcome_message?: string | null;
+  last_error?: string | null;
+}
+
+// One entry from GET /api/messenger-bindings/activity — backend/channel_activity.py's
+// in-memory feed of what bot_access_gate.authorize() decided about an incoming message.
+export interface ChannelActivityEvent {
+  ts: number;
+  binding_id: string;
+  platform: string;
+  kind: 'proceed' | 'reply' | 'ignore' | 'invite' | 'error' | string;
+  detail: string;
+  chat_id: string;
+  sender: string;
 }
 
 // A drafted reply from a 'draft'-mode channel binding, queued for the owner
@@ -483,7 +501,7 @@ export interface ChatSession {
 }
 
 export type DevRunStatus =
-  | 'planned' | 'running' | 'paused' | 'awaiting_approval'
+  | 'backlog' | 'planned' | 'running' | 'paused' | 'awaiting_approval'
   | 'verifying' | 'done' | 'failed' | 'cancelled';
 
 export interface DevRunStep {
@@ -512,6 +530,9 @@ export interface DevRun {
   status_reason: string;
   created_at: string;
   updated_at: string;
+  assignee_agent_id?: string | null;
+  demo_url?: string | null;
+  sandbox_container?: string | null;
   steps?: DevRunStep[];
 }
 
@@ -521,4 +542,185 @@ export interface DevRunEvent {
   status: DevRunStatus;
   event: string;
   summary: string;
+}
+
+// ── Public bot access (backend/bot_access.py) ───────────────────────────────
+
+export interface AccessPlan {
+  id: string;
+  name: string;
+  description: string;
+  period: 'daily' | 'weekly' | 'monthly' | 'lifetime' | string;
+  limit_usd: number | null;
+  limit_tokens: number | null;
+  limit_messages: number | null;
+  rate_limit_per_min: number;
+  max_message_chars: number;
+  /** null means "the default public tool set"; an array narrows it further. */
+  allowed_tools: string[] | null;
+  system_prompt_suffix: string;
+  welcome_message: string;
+  is_active: boolean;
+  /** Set together with is_purchasable, this turns a quota preset into a
+   *  subscription a stranger can buy from the bot itself. */
+  price_usd: number | null;
+  is_purchasable: boolean;
+  /** Length of one paid period; null on a lifetime (one-off) purchase. */
+  duration_days: number | null;
+  /** null means "any agent" (a shared preset). Set, this tariff can only be
+   *  issued/sold for that one subagent — the backend refuses a mismatch. */
+  subagent_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AccessToken {
+  id: string;
+  /** Masked form (HRM-abc123…) — the full string only ever exists in `plaintext`. */
+  display: string;
+  token_prefix: string;
+  /** Present only in the response that issued the token, never on later reads. */
+  plaintext?: string;
+  label: string;
+  binding_id: string;
+  subagent_id: string;
+  plan_id: string | null;
+  status: 'active' | 'suspended' | 'revoked' | string;
+  max_chats: number;
+  expires_at: string | null;
+  period_started_at: string;
+  used_usd: number;
+  used_tokens_in: number;
+  used_tokens_out: number;
+  used_messages: number;
+  limit_usd: number | null;
+  limit_tokens: number | null;
+  limit_messages: number | null;
+  notes: string;
+  created_at: string;
+  updated_at: string;
+  last_used_at: string | null;
+}
+
+export interface SubscriberUsageRow {
+  id: number;
+  ts: string;
+  model: string;
+  provider: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cost_usd: number;
+  latency_ms: number;
+  status: string;
+  detail: string;
+}
+
+export interface AccessTokenDetail {
+  token: AccessToken;
+  plan: AccessPlan | null;
+  limits: Record<string, unknown>;
+  lifetime: { turns: number; tokens_in: number; tokens_out: number; cost_usd: number; avg_latency_ms: number };
+  recent: SubscriberUsageRow[];
+  subscribers: BotSubscriber[];
+}
+
+export interface BotSubscriber {
+  id: string;
+  token_id: string;
+  binding_id: string;
+  platform: string;
+  chat_id: string;
+  external_user_id: string;
+  display_name: string;
+  session_id: string;
+  status: 'active' | 'blocked' | string;
+  profile: Record<string, string>;
+  notes: string;
+  messages_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+}
+
+export interface SubscriberCard {
+  subscriber: BotSubscriber;
+  token: AccessToken | null;
+  plan: AccessPlan | null;
+  usage: { turns: number; tokens_in: number; tokens_out: number; cost_usd: number };
+  conversation: { id: number; role: string; content: string; cost_usd: number }[];
+}
+
+export interface AccessOverview {
+  tokens: {
+    total: number; active: number; suspended: number; revoked: number;
+    used_usd: number; used_tokens: number; used_messages: number;
+  };
+  subscribers: { total: number; active: number; blocked: number };
+  blocked_turns: number;
+  plans: number;
+}
+
+
+// ── Billing (backend/payments.py) ───────────────────────────────────────────
+
+export interface AccessSubscription {
+  id: string;
+  plan_id: string;
+  token_id: string;
+  binding_id: string;
+  subagent_id: string;
+  customer_ref: string;
+  status: 'active' | 'expired' | 'canceled' | string;
+  auto_renew: boolean;
+  price_usd: number | null;
+  started_at: string;
+  current_period_start: string;
+  /** null means a lifetime purchase — it never lapses. */
+  current_period_end: string | null;
+  canceled_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PaymentInvoice {
+  id: string;
+  provider: string;
+  provider_invoice_id: string | null;
+  plan_id: string;
+  binding_id: string;
+  subagent_id: string;
+  subscription_id: string | null;
+  token_id: string | null;
+  amount_usd: number;
+  pay_currency: string;
+  status: 'pending' | 'paid' | 'expired' | 'failed' | string;
+  payment_url: string;
+  customer_ref: string;
+  /** 'bot' when the sale started inside a chat, 'admin' when the owner raised it. */
+  origin: string;
+  origin_platform: string;
+  origin_chat_id: string;
+  purpose: 'new' | 'renewal' | string;
+  /** Last status word the provider reported, kept for the admin view. */
+  last_status: string;
+  created_at: string;
+  updated_at: string;
+  paid_at: string | null;
+  expires_at: string | null;
+}
+
+export interface BillingConfig {
+  provider: string;
+  public_base_url: string;
+  success_url: string;
+  /** Booleans only — the API never returns the secrets themselves. */
+  api_key_configured: boolean;
+  ipn_secret_configured: boolean;
+  providers: string[];
+}
+
+export interface BillingOverview {
+  invoices: { invoices: number; paid: number; pending: number; revenue_usd: number };
+  subscriptions: { total: number; active: number; expired: number; canceled: number };
+  mrr_usd: number;
+  config: BillingConfig;
 }

@@ -91,6 +91,17 @@ server {
         proxy_read_timeout 300s;
     }
 
+    # Kanban dev-run demo previews — static files only, no proxying, so the
+    # proxy_pass-with-variable path-dropping trap above does not apply here.
+    # Populated by backend/tools.py's dev_publish_demo tool into
+    # backend/data/dev-previews/<run_id>/, mounted read-only below.
+    location /demo/ {
+        alias /usr/share/nginx/dev-previews/;
+        autoindex off;
+        add_header Cache-Control "no-cache" always;
+        try_files $uri $uri/ $uri/index.html =404;
+    }
+
     # Vite fingerprints every file under /assets/ with a content hash, so a given
     # URL's bytes can never change — cache it hard and skip the revalidation
     # round-trip entirely. A new build produces new filenames, not new contents.

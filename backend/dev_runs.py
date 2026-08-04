@@ -24,19 +24,28 @@ from typing import Any, Dict, List, Optional
 from backend.database import DB_PATH
 from backend.llm_client import call_llm_normalized
 from backend.control_plane import execute_governed_tool, get_control_state
+# A dev run is started by the owner from the dashboard and its dev_* tools are
+# server-acting by tool_permissions.py's classification, so its calls carry the
+# owner principal — the sandbox and the Control Plane risk gates still apply.
+from backend.tool_permissions import OWNER
 
 logger = logging.getLogger("hermes.dev_runs")
 
 RUN_STATUSES = (
-    "planned", "running", "paused", "awaiting_approval",
+    "backlog", "planned", "running", "paused", "awaiting_approval",
     "verifying", "done", "failed", "cancelled",
 )
 ACTIVE_STATUSES = ("planned", "running", "verifying")
+# Kanban-board "occupied" statuses used by auto-assign's least-busy count —
+# broader than ACTIVE_STATUSES so an agent mid-approval/paused still counts
+# as busy instead of being handed a second card.
+ASSIGNED_BUSY_STATUSES = ACTIVE_STATUSES + ("paused", "awaiting_approval")
 
 # Tools the executor loop may use. All are R1/R2 sandbox- or dev-repo-scoped.
 DEV_RUN_TOOLS = (
     "dev_read_file", "dev_write_file", "dev_patch", "dev_list_dir",
-    "dev_exec", "dev_run_tests", "git_status", "git_diff", "git_commit", "git_push",
+    "dev_exec", "dev_run_tests", "dev_publish_demo",
+    "git_status", "git_diff", "git_commit", "git_push",
 )
 
 DEFAULT_ITER_BUDGET = 200
@@ -48,9 +57,12 @@ EXECUTOR_SYSTEM_PROMPT = (
     "dev repository. Achieve the stated goal by calling the provided tools, one "
     "action at a time. Read before you write; keep changes minimal and coherent; "
     "run tests with dev_run_tests before committing. Never invent file contents — "
-    "inspect them. When the goal is fully achieved and verified, reply with plain "
-    "text starting with 'DONE:' followed by a one-paragraph summary. If the goal "
-    "is impossible, reply with 'BLOCKED:' and the reason."
+    "inspect them. If the goal involves a website, app, or anything with a visual "
+    "result, build it as a static site (or a static export/build step) and call "
+    "dev_publish_demo with the build output directory before finishing, so the "
+    "requester gets a live demo link. When the goal is fully achieved and verified, "
+    "reply with plain text starting with 'DONE:' followed by a one-paragraph summary. "
+    "If the goal is impossible, reply with 'BLOCKED:' and the reason."
 )
 
 
@@ -67,12 +79,32 @@ def _connect() -> sqlite3.Connection:
 
 # ── CRUD ─────────────────────────────────────────────────────────────────────
 
+def auto_assign_agent() -> Optional[str]:
+    """Least-busy enabled subagent (fewest cards currently occupying it),
+    round-robin on ties by id. None if no subagent is enabled."""
+    placeholders = ", ".join("?" for _ in ASSIGNED_BUSY_STATUSES)
+    with _connect() as conn:
+        row = conn.execute(
+            f"""SELECT s.id FROM subagents s
+                LEFT JOIN dev_runs r
+                  ON r.assignee_agent_id = s.id AND r.status IN ({placeholders})
+                WHERE s.is_enabled = 1
+                GROUP BY s.id
+                ORDER BY COUNT(r.id) ASC, s.id ASC
+                LIMIT 1""",
+            ASSIGNED_BUSY_STATUSES,
+        ).fetchone()
+    return row["id"] if row else None
+
+
 def create_run(
     goal: str,
     *,
     iter_budget: int = DEFAULT_ITER_BUDGET,
     cost_budget: Optional[float] = None,
     wall_minutes: Optional[int] = None,
+    assignee_agent_id: Optional[str] = None,
+    start: bool = True,
 ) -> Dict[str, Any]:
     goal = (goal or "").strip()
     if not goal:
@@ -83,14 +115,43 @@ def create_run(
         (datetime.now(timezone.utc) + timedelta(minutes=wall_minutes)).isoformat(timespec="seconds")
         if wall_minutes else None
     )
+    if not assignee_agent_id:
+        assignee_agent_id = auto_assign_agent()
     now = _now()
+    initial_status = "planned" if start else "backlog"
     with _connect() as conn:
         conn.execute(
             """INSERT INTO dev_runs
                (id, goal, status, trace_id, iter_used, iter_budget, cost_used,
-                cost_budget, wall_deadline, created_at, updated_at)
-               VALUES (?, ?, 'planned', ?, 0, ?, 0, ?, ?, ?, ?)""",
-            (run_id, goal[:8000], trace_id, max(1, int(iter_budget)), cost_budget, deadline, now, now),
+                cost_budget, wall_deadline, created_at, updated_at, assignee_agent_id)
+               VALUES (?, ?, ?, ?, 0, ?, 0, ?, ?, ?, ?, ?)""",
+            (run_id, goal[:8000], initial_status, trace_id, max(1, int(iter_budget)),
+             cost_budget, deadline, now, now, assignee_agent_id),
+        )
+    return get_run(run_id)  # type: ignore[return-value]
+
+
+def start_run(run_id: str) -> Dict[str, Any]:
+    """Promotes a backlog card to planned, so the worker picks it up.
+    Resolves "Auto" assignment (still unset) at start time, not creation time,
+    so it reflects who is actually least-busy right now."""
+    run = get_run(run_id)
+    if not run:
+        raise KeyError(run_id)
+    if run["status"] != "backlog":
+        raise ValueError(f"Dev-run cannot start from status {run['status']}")
+    if not run["assignee_agent_id"]:
+        reassign_run(run_id, auto_assign_agent())
+    return update_run(run_id, status="planned")
+
+
+def reassign_run(run_id: str, assignee_agent_id: Optional[str]) -> Dict[str, Any]:
+    if not get_run(run_id):
+        raise KeyError(run_id)
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE dev_runs SET assignee_agent_id = ?, updated_at = ? WHERE id = ?",
+            (assignee_agent_id or None, _now(), run_id),
         )
     return get_run(run_id)  # type: ignore[return-value]
 
@@ -119,6 +180,7 @@ def list_runs(limit: int = 50) -> List[Dict[str, Any]]:
 
 _UPDATABLE_FIELDS = {
     "status", "plan_id", "iter_used", "cost_used", "checkpoint_step", "status_reason",
+    "demo_url", "sandbox_container",
 }
 
 
@@ -326,7 +388,8 @@ async def _gate_push(run: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
             return True, run
 
     result_raw = await asyncio.to_thread(
-        execute_governed_tool, "dev_run_tests", {"runner": "auto"}, f"dev-run:{run['id']}"
+        execute_governed_tool, "dev_run_tests", {"runner": "auto"}, f"dev-run:{run['id']}",
+        principal=OWNER,
     )
     try:
         result = json.loads(result_raw)
@@ -479,7 +542,8 @@ async def _iterate(run: Dict[str, Any]) -> Dict[str, Any]:
             if not allowed:
                 return run
         result_raw = await asyncio.to_thread(
-            execute_governed_tool, tool_name, arguments, f"dev-run:{run['id']}"
+            execute_governed_tool, tool_name, arguments, f"dev-run:{run['id']}",
+            principal=OWNER,
         )
         try:
             result = json.loads(result_raw)
@@ -544,21 +608,93 @@ async def process_run(run_id: str, max_iterations: Optional[int] = None) -> Dict
     return run
 
 
+_LEGACY_SANDBOX_LOCK = asyncio.Lock()
+_legacy_sandbox_warned = False
+
+
+async def _run_with_sandbox(run_id: str) -> None:
+    """Provisions this run's own ephemeral sandbox, points the dev_* tools at
+    it for the run's whole lifetime, drives it to completion, then tears the
+    sandbox down. Isolated per-run so several cards execute at once without
+    sharing a dev-repo checkout — see backend/dev_sandbox.py.
+
+    If Docker-out-of-docker isn't available (no docker.sock mounted into this
+    backend, e.g. an environment that hasn't opted into that extra host
+    access), falls back to the one static dev-runner container instead of
+    failing the run — but then serializes through a lock, since that shared
+    checkout cannot safely take two runs at once."""
+    global _legacy_sandbox_warned
+    from backend import dev_sandbox
+    from backend.tools import DEV_RUNNER_BASE_URL, CURRENT_DEV_RUN_ID, _DEFAULT_DEV_RUNNER_URL
+
+    dedicated = True
+    try:
+        base_url = await dev_sandbox.ensure_sandbox(run_id)
+    except Exception as exc:
+        dedicated = False
+        base_url = _DEFAULT_DEV_RUNNER_URL
+        if not _legacy_sandbox_warned:
+            _legacy_sandbox_warned = True
+            logger.warning(
+                "Dev-run %s: per-run sandbox unavailable (%s) — falling back to the shared "
+                "dev-runner, serialized. Mount /var/run/docker.sock into the backend to enable "
+                "parallel Kanban execution.", run_id, exc,
+            )
+
+    if not dedicated:
+        await _LEGACY_SANDBOX_LOCK.acquire()
+    else:
+        update_run(run_id, sandbox_container=dev_sandbox.sandbox_name(run_id))
+    url_token = DEV_RUNNER_BASE_URL.set(base_url)
+    run_id_token = CURRENT_DEV_RUN_ID.set(run_id)
+    try:
+        await process_run(run_id)
+    except Exception:
+        logger.exception("Dev-run %s crashed inside its sandbox", run_id)
+    finally:
+        DEV_RUNNER_BASE_URL.reset(url_token)
+        CURRENT_DEV_RUN_ID.reset(run_id_token)
+        if not dedicated:
+            _LEGACY_SANDBOX_LOCK.release()
+            return
+        run = get_run(run_id)
+        if run and run["status"] not in ASSIGNED_BUSY_STATUSES:
+            # Only tear down once the run has actually stopped progressing —
+            # paused/awaiting_approval (both in ASSIGNED_BUSY_STATUSES) keep
+            # their sandbox so a resume can reuse the same working tree
+            # instead of re-cloning.
+            await dev_sandbox.release_sandbox(run_id)
+            update_run(run_id, sandbox_container=None)
+
+
 async def worker_loop() -> None:
-    """Background poller started from the app lifespan. Picks up planned/running
-    runs (including ones interrupted by a restart) and drives them serially."""
-    logger.info("Dev-runs worker started (poll every %.1fs).", POLL_SECONDS)
+    """Background poller started from the app lifespan. Picks up backlog→planned
+    and already-active runs (including ones interrupted by a restart) and
+    drives up to MAX_CONCURRENT_SANDBOXES of them at once, each in its own
+    sandbox container, so independent Kanban cards make progress in parallel."""
+    from backend import dev_sandbox
+
+    logger.info("Dev-runs worker started (poll every %.1fs, up to %d concurrent).",
+                POLL_SECONDS, dev_sandbox.MAX_CONCURRENT_SANDBOXES)
+    in_flight: Dict[str, asyncio.Task] = {}
     while True:
         try:
-            with _connect() as conn:
-                row = conn.execute(
-                    "SELECT id FROM dev_runs WHERE status IN ('planned', 'running') "
-                    "ORDER BY created_at LIMIT 1"
-                ).fetchone()
-            if row:
-                await process_run(row["id"])
+            in_flight = {run_id: task for run_id, task in in_flight.items() if not task.done()}
+            free_slots = dev_sandbox.MAX_CONCURRENT_SANDBOXES - len(in_flight)
+            if free_slots > 0:
+                with _connect() as conn:
+                    rows = conn.execute(
+                        "SELECT id FROM dev_runs WHERE status IN ('planned', 'running') "
+                        "ORDER BY created_at LIMIT ?",
+                        (free_slots + len(in_flight),),
+                    ).fetchall()
+                for row in rows:
+                    if row["id"] not in in_flight and len(in_flight) < dev_sandbox.MAX_CONCURRENT_SANDBOXES:
+                        in_flight[row["id"]] = asyncio.create_task(_run_with_sandbox(row["id"]))
         except asyncio.CancelledError:
             logger.info("Dev-runs worker stopped.")
+            for task in in_flight.values():
+                task.cancel()
             raise
         except Exception:
             logger.exception("Dev-runs worker iteration failed")

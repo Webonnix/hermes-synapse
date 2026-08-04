@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import sqlite3
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Request, Response, HTTPException
@@ -277,6 +277,35 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(60)
     asyncio.create_task(_bcm_session_scheduler_task())
 
+    # Sweep lapsed subscriptions hourly so the admin view and the token statuses
+    # agree. Enforcement doesn't depend on this — bot_access.check_access catches
+    # a lapse on the very next message — it just keeps the books tidy.
+    async def _subscription_expiry_task():
+        from backend.bot_access import expire_lapsed_subscriptions
+
+        while True:
+            try:
+                await asyncio.to_thread(expire_lapsed_subscriptions)
+            except Exception:
+                logger.exception("Subscription expiry sweep failed")
+            await asyncio.sleep(3600)
+    asyncio.create_task(_subscription_expiry_task())
+
+    # Proactively probe every active messenger channel's stored credential so a
+    # dead Matrix/Telegram/Discord/Slack/email token surfaces as a visible
+    # "Ошибка" in the dashboard within minutes, not whenever someone happens to
+    # notice a message never arrived.
+    async def _channel_health_check_task():
+        from backend.agent_messenger_governance import health_check_all_active
+
+        while True:
+            await asyncio.sleep(900)
+            try:
+                await health_check_all_active()
+            except Exception:
+                logger.exception("Messenger channel health check sweep failed")
+    asyncio.create_task(_channel_health_check_task())
+
     yield
     # Shutdown: stop the dev-runs worker first so no new tool calls start.
     if dev_runs_worker_task is not None:
@@ -337,6 +366,11 @@ async def auth_middleware(request: Request, call_next):
         "/api/auth/request-code",
         "/api/auth/verify-code",
         "/api/auth/login",
+        # Crypto payment callback: the provider can't hold a dashboard session,
+        # so this one route authenticates itself with an HMAC signature over the
+        # raw body instead (backend/payments.handle_webhook). It grants nothing
+        # on a bad signature.
+        "/api/payments/webhook",
     ) or path.startswith("/api/plots/") or path.startswith("/api/generated-images/"):
         return await call_next(request)
         
@@ -550,6 +584,8 @@ KNOWN_API_KEYS = [
     {"key_name": "OBSIDIAN_API_KEY", "label": "Obsidian", "description": "Доступ к Obsidian Local REST API (skill obsidian_rag).", "category": "Интеграции"},
     {"key_name": "GITEA_TOKEN", "label": "Gitea", "description": "Доступ агентов к dev-репозиторию (skill git_dev).", "category": "Интеграции"},
     {"key_name": "OPENROUTER_API_KEY", "label": "OpenRouter", "description": "Облачный провайдер для основной модели, если выбран OpenRouter.", "category": "LLM"},
+    {"key_name": "NOWPAYMENTS_API_KEY", "label": "NOWPayments (API)", "description": "Выставление криптосчетов за подписки на ботов.", "category": "Биллинг"},
+    {"key_name": "NOWPAYMENTS_IPN_SECRET", "label": "NOWPayments (IPN)", "description": "Секрет для проверки подписи callback-ов об оплате. Без него платежи не подтверждаются.", "category": "Биллинг"},
 ]
 _KNOWN_API_KEY_NAMES = {entry["key_name"] for entry in KNOWN_API_KEYS}
 
@@ -1048,13 +1084,17 @@ class DevRunCreateRequest(BaseModel):
     iter_budget: int | None = None
     cost_budget: float | None = None
     wall_minutes: int | None = None
+    assignee_agent_id: str | None = None
+    # False = land in the Kanban "Backlog" column without starting execution;
+    # the board promotes it to planned via /start once dragged to "To Do".
+    start: bool = True
 
 @app.post("/api/dev-runs")
 async def create_dev_run_api(request: DevRunCreateRequest):
     from backend import dev_runs
     if not request.goal.strip():
         raise HTTPException(status_code=400, detail="Goal is required")
-    kwargs = {}
+    kwargs: dict = {"assignee_agent_id": request.assignee_agent_id, "start": request.start}
     if request.iter_budget is not None:
         kwargs["iter_budget"] = request.iter_budget
     if request.cost_budget is not None:
@@ -1099,6 +1139,32 @@ async def cancel_dev_run_api(run_id: str):
     from backend import dev_runs
     try:
         return await asyncio.to_thread(dev_runs.cancel_run, run_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Dev-run not found")
+
+@app.post("/api/dev-runs/{run_id}/start")
+async def start_dev_run_api(run_id: str):
+    """Promotes a Kanban card from Backlog to To Do (planned) — the worker
+    then picks it up like any other planned dev-run."""
+    from backend import dev_runs
+    try:
+        return await asyncio.to_thread(dev_runs.start_run, run_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Dev-run not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+class DevRunAssignRequest(BaseModel):
+    assignee_agent_id: str | None = None
+
+@app.post("/api/dev-runs/{run_id}/assign")
+async def assign_dev_run_api(run_id: str, request: DevRunAssignRequest):
+    """Changes who a Kanban card is attributed to. Execution always runs
+    under the owner principal (see tool_permissions.py) — this only changes
+    who the card displays as responsible and who auto-assign counts as busy."""
+    from backend import dev_runs
+    try:
+        return await asyncio.to_thread(dev_runs.reassign_run, run_id, request.assignee_agent_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Dev-run not found")
 
@@ -1547,6 +1613,27 @@ class AgentMatrixBindingRequest(BaseModel):
 class MessengerBindingUpdateRequest(BaseModel):
     system_prompt: Optional[str] = None
     response_mode: Optional[str] = None
+    access_mode: Optional[str] = None
+    default_plan_id: Optional[str] = None
+    welcome_message: Optional[str] = None
+    allowed_chat_ids: Optional[List[str]] = None
+
+class MessengerBindingReconnectRequest(BaseModel):
+    """One shape covering all 5 platforms' credential fields — the endpoint reads
+    only the ones the binding's own platform needs. Lets a dead/rotated
+    credential be swapped in place instead of deleting and recreating the whole
+    binding (which would lose its prompt override, access mode and whitelist)."""
+    bot_token: Optional[str] = None
+    app_token: Optional[str] = None
+    homeserver_url: Optional[str] = None
+    user_id: Optional[str] = None
+    password: Optional[str] = None
+    access_token: Optional[str] = None
+    imap_host: Optional[str] = None
+    imap_port: Optional[int] = None
+    smtp_host: Optional[str] = None
+    smtp_port: Optional[int] = None
+    address: Optional[str] = None
 
 class PendingReplySendRequest(BaseModel):
     edited_text: Optional[str] = None
@@ -1845,6 +1932,16 @@ async def list_all_messenger_bindings_api():
     return bindings
 
 
+@app.get("/api/messenger-bindings/activity")
+async def list_messenger_activity_api(binding_id: Optional[str] = None, limit: int = 200):
+    """Live feed of what backend/bot_access_gate.py's authorize() has decided
+    about incoming messages across every channel — lets the admin see whether
+    a message actually reached a bound bot without reading server logs."""
+    from backend import channel_activity
+
+    return channel_activity.recent(binding_id, min(max(limit, 1), 500))
+
+
 @app.patch("/api/messenger-bindings/{binding_id}")
 async def update_messenger_binding_api(binding_id: str, payload: MessengerBindingUpdateRequest):
     """Edits an active binding's per-channel prompt and/or draft/auto-labeled
@@ -1853,10 +1950,16 @@ async def update_messenger_binding_api(binding_id: str, payload: MessengerBindin
     from backend.agent_messenger_governance import update_binding_settings
     try:
         return await update_binding_settings(
-            binding_id, system_prompt_override=payload.system_prompt, response_mode=payload.response_mode
+            binding_id,
+            system_prompt_override=payload.system_prompt,
+            response_mode=payload.response_mode,
+            access_mode=payload.access_mode,
+            default_plan_id=payload.default_plan_id,
+            welcome_message=payload.welcome_message,
+            allowed_chat_ids=payload.allowed_chat_ids,
         )
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Binding not found")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc) or "Binding not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1880,6 +1983,55 @@ async def enable_messenger_binding_api(binding_id: str):
         return await enable_binding(binding_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Binding not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/messenger-bindings/{binding_id}/reconnect")
+async def reconnect_messenger_binding_api(binding_id: str, payload: MessengerBindingReconnectRequest):
+    """Swaps in a fresh credential for an existing binding and restarts its bot
+    — the fix for a dead/expired token (e.g. a short-lived Matrix access token)
+    without deleting and recreating the whole channel. The new credential is
+    verified live before anything is touched, same bar as connecting fresh."""
+    from backend.agent_messenger_governance import (
+        get_binding, reconnect_telegram_binding, reconnect_matrix_binding,
+        reconnect_discord_binding, reconnect_slack_binding, reconnect_email_binding,
+    )
+
+    binding = await asyncio.to_thread(get_binding, binding_id)
+    if not binding:
+        raise HTTPException(status_code=404, detail="Binding not found")
+    platform = binding["platform"]
+    try:
+        if platform == "telegram":
+            if not payload.bot_token:
+                raise HTTPException(status_code=400, detail="bot_token обязателен")
+            return await reconnect_telegram_binding(binding_id, payload.bot_token)
+        if platform == "discord":
+            if not payload.bot_token:
+                raise HTTPException(status_code=400, detail="bot_token обязателен")
+            return await reconnect_discord_binding(binding_id, payload.bot_token)
+        if platform == "matrix":
+            if not payload.homeserver_url or not payload.user_id:
+                raise HTTPException(status_code=400, detail="homeserver_url и user_id обязательны")
+            return await reconnect_matrix_binding(
+                binding_id, payload.homeserver_url, payload.user_id,
+                password=payload.password or "", access_token=payload.access_token or "",
+            )
+        if platform == "slack":
+            if not payload.bot_token or not payload.app_token:
+                raise HTTPException(status_code=400, detail="bot_token и app_token обязательны")
+            return await reconnect_slack_binding(binding_id, payload.bot_token, payload.app_token)
+        if platform == "email":
+            if not payload.imap_host or not payload.smtp_host or not payload.address or not payload.password:
+                raise HTTPException(status_code=400, detail="imap_host, smtp_host, address и password обязательны")
+            return await reconnect_email_binding(
+                binding_id, payload.imap_host, payload.imap_port or 993,
+                payload.smtp_host, payload.smtp_port or 587, payload.address, payload.password,
+            )
+        raise HTTPException(status_code=400, detail=f"Unknown platform: {platform}")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc) or "Binding not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1927,6 +2079,407 @@ async def discard_channel_reply_api(reply_id: str):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"status": "success", "id": reply_id}
+
+
+# ── Public bot access: plans, tokens, subscribers, usage ────────────────────
+# The admin surface for token-gated social bots (backend/bot_access.py). Every
+# route here sits behind the same dashboard session auth as the rest of /api,
+# so "owner-only" needs no extra gate — but nothing in this block may ever
+# return a token's plaintext except the issue endpoints, which return it once.
+
+class AccessPlanRequest(BaseModel):
+    name: str
+    description: str = ""
+    period: str = "monthly"
+    price_usd: Optional[float] = None
+    is_purchasable: bool = False
+    duration_days: Optional[int] = None
+    limit_usd: Optional[float] = None
+    limit_tokens: Optional[int] = None
+    limit_messages: Optional[int] = None
+    rate_limit_per_min: int = 6
+    max_message_chars: int = 2000
+    allowed_tools: Optional[List[str]] = None
+    system_prompt_suffix: str = ""
+    welcome_message: str = ""
+    is_active: bool = True
+    subagent_id: Optional[str] = None
+
+
+class AccessTokenRequest(BaseModel):
+    binding_id: str
+    subagent_id: str
+    plan_id: Optional[str] = None
+    label: str = ""
+    max_chats: int = 1
+    expires_at: Optional[str] = None
+    limit_usd: Optional[float] = None
+    limit_tokens: Optional[int] = None
+    limit_messages: Optional[int] = None
+    notes: str = ""
+    count: int = 1
+
+
+class AccessTokenUpdateRequest(BaseModel):
+    label: Optional[str] = None
+    plan_id: Optional[str] = None
+    status: Optional[str] = None
+    max_chats: Optional[int] = None
+    expires_at: Optional[str] = None
+    limit_usd: Optional[float] = None
+    limit_tokens: Optional[int] = None
+    limit_messages: Optional[int] = None
+    notes: Optional[str] = None
+
+
+class SubscriberUpdateRequest(BaseModel):
+    display_name: Optional[str] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None
+    profile: Optional[Dict[str, Any]] = None
+
+
+@app.get("/api/access/overview")
+async def access_overview_api():
+    from backend.bot_access import overview
+    return await asyncio.to_thread(overview)
+
+
+@app.get("/api/access/plans")
+async def list_access_plans_api():
+    from backend.bot_access import list_plans
+    return await asyncio.to_thread(list_plans)
+
+
+@app.post("/api/access/plans")
+async def create_access_plan_api(payload: AccessPlanRequest):
+    from backend.bot_access import create_plan
+    try:
+        return await asyncio.to_thread(create_plan, **payload.model_dump())
+    except KeyError as exc:
+        # Only raised here for an unresolvable subagent_id — "Plan not found"
+        # would be nonsensical since no plan exists yet at creation time.
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/access/plans/{plan_id}")
+async def update_access_plan_api(plan_id: str, payload: AccessPlanRequest):
+    from backend.bot_access import update_plan
+    try:
+        return await asyncio.to_thread(update_plan, plan_id, **payload.model_dump())
+    except KeyError as exc:
+        detail = "Plan not found" if str(exc).strip("'\"") == plan_id else str(exc)
+        raise HTTPException(status_code=404, detail=detail) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/access/plans/{plan_id}")
+async def delete_access_plan_api(plan_id: str):
+    from backend.bot_access import delete_plan
+    try:
+        if not await asyncio.to_thread(delete_plan, plan_id):
+            raise HTTPException(status_code=404, detail="Plan not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "success", "id": plan_id}
+
+
+@app.get("/api/access/tokens")
+async def list_access_tokens_api(
+    binding_id: Optional[str] = None,
+    subagent_id: Optional[str] = None,
+    status: Optional[str] = None,
+):
+    from backend.bot_access import list_tokens
+    return await asyncio.to_thread(list_tokens, binding_id, subagent_id, status)
+
+
+@app.post("/api/access/tokens")
+async def issue_access_tokens_api(payload: AccessTokenRequest):
+    """Issues one token, or `count` of them for handing out in a batch. The
+    plaintext in the response is the only copy that ever leaves the server —
+    it is stored hashed and cannot be shown again."""
+    from backend.bot_access import issue_token, issue_tokens_bulk
+    fields = payload.model_dump()
+    count = max(1, int(fields.pop("count", 1) or 1))
+    try:
+        if count == 1:
+            return {"tokens": [await asyncio.to_thread(issue_token, **fields)]}
+        return {"tokens": await asyncio.to_thread(issue_tokens_bulk, count, **fields)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/access/tokens/{token_id}")
+async def get_access_token_api(token_id: str):
+    from backend.bot_access import token_usage_summary
+    try:
+        return await asyncio.to_thread(token_usage_summary, token_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+
+@app.patch("/api/access/tokens/{token_id}")
+async def update_access_token_api(token_id: str, payload: AccessTokenUpdateRequest):
+    from backend.bot_access import update_token
+    try:
+        return await asyncio.to_thread(update_token, token_id, **payload.model_dump())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc) or "Token not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/access/tokens/{token_id}/revoke")
+async def revoke_access_token_api(token_id: str):
+    """Kills the token and blocks every chat that already redeemed it — an
+    outstanding token is worthless the moment this returns."""
+    from backend.bot_access import revoke_token
+    try:
+        return await asyncio.to_thread(revoke_token, token_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+
+@app.post("/api/access/tokens/{token_id}/reset-usage")
+async def reset_access_token_usage_api(token_id: str):
+    from backend.bot_access import reset_token_usage
+    try:
+        return await asyncio.to_thread(reset_token_usage, token_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+
+@app.delete("/api/access/tokens/{token_id}")
+async def delete_access_token_api(token_id: str):
+    from backend.bot_access import delete_token
+    if not await asyncio.to_thread(delete_token, token_id):
+        raise HTTPException(status_code=404, detail="Token not found")
+    return {"status": "success", "id": token_id}
+
+
+@app.get("/api/access/subscribers")
+async def list_access_subscribers_api(
+    binding_id: Optional[str] = None,
+    token_id: Optional[str] = None,
+    status: Optional[str] = None,
+):
+    from backend.bot_access import list_subscribers
+    return await asyncio.to_thread(list_subscribers, binding_id, token_id, status)
+
+
+@app.get("/api/access/subscribers/{subscriber_id}")
+async def get_access_subscriber_api(subscriber_id: str, message_limit: int = 50):
+    """The картотека: identity, token, plan, spend and the stored conversation."""
+    from backend.bot_access import subscriber_card
+    try:
+        return await asyncio.to_thread(subscriber_card, subscriber_id, message_limit)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Subscriber not found")
+
+
+@app.patch("/api/access/subscribers/{subscriber_id}")
+async def update_access_subscriber_api(subscriber_id: str, payload: SubscriberUpdateRequest):
+    from backend.bot_access import update_subscriber
+    try:
+        return await asyncio.to_thread(update_subscriber, subscriber_id, **payload.model_dump())
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Subscriber not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/access/subscribers/{subscriber_id}")
+async def delete_access_subscriber_api(subscriber_id: str):
+    """Forgets a subscriber's account. Their stored conversation lives in the
+    shared messages table under the same session id and is left alone — delete
+    it from the chat view if that is also wanted."""
+    from backend.bot_access import delete_subscriber
+    if not await asyncio.to_thread(delete_subscriber, subscriber_id):
+        raise HTTPException(status_code=404, detail="Subscriber not found")
+    return {"status": "success", "id": subscriber_id}
+
+
+# ── Billing: subscriptions, crypto invoices, provider settings ──────────────
+# The webhook below is the one route in this block that is NOT behind the
+# dashboard session — it is authenticated by the provider's HMAC signature
+# instead (backend/payments.py) and is listed in the auth middleware's public
+# paths. Everything else is owner-only like the rest of /api.
+
+class PaymentConfigRequest(BaseModel):
+    provider: Optional[str] = None
+    public_base_url: Optional[str] = None
+    success_url: Optional[str] = None
+
+
+class InvoiceRequest(BaseModel):
+    plan_id: str
+    binding_id: str
+    subagent_id: str
+    customer_ref: str = ""
+    pay_currency: str = ""
+    purpose: str = "new"
+    subscription_id: Optional[str] = None
+
+
+@app.get("/api/billing/overview")
+async def billing_overview_api():
+    from backend.payments import revenue_overview
+    return await asyncio.to_thread(revenue_overview)
+
+
+@app.get("/api/billing/config")
+async def get_billing_config_api():
+    """Provider settings. The two secrets are reported as booleans only — they
+    are stored in the api_keys table and set from the «Ключи API» panel."""
+    from backend.payments import get_config
+    return await asyncio.to_thread(get_config)
+
+
+@app.put("/api/billing/config")
+async def set_billing_config_api(payload: PaymentConfigRequest):
+    from backend.payments import set_config
+    try:
+        return await asyncio.to_thread(
+            set_config, payload.provider, payload.public_base_url, payload.success_url
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/billing/subscriptions")
+async def list_subscriptions_api(
+    binding_id: Optional[str] = None,
+    plan_id: Optional[str] = None,
+    status: Optional[str] = None,
+):
+    from backend.bot_access import list_subscriptions
+    return await asyncio.to_thread(list_subscriptions, binding_id, plan_id, status)
+
+
+@app.post("/api/billing/subscriptions/{subscription_id}/renew")
+async def renew_subscription_api(subscription_id: str):
+    """Grants another paid period without charging — for a payment settled
+    outside the provider, or a goodwill extension."""
+    from backend.bot_access import renew_subscription
+    try:
+        return await asyncio.to_thread(renew_subscription, subscription_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc) or "Subscription not found") from exc
+
+
+@app.post("/api/billing/subscriptions/{subscription_id}/cancel")
+async def cancel_subscription_api(subscription_id: str, suspend_token: bool = True):
+    from backend.bot_access import cancel_subscription
+    try:
+        return await asyncio.to_thread(cancel_subscription, subscription_id, suspend_token)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+
+
+@app.post("/api/billing/subscriptions/{subscription_id}/auto-renew")
+async def set_auto_renew_api(subscription_id: str, enabled: bool = True):
+    from backend.bot_access import set_subscription_auto_renew
+    try:
+        return await asyncio.to_thread(set_subscription_auto_renew, subscription_id, enabled)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+
+
+@app.get("/api/billing/invoices")
+async def list_invoices_api(status: Optional[str] = None, binding_id: Optional[str] = None):
+    from backend.payments import list_invoices
+    return await asyncio.to_thread(list_invoices, status, binding_id)
+
+
+@app.post("/api/billing/invoices")
+async def create_invoice_api(payload: InvoiceRequest):
+    from backend.payments import create_invoice
+    try:
+        return await create_invoice(
+            plan_id=payload.plan_id,
+            binding_id=payload.binding_id,
+            subagent_id=payload.subagent_id,
+            customer_ref=payload.customer_ref,
+            pay_currency=payload.pay_currency,
+            origin="admin",
+            purpose=payload.purpose,
+            subscription_id=payload.subscription_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/billing/invoices/{invoice_id}/mark-paid")
+async def mark_invoice_paid_api(invoice_id: str):
+    """Owner confirming a transfer they verified themselves. Runs the same
+    issuance path the webhook does, including the one-time plaintext token."""
+    from backend.payments import mark_paid_manually
+    try:
+        result = await asyncio.to_thread(mark_paid_manually, invoice_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc) or "Invoice not found") from exc
+    await _deliver_paid_access(result)
+    return result
+
+
+@app.post("/api/billing/invoices/{invoice_id}/cancel")
+async def cancel_invoice_api(invoice_id: str):
+    from backend.payments import cancel_invoice
+    try:
+        return await asyncio.to_thread(cancel_invoice, invoice_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+async def _deliver_paid_access(result: dict) -> None:
+    """Tells a buyer who paid from inside a bot chat that they are in.
+
+    The token was already bound to their chat by apply_paid_invoice, so this is
+    a courtesy message, not the credential handover — best-effort, and a failure
+    here never un-does a completed payment.
+    """
+    deliver_to = result.get("deliver_to")
+    if not deliver_to:
+        return
+    try:
+        from backend.channel_replies import send_to_channel
+
+        subscription = result.get("subscription") or {}
+        until = subscription.get("current_period_end")
+        suffix = f" Доступ действует до {until[:10]}." if until else ""
+        await send_to_channel(
+            deliver_to["binding_id"], deliver_to["platform"], deliver_to["chat_id"],
+            f"Оплата получена — доступ открыт.{suffix} Можете задавать вопрос.",
+        )
+    except Exception:
+        logger.exception("Could not confirm paid access to the buyer")
+
+
+@app.post("/api/payments/webhook")
+async def payments_webhook_api(request: Request):
+    """Provider IPN callback. Public by necessity, authenticated by an HMAC
+    signature over the raw body — see backend/payments.py. Always answers 200
+    on a handled callback so the provider stops retrying; a rejected signature
+    answers 400 without revealing why."""
+    raw_body = await request.body()
+    from backend.payments import handle_webhook
+
+    outcome = await asyncio.to_thread(handle_webhook, raw_body, dict(request.headers))
+    if not outcome["ok"]:
+        raise HTTPException(status_code=400, detail=outcome["detail"])
+    if outcome.get("result"):
+        await _deliver_paid_access(outcome["result"])
+    return {"status": "ok"}
 
 
 @app.get("/api/system/stats")

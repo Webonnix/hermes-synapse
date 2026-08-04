@@ -289,6 +289,15 @@ body::after {
   font-size: 0.95rem;
   outline: none;
   transition: all 0.2s ease;
+  /* Without these, a <select> ignores flex/grid stretch and sizes itself to
+     its intrinsic content instead — specifically the WIDEST <option> text
+     (e.g. "Senior Web Developer"). That min-content demand propagates up
+     through every ancestor that lacks its own min-width: 0, forcing whole
+     panels and grid tracks wider than intended and overflowing the layout —
+     the actual cause behind the tariff form pushing its column past its cap. */
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .form-input:focus {
@@ -365,6 +374,27 @@ body::after {
 
 @media (max-width: 900px) {
   .admin-agents-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Access → Тарифы: form on the left, the tariff list on the right. The list
+   column is capped (not `1fr`) so it can't stretch edge-to-edge on an ultra-wide
+   monitor and spread a row's name away from its action icons — but the cap must
+   have a `minmax(0, …)` floor, not a fixed one: a fixed floor plus the first
+   column's own floor can together exceed a merely-average window's width, and
+   CSS Grid overflows rather than shrinks past a track's stated minimum. That
+   overflow gets silently clipped by `.app-container`'s `overflow: hidden`,
+   which is worse than a scrollbar — the whole tariff list just vanishes. */
+.admin-plans-grid {
+  display: grid;
+  grid-template-columns: minmax(300px, 380px) minmax(0, 620px);
+  gap: 18px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .admin-plans-grid {
     grid-template-columns: 1fr;
   }
 }
@@ -448,6 +478,13 @@ body::after {
   border: 1px solid rgba(255, 255, 255, 0.07);
   background: rgba(255, 255, 255, 0.02);
   transition: all 0.15s ease;
+  /* Without a cap, `justify-content: space-between` spreads the name block and
+     the action icons all the way across whatever `1fr` column happens to be on
+     a wide monitor — the two ends drift apart with a gap that reads as broken
+     layout rather than a deliberately wide row. Capping keeps them close and
+     just leaves calm empty space to the row's right on ultra-wide screens,
+     which looks intentional instead of "поехало". */
+  max-width: 620px;
 }
 
 .admin-item-row:hover {
@@ -544,6 +581,184 @@ body::after {
   color: var(--text-dim);
   border-color: rgba(255, 255, 255, 0.14);
   background: rgba(255, 255, 255, 0.03);
+}
+
+/* Second-level tab strip (panes *within* an admin-subnav section, e.g. Access's
+   Токены/Тарифы/Абоненты, Billing's Подписки/Счета/Приём оплаты). Deliberately
+   NOT the pill/segmented look of .admin-subnav one level up — an underline style
+   reads as "you're inside a section, here are its views" rather than a second,
+   competing row of top-level tabs. Buttons size to their label; nothing here is
+   a fixed box, so a longer label (e.g. "Приём оплаты") can never overlap its
+   neighbour the way a squeezed .icon-btn used to. */
+.admin-pane-tabs {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  flex-wrap: wrap;
+}
+
+.admin-pane-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 2px;
+  margin-bottom: -1px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  font: 600 0.8rem var(--font-sans);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.admin-pane-tabs button:hover {
+  color: var(--text-primary);
+}
+
+.admin-pane-tabs button.is-active {
+  color: #d8d1ff;
+  border-bottom-color: rgba(155, 136, 255, 0.65);
+}
+
+.admin-pane-tabs-count {
+  font-family: var(--font-mono);
+  font-style: normal;
+  font-size: 0.64rem;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-dim);
+}
+
+.admin-pane-tabs button.is-active .admin-pane-tabs-count {
+  background: rgba(155, 136, 255, 0.22);
+  color: #d8d1ff;
+}
+
+/* Auto-width text button for secondary actions ("Отмена", "Заблокировать") —
+   the non-icon counterpart to .icon-btn, which is a fixed 30x30 square and
+   should never carry a text label (that's the bug this class replaces). */
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-muted);
+  font: 600 0.78rem var(--font-sans);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-ghost:hover {
+  border-color: rgba(155, 136, 255, 0.35);
+  color: #d8d1ff;
+  background: rgba(155, 136, 255, 0.08);
+}
+
+.btn-ghost.danger {
+  color: #ff9bb0;
+}
+
+.btn-ghost.danger:hover {
+  border-color: rgba(255, 93, 143, 0.35);
+  color: #ff8098;
+  background: rgba(255, 93, 143, 0.08);
+}
+
+.btn-ghost:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* KPI row: an icon chip + tone coloring turns a wall of identical grey boxes
+   into something scannable at a glance (green = money in, amber = waiting,
+   dim = inactive/expired). Tone is opt-in via a modifier class so a plain
+   neutral stat (most of them) costs nothing extra. */
+.admin-stat-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  flex: 1 1 170px;
+  min-width: 0;
+}
+
+.admin-stat-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  flex-shrink: 0;
+  color: var(--accent-violet);
+  background: rgba(155, 136, 255, 0.12);
+}
+
+.admin-stat-card.is-success .admin-stat-icon { color: var(--success); background: rgba(95, 240, 191, 0.12); }
+.admin-stat-card.is-warning .admin-stat-icon { color: var(--warning); background: rgba(255, 195, 72, 0.12); }
+.admin-stat-card.is-info .admin-stat-icon { color: var(--accent-cyan); background: rgba(115, 217, 255, 0.12); }
+.admin-stat-card.is-dim .admin-stat-icon { color: var(--text-dim); background: rgba(255, 255, 255, 0.05); }
+
+.admin-stat-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.admin-stat-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-stat-value {
+  font-size: 1.22rem;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--text-primary);
+}
+
+.admin-stat-hint {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Empty state with an optional inline call-to-action — a step up from a bare
+   line of dim text, and (where the fix is one click away, e.g. "no invoices
+   yet, go raise one") points straight at the pane that resolves it. */
+.admin-empty-cta {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 30px 16px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  border: 1px dashed rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+}
+
+.admin-empty-cta svg {
+  color: var(--text-dim);
+  opacity: 0.7;
 }
 
 .admin-add-card {
@@ -1041,6 +1256,29 @@ body::after {
 .task-status.is-cancelled { color: #9aa4b7; }
 @media (max-width: 1000px) { .devruns-workspace { grid-template-columns: 1fr; } .devruns-list { max-height: 300px; } .devrun-inspector { max-height: none; } }
 @media (max-width: 620px) { .devruns-page { padding: 10px; } .devrun-row { grid-template-columns: auto minmax(110px,1fr); } .devrun-row-progress { display: none; } .devrun-progress { grid-template-columns: 64px minmax(40px,1fr) auto; } .devrun-inspector-head { flex-direction: column; } }
+
+/* ── Kanban board (agent tasks) ─────────────────────────────────────────── */
+.kanban-page { padding: 18px 20px 26px; overflow: auto; height: 100%; }
+.kanban-create { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin: 16px 0; padding: 10px 12px; border: 1px solid rgba(0,240,255,.16); border-radius: 6px; background: rgba(0,240,255,.04); }
+.kanban-create input { flex: 2; min-width: 220px; min-height: 32px; padding: 0 10px; border: 1px solid rgba(255,255,255,.12); border-radius: 5px; color: var(--text-primary); background: rgba(10,12,22,.7); font: 500 .74rem var(--font-sans); }
+.kanban-create select { min-height: 32px; padding: 0 8px; border: 1px solid rgba(255,255,255,.12); border-radius: 5px; color: var(--text-primary); background: rgba(10,12,22,.7); font: 500 .7rem var(--font-sans); }
+.kanban-create button { min-height: 32px; padding: 0 12px; border: 1px solid rgba(0,240,255,.32); border-radius: 5px; color: var(--accent-cyan); background: rgba(0,240,255,.08); font: 700 .66rem var(--font-sans); cursor: pointer; white-space: nowrap; }
+.kanban-create button:disabled { opacity: .45; cursor: default; }
+.kanban-board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(220px,1fr); gap: 12px; overflow-x: auto; padding-bottom: 8px; }
+.kanban-column { display: flex; flex-direction: column; min-width: 0; border: 1px solid rgba(255,255,255,.09); border-radius: 6px; background: rgba(17,18,30,.4); }
+.kanban-column-head { display: flex; align-items: center; justify-content: space-between; padding: 9px 11px; border-bottom: 1px solid rgba(255,255,255,.075); color: var(--text-dim); font: 700 .62rem var(--font-mono); text-transform: uppercase; letter-spacing: .04em; }
+.kanban-count { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 4px; border-radius: 9px; background: rgba(255,255,255,.07); color: var(--text-muted); font: 700 .6rem var(--font-mono); }
+.kanban-column-body { display: grid; gap: 8px; padding: 10px; min-height: 80px; overflow-y: auto; }
+.kanban-empty { margin: 6px 2px; color: var(--text-dim); font-size: .64rem; }
+.kanban-card { display: grid; gap: 6px; padding: 9px 10px; border: 1px solid rgba(255,255,255,.09); border-radius: 5px; background: rgba(10,11,20,.5); cursor: grab; }
+.kanban-card:active { cursor: grabbing; }
+.kanban-card-goal { margin: 0; color: var(--text-primary); font-size: .7rem; line-height: 1.35; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+.kanban-card-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--text-dim); font: 600 .58rem var(--font-mono); }
+.kanban-card-assignee { display: inline-flex; align-items: center; gap: 3px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kanban-card-time { white-space: nowrap; }
+.kanban-card-reason { margin: 0; padding: 5px 7px; border: 1px solid rgba(255,195,72,.24); border-radius: 4px; color: #ffd070; background: rgba(255,195,72,.06); font-size: .6rem; }
+.kanban-card-demo { display: inline-flex; align-items: center; gap: 4px; width: fit-content; padding: 3px 8px; border: 1px solid rgba(95,240,191,.32); border-radius: 4px; color: var(--success); background: rgba(95,240,191,.07); font: 700 .6rem var(--font-sans); text-decoration: none; }
+@media (max-width: 700px) { .kanban-board { grid-auto-flow: row; grid-auto-columns: unset; } .kanban-page { padding: 10px; } }
 
 /* ── Unified diff viewer ────────────────────────────────────────────────── */
 .diff-viewer { display: grid; gap: 8px; margin-top: 6px; }

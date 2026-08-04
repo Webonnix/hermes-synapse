@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import asyncio
+import contextvars
 import uuid
 import httpx
 from datetime import datetime, timedelta, timezone
@@ -1270,6 +1271,24 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "dev_publish_demo",
+            "description": (
+                "Публикует собранный статический сайт (например, папку dist/ или build/) из текущей "
+                "dev-run песочницы как живое демо, доступное по ссылке /demo/<run_id>/. Вызывайте после "
+                "успешной сборки, перед 'DONE:', если цель предполагала фронтенд/сайт для показа."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "build_dir": {"type": "string", "description": "Путь к папке со собранной статикой относительно корня dev-repo, например 'dist'."}
+                },
+                "required": ["build_dir"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "browser_read",
             "description": (
                 "Открывает сайт в headless-браузере и читает/извлекает с него информацию (заголовки, текст, "
@@ -1929,8 +1948,22 @@ def sync_obsidian_vault() -> str:
     return json.dumps(result, ensure_ascii=False)
 
 def execute_command(command: str) -> str:
-    """Executes a shell command in the local environment and returns its stdout/stderr."""
+    """Executes a shell command in the local environment and returns its stdout/stderr.
+
+    Reserved for the owner's own agent (see backend/tool_permissions.py — every
+    other principal has this tool removed from its schema entirely), and even
+    there a set of irreversible host-wrecking shapes is refused outright, before
+    the Control Plane's two R4 approvals can be granted. The guard is repeated
+    here as well as in execute_governed_tool so a direct call can't route around
+    it."""
     import subprocess
+    from backend.tool_permissions import check_shell_command
+
+    refusal = check_shell_command(command)
+    if refusal:
+        logger.warning("Refused shell command: %s", refusal)
+        return json.dumps({"status": "forbidden", "error": refusal}, ensure_ascii=False)
+
     try:
         res = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=15)
         output = res.stdout if res.stdout else ""
@@ -2013,7 +2046,23 @@ def git_push() -> str:
 # in control_plane.py — every call still goes through execute_governed_tool.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-DEV_RUNNER_URL = os.getenv("DEV_RUNNER_URL", "http://dev-runner:8600")
+_DEFAULT_DEV_RUNNER_URL = os.getenv("DEV_RUNNER_URL", "http://dev-runner:8600")
+# Which sandbox a dev_* call hits. Defaults to the one static dev-runner
+# container (plain chat / legacy single-run usage); dev_runs.py's executor
+# loop overrides this per-call to a run's own ephemeral sandbox so several
+# Kanban cards can execute in parallel without sharing a dev-repo checkout.
+# A ContextVar survives the asyncio.to_thread hop execute_governed_tool uses
+# (the thread gets a copy of the calling context), so no signature changes
+# are needed on dev_read_file/dev_write_file/etc.
+DEV_RUNNER_BASE_URL: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "dev_runner_base_url", default=_DEFAULT_DEV_RUNNER_URL
+)
+# Which dev-run is currently executing, so dev_publish_demo knows whose
+# sandbox to copy a build out of and whose Kanban card to attach the demo
+# link to — set alongside DEV_RUNNER_BASE_URL in dev_runs._run_with_sandbox.
+CURRENT_DEV_RUN_ID: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "current_dev_run_id", default=None
+)
 
 
 def _dev_runner_request(endpoint: str, payload: Dict[str, Any], timeout: float = 30.0) -> str:
@@ -2022,7 +2071,7 @@ def _dev_runner_request(endpoint: str, payload: Dict[str, Any], timeout: float =
         return json.dumps({"error": "DEV_RUNNER_TOKEN is not configured on the backend."}, ensure_ascii=False)
     try:
         response = httpx.post(
-            f"{DEV_RUNNER_URL}{endpoint}",
+            f"{DEV_RUNNER_BASE_URL.get()}{endpoint}",
             json=payload,
             headers={"Authorization": f"Bearer {token}"},
             timeout=timeout,
@@ -2069,6 +2118,59 @@ def dev_run_tests(runner: str = "auto") -> str:
     if runner not in ("auto", "pytest", "npm"):
         return json.dumps({"error": "runner must be auto, pytest or npm."}, ensure_ascii=False)
     return _dev_runner_request("/test", {"runner": runner}, timeout=630.0)
+
+
+DEV_PUBLISH_MAX_BYTES = 200 * 1024 * 1024
+DEV_PUBLISH_MAX_FILES = 5000
+
+
+def dev_publish_demo(build_dir: str) -> str:
+    """Copies a built static site (e.g. `dist/`, `build/`) out of the current
+    dev-run's own sandbox checkout into the shared preview directory nginx
+    serves at /demo/<run_id>/, and records the demo_url on the run's Kanban
+    card. Only usable from inside a dev-run (needs CURRENT_DEV_RUN_ID)."""
+    import shutil
+
+    run_id = CURRENT_DEV_RUN_ID.get()
+    if not run_id:
+        return json.dumps({"error": "dev_publish_demo can only be called from within a dev-run."},
+                          ensure_ascii=False)
+    from backend import dev_sandbox
+
+    source_root = dev_sandbox.repo_run_path(run_id).resolve()
+    candidate = (source_root / (build_dir or ".")).resolve()
+    try:
+        candidate.relative_to(source_root)
+    except ValueError:
+        return json.dumps({"error": "build_dir escapes the dev-repo checkout."}, ensure_ascii=False)
+    if not candidate.is_dir():
+        return json.dumps({"error": f"'{build_dir}' is not a directory in this run's checkout."},
+                          ensure_ascii=False)
+
+    total_bytes, total_files = 0, 0
+    for path in candidate.rglob("*"):
+        if path.is_file():
+            total_files += 1
+            total_bytes += path.stat().st_size
+    if total_files > DEV_PUBLISH_MAX_FILES or total_bytes > DEV_PUBLISH_MAX_BYTES:
+        return json.dumps({
+            "error": f"Build output too large to publish ({total_files} files, {total_bytes} bytes; "
+                     f"limits are {DEV_PUBLISH_MAX_FILES} files / {DEV_PUBLISH_MAX_BYTES} bytes)."
+        }, ensure_ascii=False)
+
+    dest = dev_sandbox.PREVIEWS_ROOT / run_id
+    try:
+        if dest.exists():
+            shutil.rmtree(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(candidate, dest)
+    except OSError as exc:
+        return json.dumps({"error": f"Publish failed: {type(exc).__name__}: {exc}"}, ensure_ascii=False)
+
+    demo_url = f"/demo/{run_id}/"
+    from backend import dev_runs
+    dev_runs.update_run(run_id, demo_url=demo_url)
+    return json.dumps({"demo_url": demo_url, "files_published": total_files}, ensure_ascii=False)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2387,6 +2489,9 @@ def execute_tool(name: str, arguments: Dict[str, Any], chat_id: str = "default")
 
     elif name == "dev_run_tests":
         return dev_run_tests(arguments.get("runner", "auto"))
+
+    elif name == "dev_publish_demo":
+        return dev_publish_demo(arguments.get("build_dir", ""))
 
     elif name == "browser_read":
         return browser_read(arguments.get("task", ""), arguments.get("start_url"))

@@ -60,6 +60,10 @@ TOOL_RISKS = {
     "dev_patch": "R2",
     "dev_exec": "R2",
     "dev_run_tests": "R2",
+    # Copies build output from the sandbox into the shared preview directory —
+    # a write with an externally-visible effect (a new /demo/ URL becomes
+    # reachable), so it matches dev_write_file's R2 rather than the R1 reads.
+    "dev_publish_demo": "R2",
     # Narrow, reversible operations scoped to backend/data/dev-repo (a dedicated
     # Gitea-backed clone) rather than the raw shell — read-only ops match
     # get_system_stats/web_search's R0/R1 tier; the two that actually write
@@ -414,8 +418,33 @@ def execute_governed_tool(
     chat_id: str = "default",
     *,
     approved_task_id: Optional[str] = None,
+    principal: Optional[str] = None,
+    plan_allowed_tools: Optional[list] = None,
 ) -> str:
-    """Run a tool through durable risk, approval, budget and evidence gates."""
+    """Run a tool through durable risk, approval, budget and evidence gates.
+
+    ``principal`` (backend/tool_permissions.py) is the outermost gate and runs
+    before anything else, including before an already-approved task is
+    re-executed: a task approved for the owner must not become a way for a
+    sub-agent to reach the host. Callers that pass nothing are treated as
+    ``subagent`` — the safe default, which is also what every pre-existing
+    internal caller wants.
+    """
+    from backend import tool_permissions
+
+    if not tool_permissions.is_tool_allowed(principal, tool_name, plan_allowed_tools=plan_allowed_tools):
+        logger.warning(
+            "Blocked tool '%s' for principal '%s' (chat_id=%s)",
+            tool_name, tool_permissions.normalize_principal(principal), chat_id,
+        )
+        return tool_permissions.denial_payload(principal, tool_name)
+
+    if tool_name == "execute_command":
+        refusal = tool_permissions.check_shell_command(str(arguments.get("command", "")))
+        if refusal:
+            logger.warning("Refused shell command for principal '%s': %s", principal, refusal)
+            return json.dumps({"status": "forbidden", "error": refusal}, ensure_ascii=False)
+
     if approved_task_id:
         task = get_task(approved_task_id)
         if not task:
