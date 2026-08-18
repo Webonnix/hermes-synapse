@@ -23,7 +23,7 @@ import {
   Trello
 } from 'lucide-react';
 
-import type { AppSettings, ChatMessage, ChatSession, DecisionLog, ActivityLog, SystemConfig, AgentModel, SystemStats } from './types';
+import type { AppSettings, ChatMessage, ChatSession, DecisionLog, ActivityLog, SystemConfig, AgentModel, Project, SystemStats } from './types';
 import { styles } from './styles';
 import { translate, type Language } from './i18n';
 import { 
@@ -124,6 +124,7 @@ export default function App() {
       body: JSON.stringify({ language: nextLanguage }),
     }).catch(() => undefined);
   }, []);
+
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([
     { id: 'dashboard', title: 'Main Terminal', agent_id: 'jarvis' },
   ]);
@@ -243,6 +244,7 @@ export default function App() {
   const lastUserMessageRef = useRef<Record<string, string>>({});
 
   const [subagents, setSubagents] = useState<AgentModel[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [currentChatId, setCurrentChatId] = useState<string>(() => {
     return localStorage.getItem('jarvis_current_chat_id') || 'dashboard';
   });
@@ -260,6 +262,7 @@ export default function App() {
   const [showNewSessionModal, setShowNewSessionModal] = useState(false);
   const [newSessionNameInput, setNewSessionNameInput] = useState('');
   const [newSessionAgentInput, setNewSessionAgentInput] = useState('jarvis');
+  const [newSessionProjectInput, setNewSessionProjectInput] = useState('');
 
   const [editingAgentId, setEditingAgentId] = useState('');
   const [editAgentName, setEditAgentName] = useState('');
@@ -895,7 +898,7 @@ export default function App() {
       setMicState('off');
       alert('Microphone access was denied or is unavailable.');
     }
-  }, [resetVoiceRecorder, stopSpeech, submitVoiceBlob]);
+  }, [resetVoiceRecorder, stopSpeech, stopVoiceRecording, submitVoiceBlob]);
 
   const handleVoiceToggle = useCallback(() => {
     if (micStateRef.current === 'capturing') {
@@ -1380,7 +1383,7 @@ export default function App() {
     return id;
   };
 
-  const handleCreateNewSessionConfirm = async (name: string, agentId: string = 'jarvis') => {
+  const handleCreateNewSessionConfirm = async (name: string, agentId: string = 'jarvis', projectId: string = '') => {
     let sessionId = '';
     const trimmed = name.trim();
     if (trimmed) {
@@ -1389,7 +1392,7 @@ export default function App() {
     } else {
       sessionId = `chat_${Date.now()}`;
     }
-    
+
     try {
       await fetchWithAuth(`http://localhost:8000/api/history/${sessionId}/agent`, {
         method: 'POST',
@@ -1398,6 +1401,18 @@ export default function App() {
       });
     } catch (e) {
       console.error('Error setting session agent on creation:', e);
+    }
+
+    if (projectId) {
+      try {
+        await fetchWithAuth(`http://localhost:8000/api/history/${sessionId}/project`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ project_id: projectId })
+        });
+      } catch (e) {
+        console.error('Error setting session project on creation:', e);
+      }
     }
 
     if (trimmed) {
@@ -1419,6 +1434,7 @@ export default function App() {
   const handleCreateNewSession = () => {
     setNewSessionNameInput('');
     setNewSessionAgentInput('jarvis');
+    setNewSessionProjectInput('');
     setShowNewSessionModal(true);
   };
 
@@ -1439,11 +1455,35 @@ export default function App() {
     }
   };
 
+  const handleSetSessionProject = async (sessionId: string, projectId: string) => {
+    try {
+      const res = await fetchWithAuth(`http://localhost:8000/api/history/${sessionId}/project`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_id: projectId || null })
+      });
+      if (res.ok) {
+        setChatSessions(prev =>
+          prev.map(s => s.id === sessionId ? { ...s, project_id: projectId || null } : s)
+        );
+      }
+    } catch (e) {
+      console.error('Error updating session project:', e);
+    }
+  };
+
   const fetchSubagents = () => {
     fetch('/api/subagents')
       .then(res => res.json())
       .then(data => setSubagents(data))
       .catch(err => console.log('Error fetching subagents:', err));
+  };
+
+  const fetchProjects = () => {
+    fetchWithAuth('/api/projects')
+      .then(res => res.json())
+      .then(data => setProjects(data))
+      .catch(err => console.log('Error fetching projects:', err));
   };
 
   const selectChat = (chatId: string, currentSubagentsList?: any[]) => {
@@ -1649,6 +1689,7 @@ export default function App() {
     fetchDocuments();
     fetchUploads();
     fetchSubagents();
+    fetchProjects();
     fetchChatSessions();
     fetchModels();
 
@@ -2495,6 +2536,8 @@ export default function App() {
                       onChangeModel={() => { setActiveTab('settings'); setSettingsSection('config'); }}
                       subagents={subagents}
                       handleSetSessionAgent={handleSetSessionAgent}
+                      projects={projects}
+                      handleSetSessionProject={handleSetSessionProject}
                       activeDevRun={lastDevRunEvent}
                       onOpenDevRuns={() => { setVexaTranscriptOpen(false); setActiveTab('devruns'); }}
                     />
@@ -2852,12 +2895,47 @@ export default function App() {
               }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
-                  handleCreateNewSessionConfirm(newSessionNameInput, newSessionAgentInput);
+                  handleCreateNewSessionConfirm(newSessionNameInput, newSessionAgentInput, newSessionProjectInput);
                   setShowNewSessionModal(false);
                 }
               }}
               autoFocus
             />
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+              <label style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 600 }}>
+                PROJECT
+              </label>
+              <select
+                value={newSessionProjectInput}
+                onChange={(e) => {
+                  const nextProjectId = e.target.value;
+                  setNewSessionProjectInput(nextProjectId);
+                  // Switching project narrows which agent makes sense — reset
+                  // to the default (Vexa) rather than leaving an agent picked
+                  // that belongs to a different project selected.
+                  if (nextProjectId && !subagents.some(a => a.id === newSessionAgentInput && a.project_id === nextProjectId)) {
+                    setNewSessionAgentInput('jarvis');
+                  }
+                }}
+                style={{
+                  width: '100%',
+                  padding: '10px 12px',
+                  borderRadius: '8px',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                  color: '#fff',
+                  fontSize: '0.9rem',
+                  outline: 'none',
+                  cursor: 'pointer'
+                }}
+              >
+                <option value="">— No project —</option>
+                {projects.map(p => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
               <label style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 600 }}>
@@ -2879,20 +2957,22 @@ export default function App() {
                 }}
               >
                 <option value="jarvis">👑 Vexa (Main)</option>
-                {subagents.map(a => {
-                  const isOrch = a.agent_type === 'orchestrator' || a.agent_type === 'sub-orchestrator';
-                  const icon = isOrch ? '🧠' : '🤖';
-                  return (
-                    <option key={a.id} value={a.id}>
-                      {icon} {a.name}
-                    </option>
-                  );
-                })}
+                {subagents
+                  .filter(a => !newSessionProjectInput || a.project_id === newSessionProjectInput)
+                  .map(a => {
+                    const isOrch = a.agent_type === 'orchestrator' || a.agent_type === 'sub-orchestrator';
+                    const icon = isOrch ? '🧠' : '🤖';
+                    return (
+                      <option key={a.id} value={a.id}>
+                        {icon} {a.name}
+                      </option>
+                    );
+                  })}
               </select>
             </div>
 
             <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '8px' }}>
-              <button 
+              <button
                 onClick={() => setShowNewSessionModal(false)}
                 style={{
                   padding: '8px 16px',
@@ -2907,9 +2987,9 @@ export default function App() {
               >
                 Cancel
               </button>
-              <button 
+              <button
                 onClick={() => {
-                  handleCreateNewSessionConfirm(newSessionNameInput, newSessionAgentInput);
+                  handleCreateNewSessionConfirm(newSessionNameInput, newSessionAgentInput, newSessionProjectInput);
                   setShowNewSessionModal(false);
                 }}
                 style={{

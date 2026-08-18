@@ -163,7 +163,7 @@ export function ConfigTab({
   activeModel,
   onModelActivated
 }: ConfigTabProps) {
-  
+
   // Check if editedModel is part of the returned models list.
   // If not, treat as custom.
   const hasModel = models && models.some(m => m.id === editedModel);
@@ -562,7 +562,7 @@ export function ConfigTab({
               <input
                 type="number"
                 min={256}
-                max={4096}
+                max={16384}
                 value={numberValue('max_tokens', 2048)}
                 onChange={e => updateRuntime({ max_tokens: Number(e.target.value) })}
                 style={compactInputStyle}
@@ -575,7 +575,7 @@ export function ConfigTab({
               <input
                 type="number"
                 min={64}
-                max={4096}
+                max={16384}
                 value={numberValue('tool_max_tokens', 2048)}
                 onChange={e => updateRuntime({ tool_max_tokens: Number(e.target.value) })}
                 style={compactInputStyle}

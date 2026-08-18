@@ -83,4 +83,117 @@ describe('DevRunsTab', () => {
       expect.objectContaining({ method: 'POST', body: JSON.stringify({ goal: 'Refactor utils' }) }),
     ));
   });
+
+  it('shows an empty state in the demo showcase when nothing has been published', async () => {
+    stubFetch();
+    render(<DevRunsTab language="en" />);
+    await screen.findByText('Add a /health endpoint');
+    fireEvent.click(screen.getByRole('tab', { name: /demo showcase/i }));
+    expect(await screen.findByText(/no published demos yet/i)).toBeInTheDocument();
+  });
+
+  it('lists a published run as a showcase card linking to its demo', async () => {
+    const withDemo = { ...runningRun, demo_url: '/demo/run-abc123def456/' };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith('/api/dev-runs?')) return { ok: true, json: async () => [withDemo] };
+      if (path === `/api/dev-runs/${withDemo.id}`) return { ok: true, json: async () => { return { ...runDetails, demo_url: withDemo.demo_url }; } };
+      return { ok: true, json: async () => ({}) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<DevRunsTab language="en" />);
+    await screen.findByText('Add a /health endpoint');
+    fireEvent.click(screen.getByRole('tab', { name: /demo showcase/i }));
+    const link = await screen.findByRole('link', { name: /open demo/i });
+    expect(link.closest('a')).toHaveAttribute('href', '/demo/run-abc123def456/');
+  });
+
+  it('shows an "open demo" link in the inspector once a run has published one', async () => {
+    const withDemo = { ...runningRun, demo_url: '/demo/run-abc123def456/' };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith('/api/dev-runs?')) return { ok: true, json: async () => [withDemo] };
+      if (path === `/api/dev-runs/${withDemo.id}`) return { ok: true, json: async () => ({ ...runDetails, demo_url: withDemo.demo_url }) };
+      return { ok: true, json: async () => ({}) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<DevRunsTab language="en" />);
+    fireEvent.click(await screen.findByText('Add a /health endpoint'));
+    const link = await screen.findByRole('link', { name: /open demo/i });
+    expect(link).toHaveAttribute('href', '/demo/run-abc123def456/');
+  });
+
+  it('showcase card menu deletes the run after confirmation', async () => {
+    const withDemo = { ...runningRun, demo_url: '/demo/run-abc123def456/' };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const method = init?.method || 'GET';
+      if (path.startsWith('/api/dev-runs?')) return { ok: true, json: async () => [withDemo] };
+      if (path === `/api/dev-runs/${withDemo.id}` && method === 'DELETE') return { ok: true, json: async () => ({ status: 'deleted' }) };
+      if (path === `/api/dev-runs/${withDemo.id}`) return { ok: true, json: async () => ({ ...runDetails, demo_url: withDemo.demo_url }) };
+      return { ok: true, json: async () => ({}) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    render(<DevRunsTab language="en" />);
+    await screen.findByText('Add a /health endpoint');
+    fireEvent.click(screen.getByRole('tab', { name: /demo showcase/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /actions/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /^delete$/i }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      `/api/dev-runs/${withDemo.id}`,
+      expect.objectContaining({ method: 'DELETE' }),
+    ));
+  });
+
+  it('showcase card menu downloads the demo as a zip via an authenticated fetch', async () => {
+    // window.open() would bypass the app's fetch-based auth interceptor (see
+    // utils.tsx), so the download must go through fetch + a blob link instead
+    // of a raw navigation — this pins that behavior.
+    const withDemo = { ...runningRun, demo_url: '/demo/run-abc123def456/' };
+    const fakeBlob = { size: 3 } as Blob;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith('/api/dev-runs?')) return { ok: true, json: async () => [withDemo] };
+      if (path === `/api/dev-runs/${withDemo.id}/download`) return { ok: true, blob: async () => fakeBlob };
+      if (path === `/api/dev-runs/${withDemo.id}`) return { ok: true, json: async () => ({ ...runDetails, demo_url: withDemo.demo_url }) };
+      return { ok: true, json: async () => ({}) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('URL', { ...URL, createObjectURL: vi.fn(() => 'blob:fake'), revokeObjectURL: vi.fn() });
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    render(<DevRunsTab language="en" />);
+    await screen.findByText('Add a /health endpoint');
+    fireEvent.click(screen.getByRole('tab', { name: /demo showcase/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /actions/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /^download$/i }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(`/api/dev-runs/${withDemo.id}/download`));
+    await waitFor(() => expect(clickSpy).toHaveBeenCalled());
+  });
+
+  it('showcase card menu "refine" switches to the run in the Runs tab', async () => {
+    const withDemo = { ...runningRun, demo_url: '/demo/run-abc123def456/' };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith('/api/dev-runs?')) return { ok: true, json: async () => [withDemo] };
+      if (path === `/api/dev-runs/${withDemo.id}`) return { ok: true, json: async () => ({ ...runDetails, demo_url: withDemo.demo_url }) };
+      return { ok: true, json: async () => ({}) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<DevRunsTab language="en" />);
+    await screen.findByText('Add a /health endpoint');
+    fireEvent.click(screen.getByRole('tab', { name: /demo showcase/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /actions/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /^refine$/i }));
+
+    expect(await screen.findByRole('tab', { name: /^runs$/i })).toHaveAttribute('aria-selected', 'true');
+    expect(await screen.findByText(/dev_write_file/)).toBeInTheDocument();
+  });
 });

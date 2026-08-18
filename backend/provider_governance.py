@@ -17,7 +17,7 @@ import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 from backend.database import DB_PATH
 from backend.mcp_governance import _validate_url  # reuse the same SSRF/HTTPS guard
@@ -56,6 +56,17 @@ def _init_schema() -> None:
             )
             """
         )
+        # Optional per-provider pricing override (USD per 1M tokens). NULL on
+        # either column falls back to cost.py's model-name-substring guess —
+        # set both to get accurate billing for a provider whose actual
+        # contracted rate differs from that heuristic (see backend/cost.py).
+        existing_cols = {row[1] for row in connection.execute("PRAGMA table_info(provider_bindings)")}
+        for col in ("cost_per_1m_input", "cost_per_1m_output"):
+            if col not in existing_cols:
+                try:
+                    connection.execute(f"ALTER TABLE provider_bindings ADD COLUMN {col} REAL")
+                except sqlite3.OperationalError:
+                    pass
 
 
 def validate_binding_config(name: str, provider_type: str, api_base: str) -> dict[str, Any]:
@@ -80,11 +91,21 @@ def _binding_from_row(row: sqlite3.Row) -> dict[str, Any]:
     return item
 
 
-def create_binding_proposal(name: str, provider_type: str, api_base: str, api_key: str) -> dict[str, Any]:
+def _validate_pricing(cost_per_1m_input: Optional[float], cost_per_1m_output: Optional[float]) -> None:
+    for label, value in (("cost_per_1m_input", cost_per_1m_input), ("cost_per_1m_output", cost_per_1m_output)):
+        if value is not None and (not isinstance(value, (int, float)) or value < 0):
+            raise ValueError(f"{label} must be a non-negative number, or null to use the default pricing guess")
+
+
+def create_binding_proposal(
+    name: str, provider_type: str, api_base: str, api_key: str,
+    cost_per_1m_input: Optional[float] = None, cost_per_1m_output: Optional[float] = None,
+) -> dict[str, Any]:
     _init_schema()
     validated = validate_binding_config(name, provider_type, api_base)
     if not str(api_key).strip():
         raise ValueError("api_key is required")
+    _validate_pricing(cost_per_1m_input, cost_per_1m_output)
     digest = _digest(validated)
 
     with _connect() as connection:
@@ -131,8 +152,9 @@ def create_binding_proposal(name: str, provider_type: str, api_base: str, api_ke
         connection.execute(
             """
             INSERT INTO provider_bindings
-                (id, name, provider_type, api_base, valkey_secret_key, status, config_digest, control_task_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 'awaiting_approval', ?, ?, ?, ?)
+                (id, name, provider_type, api_base, valkey_secret_key, status, config_digest, control_task_id,
+                 created_at, updated_at, cost_per_1m_input, cost_per_1m_output)
+            VALUES (?, ?, ?, ?, ?, 'awaiting_approval', ?, ?, ?, ?, ?, ?)
             """,
             (
                 binding_id,
@@ -144,6 +166,8 @@ def create_binding_proposal(name: str, provider_type: str, api_base: str, api_ke
                 task["id"],
                 now,
                 now,
+                cost_per_1m_input,
+                cost_per_1m_output,
             ),
         )
         row = connection.execute("SELECT * FROM provider_bindings WHERE id = ?", (binding_id,)).fetchone()
@@ -233,6 +257,25 @@ def resolve_binding_credentials(binding_id: str) -> tuple[str, str] | None:
     if not secret:
         return None
     return binding["api_base"], secret
+
+
+def update_binding_pricing(
+    binding_id: str, cost_per_1m_input: Optional[float], cost_per_1m_output: Optional[float],
+) -> dict[str, Any]:
+    """Sets/clears the billing-accuracy pricing override for an existing binding.
+    Plain R0 edit (no new secret, no new network surface — the governed part of
+    a binding was already approved when it was created), unlike everything else
+    in this module."""
+    _init_schema()
+    _validate_pricing(cost_per_1m_input, cost_per_1m_output)
+    if not get_binding(binding_id):
+        raise KeyError(binding_id)
+    with _connect() as connection:
+        connection.execute(
+            "UPDATE provider_bindings SET cost_per_1m_input = ?, cost_per_1m_output = ?, updated_at = ? WHERE id = ?",
+            (cost_per_1m_input, cost_per_1m_output, _now(), binding_id),
+        )
+    return get_binding(binding_id)  # type: ignore[return-value]
 
 
 def revoke_binding(binding_id: str) -> None:

@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -72,7 +73,7 @@ def governed_ok(monkeypatch):
 def test_create_run_defaults(runs_db):
     run = dev_runs.create_run("Add a hello endpoint")
     assert run["status"] == "planned"
-    assert run["iter_budget"] == 200
+    assert run["iter_budget"] == 0  # 0 = unlimited; only an explicit cap pauses a run
     assert run["iter_used"] == 0
     assert run["trace_id"].startswith("trace-")
     assert dev_runs.get_run(run["id"], with_steps=True)["steps"] == []
@@ -142,6 +143,20 @@ async def test_iteration_budget_exhaustion_pauses(runs_db, scripted_llm, templat
 
 
 @pytest.mark.asyncio
+async def test_default_run_has_no_iteration_cap(runs_db, scripted_llm, template_plan, governed_ok):
+    # Distinct arguments each time: this asserts the absence of an iteration
+    # cap, not the duplicate-action detector (which has its own tests below).
+    scripted_llm["script"] = [_llm_tool("dev_exec", {"argv": ["ls", f"dir{i}"]}) for i in range(10)] + [
+        _llm_text("DONE: finished after more than the old 200-iteration default would allow")
+    ]
+    run = dev_runs.create_run("goal")  # no iter_budget given → 0 (unlimited)
+    result = await dev_runs.process_run(run["id"])
+    assert result["status"] == "done"
+    assert result["iter_used"] == 11
+    assert result["iter_budget"] == 0
+
+
+@pytest.mark.asyncio
 async def test_cost_budget_exhaustion_pauses(runs_db, scripted_llm, template_plan, governed_ok):
     scripted_llm["script"] = [_llm_tool("dev_exec", {"argv": ["ls"]}, cost=1.0) for _ in range(10)]
     run = dev_runs.create_run("goal", cost_budget=1.5)
@@ -173,9 +188,11 @@ async def test_restart_resumes_from_checkpoint_without_duplicate_steps(
     assert finished["status"] == "done"
     steps = dev_runs.get_steps(run["id"])
     seqs = [s["seq"] for s in steps]
-    assert seqs == sorted(set(seqs)) == [1, 2, 3, 4]  # no duplicates, no re-planning
-    assert [s["phase"] for s in steps] == ["plan", "act", "act", "observe"]
-    assert len([t for t, _ in governed_ok]) == 2  # tools were not re-executed
+    assert seqs == sorted(set(seqs)) == [1, 2, 3, 4, 5]  # no duplicates, no re-planning
+    # The two writes were never tested, so 'DONE:' triggers the completion
+    # verification gate before the run is allowed to close.
+    assert [s["phase"] for s in steps] == ["plan", "act", "act", "verify", "observe"]
+    assert [t for t, _ in governed_ok] == ["dev_write_file", "dev_write_file", "dev_run_tests"]
 
 
 @pytest.mark.asyncio
@@ -481,3 +498,662 @@ async def test_build_plan_llm_falls_back_to_template_after_retries(runs_db, monk
     # Deterministic template fallback keeps the same step contract.
     assert [s["id"] for s in plan["steps"]][:3] == ["discover", "implement", "verify"]
     assert autonomy.get_plan(plan["id"]) is not None
+
+
+# ── Observation replay: the executor must see real tool output ────────────────
+
+@pytest.mark.asyncio
+async def test_full_tool_output_reaches_the_next_prompt(runs_db, scripted_llm, template_plan, monkeypatch):
+    """A read has to deliver the file, not a 400-char preview of it."""
+    file_body = "def handler():\n" + "    # meaningful line\n" * 300
+
+    def fake_governed(tool_name, arguments, chat_id="default", **kwargs):
+        return json.dumps({"path": "app.py", "content": file_body})
+
+    monkeypatch.setattr(dev_runs, "execute_governed_tool", fake_governed)
+    scripted_llm["script"] = [_llm_tool("dev_read_file", {"path": "app.py"})]
+    run = dev_runs.create_run("understand app.py")
+    await dev_runs.process_run(run["id"], max_iterations=1)
+
+    step = [s for s in dev_runs.get_steps(run["id"]) if s["tool"] == "dev_read_file"][0]
+    assert len(step["result"]) > 4000
+    prompt = dev_runs._build_messages(dev_runs.get_run(run["id"]))[1]["content"]
+    assert "# meaningful line" in prompt
+    assert prompt.count("# meaningful line") > 200  # the whole body, not a preview
+    assert "DATA" in prompt  # untrusted-output framing is present
+
+
+@pytest.mark.asyncio
+async def test_observation_block_is_budget_capped(runs_db, monkeypatch):
+    monkeypatch.setattr(dev_runs, "OBSERVATION_BUDGET_CHARS", 500)
+    monkeypatch.setattr(dev_runs, "OBSERVATION_STEPS", 3)
+    run = dev_runs.create_run("goal", start=False)
+    for index in range(6):
+        dev_runs.add_step(run["id"], "act", "dev_read_file", f"read {index}",
+                          result="x" * 400 + str(index))
+    block = dev_runs._observation_block(dev_runs.get_steps(run["id"]))
+    assert len(block) < 1500
+    assert "step 6" in block and "step 1" not in block  # newest kept, oldest dropped
+
+
+# ── Loop protection ───────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_identical_action_is_refused_with_corrective_feedback(
+    runs_db, scripted_llm, template_plan, governed_ok
+):
+    scripted_llm["script"] = [_llm_tool("dev_read_file", {"path": "a.py"})] * 4 + [
+        _llm_text("DONE: gave up repeating myself")
+    ]
+    run = dev_runs.create_run("goal")
+    result = await dev_runs.process_run(run["id"])
+    assert result["status"] == "done"
+    # DUPLICATE_ACTION_LIMIT identical executions are allowed; the next is refused.
+    assert [t for t, _ in governed_ok] == ["dev_read_file"] * dev_runs.DUPLICATE_ACTION_LIMIT
+    blocked = [s for s in dev_runs.get_steps(run["id"]) if s["status"] == "blocked"]
+    assert len(blocked) == 1
+    assert "Change the approach" in blocked[0]["summary"]
+
+
+@pytest.mark.asyncio
+async def test_relentless_duplicate_action_fails_the_run(runs_db, scripted_llm, template_plan, governed_ok):
+    scripted_llm["script"] = [_llm_tool("dev_read_file", {"path": "a.py"})] * 12
+    run = dev_runs.create_run("goal")
+    result = await dev_runs.process_run(run["id"])
+    assert result["status"] == "failed"
+    assert "Loop detected" in result["status_reason"]
+    # Never executed again after the limit, and the run stops well short of 12.
+    assert len([t for t, _ in governed_ok]) == dev_runs.DUPLICATE_ACTION_LIMIT
+    assert result["iter_used"] <= dev_runs.DUPLICATE_ACTION_HARD_LIMIT + 1
+
+
+@pytest.mark.asyncio
+async def test_consecutive_failures_stop_the_run(runs_db, scripted_llm, template_plan, monkeypatch):
+    def always_fails(tool_name, arguments, chat_id="default", **kwargs):
+        return json.dumps({"error": "dev-runner is unreachable"})
+
+    monkeypatch.setattr(dev_runs, "execute_governed_tool", always_fails)
+    scripted_llm["script"] = [_llm_tool("dev_read_file", {"path": f"{i}.py"}) for i in range(20)]
+    run = dev_runs.create_run("goal")
+    result = await dev_runs.process_run(run["id"])
+    assert result["status"] == "failed"
+    assert "consecutive failing steps" in result["status_reason"]
+    assert result["iter_used"] <= dev_runs.MAX_CONSECUTIVE_FAILURES + 1
+
+
+@pytest.mark.asyncio
+async def test_hard_iteration_ceiling_pauses_even_without_a_budget(
+    runs_db, scripted_llm, template_plan, governed_ok, monkeypatch
+):
+    monkeypatch.setattr(dev_runs, "HARD_ITERATION_CAP", 4)
+    scripted_llm["script"] = [_llm_tool("dev_read_file", {"path": f"{i}.py"}) for i in range(20)]
+    run = dev_runs.create_run("goal")  # iter_budget = 0 (unlimited)
+    result = await dev_runs.process_run(run["id"])
+    assert result["status"] == "paused"
+    assert "Hard iteration ceiling" in result["status_reason"]
+    assert result["iter_used"] == 4
+
+
+@pytest.mark.asyncio
+async def test_all_tool_calls_of_one_response_are_executed(runs_db, scripted_llm, template_plan, governed_ok):
+    multi = NormalizedLLMResponse(
+        status="tool_call", provider="mock", model="mock-model",
+        tool_calls=[
+            {"function": {"name": "dev_read_file", "arguments": json.dumps({"path": "a.py"})}},
+            {"function": {"name": "dev_read_file", "arguments": json.dumps({"path": "b.py"})}},
+        ],
+        usage=LLMUsage(),
+    )
+    scripted_llm["script"] = [multi, _llm_text("DONE: read both")]
+    run = dev_runs.create_run("goal")
+    result = await dev_runs.process_run(run["id"])
+    assert result["status"] == "done"
+    assert [args["path"] for _, args in governed_ok] == ["a.py", "b.py"]
+
+
+# ── Completion verification ───────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_done_is_rejected_when_the_changes_do_not_pass_tests(
+    runs_db, scripted_llm, template_plan, monkeypatch
+):
+    governed = _GovernedWithTests([_FAILING, _PASSING])
+    monkeypatch.setattr(dev_runs, "execute_governed_tool", governed)
+    scripted_llm["script"] = [
+        _llm_tool("dev_write_file", {"path": "a.py", "content": "boom"}),
+        _llm_text("DONE: shipped it"),          # rejected — tests fail
+        _llm_tool("dev_patch", {"path": "a.py", "unified_diff": "--- fix"}),
+        _llm_text("DONE: fixed and verified"),  # accepted — tests pass
+    ]
+    run = dev_runs.create_run("write a module")
+    result = await dev_runs.process_run(run["id"])
+    assert result["status"] == "done"
+    assert governed.calls == ["dev_write_file", "dev_run_tests", "dev_patch", "dev_run_tests"]
+    rejections = [s for s in dev_runs.get_steps(run["id"])
+                  if "Completion rejected" in s["summary"]]
+    assert len(rejections) == 1
+
+
+@pytest.mark.asyncio
+async def test_done_needs_no_extra_test_run_when_the_model_already_ran_them(
+    runs_db, scripted_llm, template_plan, monkeypatch
+):
+    governed = _GovernedWithTests([_PASSING])
+    monkeypatch.setattr(dev_runs, "execute_governed_tool", governed)
+    scripted_llm["script"] = [
+        _llm_tool("dev_write_file", {"path": "a.py", "content": "ok"}),
+        _llm_tool("dev_run_tests", {"runner": "auto"}),
+        _llm_text("DONE: written and tested"),
+    ]
+    run = dev_runs.create_run("write a module")
+    result = await dev_runs.process_run(run["id"])
+    assert result["status"] == "done"
+    assert governed.calls == ["dev_write_file", "dev_run_tests"]  # not run twice
+
+
+@pytest.mark.asyncio
+async def test_done_without_changes_closes_immediately(runs_db, scripted_llm, template_plan, governed_ok):
+    scripted_llm["script"] = [
+        _llm_tool("dev_read_file", {"path": "a.py"}),
+        _llm_text("DONE: nothing needed changing"),
+    ]
+    run = dev_runs.create_run("investigate")
+    result = await dev_runs.process_run(run["id"])
+    assert result["status"] == "done"
+    assert [t for t, _ in governed_ok] == ["dev_read_file"]
+
+
+# ── Cost accounting and transient-failure recovery ────────────────────────────
+
+@pytest.mark.asyncio
+async def test_cost_is_derived_from_tokens_when_the_provider_omits_it(
+    runs_db, scripted_llm, template_plan, governed_ok, monkeypatch
+):
+    """usage.cost is never populated by llm_client, so the budget has to be fed
+    from token counts — otherwise cost_budget can never trip."""
+    monkeypatch.setattr(dev_runs, "_llm_config", lambda: {
+        "api_base": "https://api.openai.com/v1", "api_key": "k",
+        "model": "gpt-4o", "provider_options": {"provider": "openai"},
+    })
+    priced = NormalizedLLMResponse(
+        status="tool_call", provider="openai", model="gpt-4o",
+        tool_calls=[{"function": {"name": "dev_read_file", "arguments": '{"path": "a.py"}'}}],
+        usage=LLMUsage(input_tokens=200_000, output_tokens=100_000),
+    )
+    scripted_llm["script"] = [priced] * 5
+    run = dev_runs.create_run("goal", cost_budget=2.0)
+    result = await dev_runs.process_run(run["id"])
+    assert result["cost_used"] > 0
+    assert result["status"] == "paused"
+    assert "Cost budget" in result["status_reason"]
+
+
+@pytest.mark.asyncio
+async def test_transient_provider_error_is_retried_before_pausing(
+    runs_db, template_plan, governed_ok, monkeypatch
+):
+    monkeypatch.setattr(dev_runs, "LLM_RETRY_BASE_DELAY", 0.0)
+    attempts = {"n": 0}
+
+    async def flaky(**kwargs):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return NormalizedLLMResponse(status="provider_error", provider="mock", model="m",
+                                         error_message="502 upstream", usage=LLMUsage())
+        return _llm_text("DONE: recovered without a human")
+
+    monkeypatch.setattr(dev_runs, "call_llm_normalized", flaky)
+    run = dev_runs.create_run("goal")
+    result = await dev_runs.process_run(run["id"])
+    assert result["status"] == "done"
+    assert attempts["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_persistent_provider_error_still_pauses(runs_db, template_plan, governed_ok, monkeypatch):
+    monkeypatch.setattr(dev_runs, "LLM_RETRY_BASE_DELAY", 0.0)
+    calls = {"n": 0}
+
+    async def always_down(**kwargs):
+        calls["n"] += 1
+        return NormalizedLLMResponse(status="provider_error", provider="mock", model="m",
+                                     error_message="502 upstream", usage=LLMUsage())
+
+    monkeypatch.setattr(dev_runs, "call_llm_normalized", always_down)
+    run = dev_runs.create_run("goal")
+    result = await dev_runs.process_run(run["id"])
+    assert result["status"] == "paused"
+    assert calls["n"] == dev_runs.LLM_RETRY_ATTEMPTS
+
+
+# ── Approval resumes the run by itself ────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_approving_a_dev_run_task_resumes_the_run(runs_db, scripted_llm, template_plan, monkeypatch):
+    from backend import approval_dispatch
+
+    queued = {"done": False}
+
+    def governed(tool_name, arguments, chat_id="default", **kwargs):
+        if tool_name == "dev_write_file" and not queued["done"]:
+            queued["done"] = True
+            return json.dumps({"status": "awaiting_approval", "task_id": "T-1", "risk_class": "R3"})
+        return json.dumps({"status": "ok", "tool": tool_name})
+
+    monkeypatch.setattr(dev_runs, "execute_governed_tool", governed)
+    scripted_llm["script"] = [_llm_tool("dev_write_file", {"path": "a.py", "content": "1"})]
+    run = dev_runs.create_run("goal")
+    result = await dev_runs.process_run(run["id"])
+    assert result["status"] == "awaiting_approval"
+
+    # The owner approves the queued Control Plane task; the dispatcher runs the
+    # tool for real (patched here) and must hand the run back to the worker.
+    monkeypatch.setattr(control_plane, "execute_governed_tool",
+                        lambda *args, **kwargs: json.dumps({"status": "ok", "written": True}))
+    task = {"id": "T-1", "status": "approved", "requester": f"dev-run:{run['id']}",
+            "tool_name": "dev_write_file", "tool_arguments": {"path": "a.py", "content": "1"}}
+    resumed = await approval_dispatch.execute_if_ready(task)
+    assert resumed is not None
+    run_after = dev_runs.get_run(run["id"])
+    assert run_after["status"] == "running"
+    executed_step = [s for s in dev_runs.get_steps(run["id"]) if "after owner approval" in s["summary"]]
+    assert executed_step and executed_step[0]["result"]
+
+
+def test_approval_hook_ignores_non_dev_run_requesters(runs_db):
+    assert dev_runs.on_control_task_approved(
+        {"id": "T-9", "status": "approved", "requester": "chat:default", "tool_name": "x"}
+    ) is None
+
+
+# ── Metrics ───────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_metrics_report_autonomous_completion(runs_db, scripted_llm, template_plan, governed_ok):
+    scripted_llm["script"] = [_llm_text("DONE: trivial goal")]
+    autonomous = dev_runs.create_run("easy")
+    await dev_runs.process_run(autonomous["id"])
+
+    scripted_llm["script"] = [_llm_text("BLOCKED: missing credentials")]
+    blocked = dev_runs.create_run("hard")
+    await dev_runs.process_run(blocked["id"])
+
+    report = dev_runs.metrics()
+    assert report["terminal_runs"] == 2
+    assert report["task_success_rate"] == 0.5
+    assert report["autonomous_completion_rate"] == 0.5
+    assert report["by_status"] == {"done": 1, "failed": 1}
+    assert report["avg_steps"] > 0
+
+
+# ── Crash recovery ────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_crashed_iteration_is_recovered_automatically(runs_db, template_plan, governed_ok, monkeypatch):
+    monkeypatch.setattr(dev_runs, "AUTO_RECOVER_DELAY_SECONDS", 0.0)
+    crashes = {"n": 0}
+
+    async def sometimes_crashes(**kwargs):
+        crashes["n"] += 1
+        if crashes["n"] == 1:
+            raise RuntimeError("sandbox vanished mid-iteration")
+        return _llm_text("DONE: finished after recovering")
+
+    monkeypatch.setattr(dev_runs, "call_llm_normalized", sometimes_crashes)
+    run = dev_runs.create_run("goal")
+    crashed = await dev_runs.process_run(run["id"])
+    assert crashed["status"] == "paused"
+    assert crashed["status_reason"].startswith(dev_runs.AUTO_RECOVER_PREFIX)
+
+    assert dev_runs.recover_crashed_runs() == [run["id"]]
+    assert dev_runs.get_run(run["id"])["status"] == "running"
+    finished = await dev_runs.process_run(run["id"])
+    assert finished["status"] == "done"
+    assert [s["phase"] for s in dev_runs.get_steps(run["id"])].count("recover") == 1
+
+
+@pytest.mark.asyncio
+async def test_repeated_crashes_stop_asking_for_recovery(runs_db, template_plan, governed_ok, monkeypatch):
+    monkeypatch.setattr(dev_runs, "AUTO_RECOVER_DELAY_SECONDS", 0.0)
+
+    async def always_crashes(**kwargs):
+        raise RuntimeError("still broken")
+
+    monkeypatch.setattr(dev_runs, "call_llm_normalized", always_crashes)
+    run = dev_runs.create_run("goal")
+    for _ in range(dev_runs.MAX_AUTO_RECOVERIES + 2):
+        await dev_runs.process_run(run["id"])
+        dev_runs.recover_crashed_runs()
+    final = dev_runs.get_run(run["id"])
+    assert final["status"] == "paused"
+    assert "owner input needed" in final["status_reason"]
+    assert dev_runs._recovery_attempts(run["id"]) == dev_runs.MAX_AUTO_RECOVERIES
+
+
+def test_budget_pauses_are_not_auto_recovered(runs_db):
+    run = dev_runs.create_run("goal")
+    dev_runs.update_run(run["id"], status="paused", status_reason="Iteration budget exhausted (5/5)")
+    assert dev_runs.recover_crashed_runs() == []
+    assert dev_runs.get_run(run["id"])["status"] == "paused"
+
+
+def test_run_detail_payload_omits_the_full_tool_output(runs_db):
+    """The dashboard polls this endpoint; the observation blobs stay server-side."""
+    run = dev_runs.create_run("goal", start=False)
+    dev_runs.add_step(run["id"], "act", "dev_read_file", "read app.py", result="x" * 15000)
+    detail = dev_runs.get_run(run["id"], with_steps=True)
+    assert detail["steps"][0]["summary"] == "read app.py"
+    assert "result" not in detail["steps"][0]
+    assert dev_runs.get_steps(run["id"])[0]["result"] == "x" * 15000  # still there internally
+
+
+@pytest.mark.asyncio
+async def test_repeating_tests_between_edits_is_not_treated_as_a_loop(
+    runs_db, scripted_llm, template_plan, governed_ok
+):
+    """write → test → write → test is a healthy rhythm, not a duplicate loop."""
+    scripted_llm["script"] = [
+        _llm_tool("dev_write_file", {"path": "a.py", "content": "1"}),
+        _llm_tool("dev_run_tests", {"runner": "auto"}),
+        _llm_tool("dev_write_file", {"path": "b.py", "content": "2"}),
+        _llm_tool("dev_run_tests", {"runner": "auto"}),
+        _llm_tool("dev_write_file", {"path": "c.py", "content": "3"}),
+        _llm_tool("dev_run_tests", {"runner": "auto"}),
+        _llm_text("DONE: three modules, each verified"),
+    ]
+    run = dev_runs.create_run("build three modules")
+    result = await dev_runs.process_run(run["id"])
+    assert result["status"] == "done"
+    assert [t for t, _ in governed_ok].count("dev_run_tests") == 3  # none refused
+    assert not [s for s in dev_runs.get_steps(run["id"]) if s["status"] == "blocked"]
+
+
+# ── Upgrade path ─────────────────────────────────────────────────────────────
+
+def test_migration_adds_columns_to_an_existing_populated_table(tmp_path, monkeypatch):
+    """Production upgrades an existing DB in place: pre-migration rows must
+    survive and the loop must degrade gracefully on their empty observations."""
+    import sqlite3
+
+    db_path = str(tmp_path / "legacy.db")
+    legacy = sqlite3.connect(db_path)
+    legacy.executescript(
+        """
+        CREATE TABLE dev_runs (
+            id TEXT PRIMARY KEY, goal TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'planned',
+            plan_id TEXT, trace_id TEXT, iter_used INTEGER NOT NULL DEFAULT 0,
+            iter_budget INTEGER NOT NULL DEFAULT 0, cost_used REAL NOT NULL DEFAULT 0,
+            cost_budget REAL, wall_deadline TEXT, checkpoint_step TEXT,
+            status_reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE dev_run_steps (
+            id TEXT PRIMARY KEY, run_id TEXT NOT NULL, seq INTEGER NOT NULL,
+            phase TEXT NOT NULL, tool TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'done',
+            created_at TEXT NOT NULL, UNIQUE (run_id, seq)
+        );
+        INSERT INTO dev_runs VALUES
+            ('run-old', 'legacy goal', 'running', NULL, 'trace-old', 4, 0, 0, NULL, NULL,
+             '2', '', '2026-08-01T00:00:00+00:00', '2026-08-01T00:00:00+00:00');
+        INSERT INTO dev_run_steps VALUES
+            ('step-old-1', 'run-old', 1, 'plan', '', 'legacy plan', 'done', '2026-08-01T00:00:00+00:00'),
+            ('step-old-2', 'run-old', 2, 'act', 'dev_read_file', 'legacy read', 'done', '2026-08-01T00:00:00+00:00');
+        """
+    )
+    legacy.commit()
+    legacy.close()
+
+    monkeypatch.setattr(database, "DB_PATH", db_path)
+    monkeypatch.setattr(control_plane, "DB_PATH", db_path)
+    monkeypatch.setattr(dev_runs, "DB_PATH", db_path)
+    monkeypatch.setattr(autonomy, "DB_PATH", db_path)
+    database.init_db()
+
+    steps = dev_runs.get_steps("run-old")
+    assert [s["summary"] for s in steps] == ["legacy plan", "legacy read"]
+    assert steps[1]["result"] == "" and steps[1]["fingerprint"] == ""
+    # Old rows carry no observations and no fingerprints — the new logic simply
+    # sees nothing rather than misbehaving.
+    assert dev_runs._observation_block(steps) == ""
+    assert dev_runs._duplicate_count(steps, "") == 0
+    assert "legacy read" in dev_runs._build_messages(dev_runs.get_run("run-old"))[1]["content"]
+    # New steps on the same run store the new fields normally.
+    dev_runs.add_step("run-old", "act", "dev_read_file", "fresh read", result="body", fingerprint="fp1")
+    assert dev_runs.get_steps("run-old")[-1]["result"] == "body"
+    assert dev_runs.metrics()["runs_considered"] == 1
+
+
+# ── Site lineage: continuations, revisions, rollback ─────────────────────────
+# A card that builds a site is worthless if the next card cannot refine it, so
+# these cover the whole chain: the DB link, the executor context that stops a
+# continuation rebuilding from scratch, the working tree it inherits, and the
+# stable URL that survives every revision (and every deletion).
+
+@pytest.fixture()
+def previews(tmp_path, monkeypatch):
+    """Isolated previews root, so alias/snapshot tests never touch real ones."""
+    from backend import dev_sandbox
+
+    root = tmp_path / "dev-previews"
+    root.mkdir()
+    monkeypatch.setattr(dev_sandbox, "PREVIEWS_ROOT", root)
+    monkeypatch.setattr(dev_sandbox, "RUNS_ROOT", tmp_path / "dev-repo-runs")
+    return root
+
+
+def _publish_snapshot(previews_root, run_id: str, body: str = "site") -> None:
+    (previews_root / run_id).mkdir(parents=True, exist_ok=True)
+    (previews_root / run_id / "index.html").write_text(body)
+
+
+def test_continuation_joins_its_parents_chain(runs_db):
+    root = dev_runs.create_run("build a landing page")
+    second = dev_runs.create_run("make the header sticky", parent_run_id=root["id"])
+    third = dev_runs.create_run("add a pricing block", parent_run_id=second["id"])
+
+    assert root["root_run_id"] == root["id"] and root["revision"] == 1
+    assert second["parent_run_id"] == root["id"]
+    assert second["root_run_id"] == root["id"] and second["revision"] == 2
+    # Revision counts the chain, not the parent — a third card continuing the
+    # second is v3 even though its parent is v2.
+    assert third["root_run_id"] == root["id"] and third["revision"] == 3
+
+
+def test_continuation_inherits_owner_and_budgets(runs_db):
+    root = dev_runs.create_run("build a landing page", assignee_agent_id="agent-a",
+                               iter_budget=25, cost_budget=3.5)
+    inherited = dev_runs.create_run("refine it", parent_run_id=root["id"])
+    assert inherited["assignee_agent_id"] == "agent-a"
+    assert inherited["iter_budget"] == 25 and inherited["cost_budget"] == 3.5
+    # …unless the caller deliberately sets its own.
+    overridden = dev_runs.create_run("refine it harder", parent_run_id=root["id"],
+                                     assignee_agent_id="agent-b", iter_budget=5)
+    assert overridden["assignee_agent_id"] == "agent-b" and overridden["iter_budget"] == 5
+
+
+def test_continuation_of_a_missing_parent_is_refused(runs_db):
+    with pytest.raises(KeyError):
+        dev_runs.create_run("refine nothing", parent_run_id="run-doesnotexist")
+
+
+def test_continuation_context_tells_the_executor_the_code_already_exists(runs_db):
+    root = dev_runs.create_run("build a landing page")
+    dev_runs.update_run(root["id"], status="done", status_reason="published",
+                        demo_url="/demo/site-" + root["id"] + "/")
+    dev_runs.add_step(root["id"], "act", "dev_publish_demo", "published 12 files")
+    child = dev_runs.create_run("make the header sticky", parent_run_id=root["id"])
+
+    prompt = dev_runs._build_messages(dev_runs.get_run(child["id"]))[1]["content"]
+    assert "CONTINUATION" in prompt
+    assert "ALREADY CONTAINS" in prompt
+    assert "build a landing page" in prompt          # what the previous revision was for
+    assert "published 12 files" in prompt            # how it ended
+    assert "/demo/site-" in prompt                   # and where it must republish
+    # The planner sees the same context, or it would plan a greenfield build.
+    assert "CONTINUATION" in dev_runs._planning_goal(dev_runs.get_run(child["id"]))
+
+
+def test_a_root_run_carries_no_continuation_context(runs_db):
+    run = dev_runs.create_run("build a landing page")
+    assert dev_runs._continuation_context(dev_runs.get_run(run["id"])) == ""
+    assert "CONTINUATION" not in dev_runs._build_messages(dev_runs.get_run(run["id"]))[1]["content"]
+
+
+def test_lineage_marks_the_revision_the_stable_url_serves(runs_db, previews):
+    root = dev_runs.create_run("build a landing page")
+    second = dev_runs.create_run("refine it", parent_run_id=root["id"])
+    _publish_snapshot(previews, root["id"], "v1")
+    _publish_snapshot(previews, second["id"], "v2")
+    dev_runs.promote_revision(second["id"])
+
+    chain = dev_runs.lineage(root["id"])
+    assert [item["revision"] for item in chain] == [1, 2]
+    assert [item["is_live"] for item in chain] == [False, True]
+    assert all(item["has_snapshot"] for item in chain)
+    # Asking from any card in the chain returns the same chain.
+    assert [item["id"] for item in dev_runs.lineage(second["id"])] == [root["id"], second["id"]]
+
+
+def test_promote_revision_rolls_the_site_back_without_losing_the_newer_build(runs_db, previews):
+    from backend import dev_sandbox
+
+    root = dev_runs.create_run("build a landing page")
+    second = dev_runs.create_run("refine it", parent_run_id=root["id"])
+    _publish_snapshot(previews, root["id"], "v1")
+    _publish_snapshot(previews, second["id"], "v2")
+
+    dev_runs.promote_revision(second["id"])
+    alias = dev_sandbox.site_alias_path(root["id"])
+    assert (alias / "index.html").read_text() == "v2"
+
+    rolled_back = dev_runs.promote_revision(root["id"])
+    assert (alias / "index.html").read_text() == "v1"
+    assert rolled_back["demo_url"] == f"/demo/site-{root['id']}/"   # one URL for the chain
+    assert rolled_back["demo_snapshot_url"] == f"/demo/{root['id']}/"
+    # Rollback is a pointer move: the newer build is still there to return to.
+    assert (previews / second["id"] / "index.html").read_text() == "v2"
+
+
+def test_promoting_an_unpublished_revision_is_refused(runs_db, previews):
+    root = dev_runs.create_run("build a landing page")
+    with pytest.raises(FileNotFoundError):
+        dev_runs.promote_revision(root["id"])
+
+
+def test_deleting_the_live_revision_falls_back_to_a_surviving_one(runs_db, previews):
+    from backend import dev_sandbox
+
+    root = dev_runs.create_run("build a landing page")
+    second = dev_runs.create_run("refine it", parent_run_id=root["id"])
+    _publish_snapshot(previews, root["id"], "v1")
+    _publish_snapshot(previews, second["id"], "v2")
+    dev_runs.promote_revision(second["id"])
+
+    assert dev_runs.delete_run(second["id"]) is True
+    alias = dev_sandbox.site_alias_path(root["id"])
+    assert (alias / "index.html").read_text() == "v1"  # URL still serves something real
+
+    # …and when the last revision goes, the URL is retired rather than dangling.
+    dev_runs.delete_run(root["id"])
+    assert not alias.is_symlink()
+
+
+def test_deleting_a_chain_that_never_published_creates_no_site(runs_db, previews):
+    from backend import dev_sandbox
+
+    root = dev_runs.create_run("build a landing page")
+    second = dev_runs.create_run("refine it", parent_run_id=root["id"])
+    _publish_snapshot(previews, root["id"], "v1")  # snapshot on disk, never promoted
+
+    dev_runs.delete_run(second["id"])
+    assert not dev_sandbox.site_alias_path(root["id"]).exists()
+
+
+def test_deleting_a_middle_revision_keeps_the_chain_connected(runs_db, previews):
+    root = dev_runs.create_run("build a landing page")
+    second = dev_runs.create_run("refine it", parent_run_id=root["id"])
+    third = dev_runs.create_run("refine it again", parent_run_id=second["id"])
+
+    dev_runs.delete_run(second["id"])
+    # The orphan is re-parented onto its grandparent instead of pointing at a
+    # row that no longer exists (which would silently break continuations).
+    assert dev_runs.get_run(third["id"])["parent_run_id"] == root["id"]
+    assert [item["id"] for item in dev_runs.lineage(third["id"])] == [root["id"], third["id"]]
+
+
+@pytest.mark.asyncio
+async def test_the_sandbox_is_cloned_from_the_parent_run(runs_db, monkeypatch):
+    """The whole point of a continuation: it opens the previous revision's
+    working tree, not an empty repo."""
+    from backend import dev_sandbox, tools
+
+    root = dev_runs.create_run("build a landing page")
+    child = dev_runs.create_run("refine it", parent_run_id=root["id"], start=False)
+    seen = {}
+
+    async def fake_ensure(run_id, parent_run_id=None):
+        seen["run_id"], seen["parent_run_id"] = run_id, parent_run_id
+        return "http://sandbox"
+
+    monkeypatch.setattr(dev_sandbox, "ensure_sandbox", fake_ensure)
+    monkeypatch.setattr(dev_sandbox, "release_sandbox", lambda run_id: asyncio.sleep(0))
+    monkeypatch.setattr(dev_runs, "process_run", lambda run_id: asyncio.sleep(0))
+
+    await dev_runs._run_with_sandbox(child["id"])
+    assert seen == {"run_id": child["id"], "parent_run_id": root["id"]}
+
+
+def test_migration_backfills_lineage_for_pre_lineage_rows(runs_db):
+    """Rows created before lineage existed must still answer "which chain?" —
+    every code path relies on root_run_id being set."""
+    import sqlite3
+
+    conn = sqlite3.connect(runs_db)
+    conn.execute(
+        "INSERT INTO dev_runs (id, goal, status, created_at, updated_at, root_run_id) "
+        "VALUES ('run-legacy0001', 'old goal', 'done', '2026-08-01T00:00:00+00:00', "
+        "'2026-08-01T00:00:00+00:00', NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    database.init_db()
+    legacy = dev_runs.get_run("run-legacy0001")
+    assert legacy["root_run_id"] == "run-legacy0001"
+    assert legacy["revision"] == 1
+    assert [item["id"] for item in dev_runs.lineage("run-legacy0001")] == ["run-legacy0001"]
+
+
+def test_a_continuation_waits_for_the_revision_it_continues(runs_db):
+    """Cloning a working tree that is still being written to would race the
+    parent's own sandbox, so the queue holds the card instead of refusing it."""
+    import sqlite3
+
+    root = dev_runs.create_run("build a landing page")          # planned
+    child = dev_runs.create_run("refine it", parent_run_id=root["id"])
+
+    def selectable():
+        """The worker's own pick-up query (dev_runs.worker_loop)."""
+        conn = sqlite3.connect(runs_db)
+        conn.row_factory = sqlite3.Row
+        placeholders = ", ".join("?" for _ in dev_runs.ASSIGNED_BUSY_STATUSES)
+        rows = conn.execute(
+            f"""SELECT r.id FROM dev_runs r
+                WHERE r.status IN ('planned', 'running')
+                  AND (r.status <> 'planned' OR NOT EXISTS (
+                        SELECT 1 FROM dev_runs p
+                        WHERE p.id = r.parent_run_id
+                          AND p.status IN ({placeholders})))
+                ORDER BY r.created_at""",
+            dev_runs.ASSIGNED_BUSY_STATUSES,
+        ).fetchall()
+        conn.close()
+        return [row["id"] for row in rows]
+
+    assert selectable() == [root["id"]]
+    assert dev_runs.waits_for_parent(dev_runs.get_run(child["id"])) is True
+
+    dev_runs.update_run(root["id"], status="done")
+    assert selectable() == [child["id"]]
+    assert dev_runs.waits_for_parent(dev_runs.get_run(child["id"])) is False

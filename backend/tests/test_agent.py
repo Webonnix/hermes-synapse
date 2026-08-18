@@ -595,3 +595,78 @@ def test_suppress_tts(agent):
     agent.suppress_tts_sessions.add(session_id)
     assert agent.check_and_clear_suppress_tts(session_id) is True
     assert agent.check_and_clear_suppress_tts(session_id) is False
+
+
+def _selected(message):
+    from backend.agent import _select_tools_for_query
+    from backend.tools import TOOLS_SCHEMA
+    return {t["function"]["name"] for t in _select_tools_for_query(message, TOOLS_SCHEMA)}
+
+
+def test_dev_request_offers_the_whole_dev_bundle():
+    """Before the bundles existed, dev_* and git_* had no keywords at all — the
+    main agent never saw them, so "разрабатывать" was unreachable by phrasing."""
+    names = _selected("почини баг в коде и прогони тесты")
+    assert {"dev_read_file", "dev_patch", "dev_run_tests", "git_commit"} <= names
+
+
+def test_agent_management_request_offers_delegation_tools():
+    names = _selected("делегируй эту задачу агенту")
+    assert {"list_subagents", "call_subagent", "create_subagent"} <= names
+
+
+def test_google_phrasings_reach_web_search():
+    for message in ("загугли что нового в Qwen", "look up the release notes"):
+        assert "web_search" in _selected(message), message
+
+
+def test_plain_chat_still_selects_no_tool():
+    assert _selected("Привет, как настроение?") == set()
+
+
+def test_no_think_is_dropped_when_thinking_is_enabled():
+    """`/no_think` next to ollama_think='medium' fought the owner's own setting
+    and stripped the planning that tool chains need."""
+    from backend.agent import _local_model_system_hint
+
+    off = _local_model_system_hint("qwen-quality:latest", "http://hermes-ollama:11434", "false")
+    assert "/no_think" in off
+
+    on = _local_model_system_hint("qwen-quality:latest", "http://hermes-ollama:11434", "medium")
+    assert on and "/no_think" not in on
+
+    # Non-qwen and remote endpoints are untouched, as before.
+    assert _local_model_system_hint("hermes-brain:latest", "http://hermes-ollama:11434", "medium") == ""
+    assert _local_model_system_hint("qwen/qwen3-max", "https://openrouter.ai/api/v1", "medium") == ""
+
+
+def test_runtime_config_allows_a_larger_answer_budget(agent):
+    agent.update_runtime_config(max_tokens=12000, tool_max_tokens=12000)
+    assert agent.max_tokens == 12000
+    assert agent.tool_max_tokens == 12000
+    agent.update_runtime_config(max_tokens=99999)
+    assert agent.max_tokens == 16384
+
+
+def test_code_requests_stay_on_the_owner_agent():
+    """Subagents have no dev_*/git_* tools, so a code request must not be routed
+    to the research/orchestrator path just because it also sounds analytical."""
+    from backend.agent import _keyword_route
+    assert _keyword_route("проанализируй код в проекте") == "direct"
+    assert _keyword_route("почини баг и закоммить") == "direct"
+    # Non-code analysis is untouched.
+    assert _keyword_route("сравни Bitcoin и Ethereum") == "orchestrate"
+
+
+def test_work_discipline_only_covers_the_tools_on_the_turn():
+    from backend.agent import _work_discipline
+
+    weather = _work_discipline({"get_weather", "get_current_time_israel"})
+    assert "git_commit" not in weather and "call_subagent" not in weather
+    assert "Многошаговую задачу" in weather
+
+    dev = _work_discipline({"dev_patch", "dev_run_tests"})
+    assert "dev_run_tests" in dev and "call_subagent" not in dev
+
+    delegation = _work_discipline({"call_subagent"})
+    assert "call_subagent" in delegation

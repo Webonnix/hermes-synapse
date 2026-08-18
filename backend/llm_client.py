@@ -25,6 +25,7 @@ modules do not create an import cycle.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import random
@@ -32,7 +33,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 import httpx
 
@@ -52,6 +53,12 @@ STATUS_PARSE_ERROR = "parse_error"
 _RETRYABLE_STATUSES = {STATUS_TIMEOUT, STATUS_PROVIDER_ERROR}
 # HTTP statuses that are worth retrying.
 _RETRYABLE_HTTP = {408, 409, 425, 429, 500, 502, 503, 504}
+
+# Marks a message dict as already having passed through the redaction gateway
+# (see call_llm_normalized) — value is that message's placeholder->secret
+# mapping (possibly {}), so a later call in the same tool loop can skip the
+# local-model confirmation pass entirely instead of re-scanning history.
+_REDACTION_MARK = "_hermes_redaction_map"
 
 
 @dataclass
@@ -88,6 +95,14 @@ class NormalizedLLMResponse:
     request_id: Optional[str] = None
     usage: LLMUsage = field(default_factory=LLMUsage)
     latency_ms: Optional[int] = None
+    # Pure decode time reported by the provider (Ollama's eval_duration), with
+    # prompt processing and model load excluded. latency_ms is the wall time of
+    # the whole HTTP request, so tokens ÷ latency understates the rate the model
+    # actually sustained — on a 3k-token prompt by more than half.
+    eval_ms: Optional[int] = None
+    # Time the provider spent ingesting the prompt (Ollama's
+    # prompt_eval_duration) — the other half of "why did that take 9 seconds".
+    prompt_ms: Optional[int] = None
     retry_count: int = 0
     raw_response_available: bool = False
     # Human-safe, non-sensitive error summary (never contains secrets/bodies).
@@ -361,6 +376,82 @@ def normalize_openai_response(
     return resp
 
 
+# Never let per-agent settings rewrite what the caller is actually asking for.
+_PROTECTED_PAYLOAD_KEYS = frozenset({"model", "messages", "tools", "stream"})
+
+# "invalid temperature: only 1 is allowed", {"param": "top_p"}, "Unsupported
+# parameter: 'seed'" — the wording differs per gateway, the field name does not.
+_REFUSED_PARAM_PATTERNS = (
+    re.compile(r"invalid\s+([a-z_]+)", re.I),
+    re.compile(r"unsupported\s+parameter[:\s]+'?\"?([a-z_]+)", re.I),
+    re.compile(r"\"param\"\s*:\s*\"([a-z_]+)\""),
+)
+
+
+# Remembered per (endpoint, model) for the life of the process. Retrying is not
+# enough on its own: an upstream that rejects a parameter also tends to punish
+# the rejected request (kimi answers the retry with "reset after 30s"), so the
+# same mistake must not be repeated on the next message.
+_REFUSED_PARAMS: Dict[str, Set[str]] = {}
+
+
+def _refusal_key(api_base: str, model: str) -> str:
+    return f"{(api_base or '').rstrip('/')}|{model}"
+
+
+def remembered_refusals(api_base: str, model: str) -> Set[str]:
+    return set(_REFUSED_PARAMS.get(_refusal_key(api_base, model), ()))
+
+
+def _remember_refusal(api_base: str, model: str, param: str) -> None:
+    _REFUSED_PARAMS.setdefault(_refusal_key(api_base, model), set()).add(param)
+
+
+def _refused_parameter(body: str, payload: Dict[str, Any]) -> Optional[str]:
+    """The payload field a 400 is complaining about, if it names one we actually
+    sent. Returns None for protected fields — dropping 'messages' to satisfy an
+    error message would turn a bad request into a nonsensical one."""
+    for pattern in _REFUSED_PARAM_PATTERNS:
+        match = pattern.search(body or "")
+        if not match:
+            continue
+        name = match.group(1)
+        if name in payload and name not in _PROTECTED_PAYLOAD_KEYS:
+            return name
+    return None
+
+
+def _decode_sse_frames(text: str) -> List[Dict[str, Any]]:
+    """Pull the JSON payloads out of an SSE-framed body.
+
+    Scans instead of splitting on newlines because the framing is not always
+    well-formed: 9Router glues its terminator straight onto the JSON
+    (``{...}data: [DONE]``), so there is no line break to split on. Returns
+    every decoded object in order — one for a complete completion that merely
+    carries a trailer, many for a genuine chunk stream.
+    """
+    decoder = json.JSONDecoder()
+    frames: List[Dict[str, Any]] = []
+    index = 0
+    while index < len(text):
+        if text[index] in " \r\n\t":
+            index += 1
+            continue
+        if text.startswith("data:", index):
+            index += len("data:")
+            continue
+        if text.startswith("[DONE]", index):
+            index += len("[DONE]")
+            continue
+        try:
+            value, index = decoder.raw_decode(text, index)
+        except ValueError:
+            break
+        if isinstance(value, dict):
+            frames.append(value)
+    return frames
+
+
 def normalize_stream_chunks(
     chunks: List[Dict[str, Any]], *, provider: str, model: str,
     request_id: Optional[str] = None, latency_ms: Optional[int] = None,
@@ -437,12 +528,19 @@ async def call_llm_normalized(
     client: Optional[httpx.AsyncClient] = None,
     stream_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     provider_options: Optional[Dict[str, Any]] = None,
+    extra_payload: Optional[Dict[str, Any]] = None,
+    _drop_params: Optional[Set[str]] = None,
 ) -> NormalizedLLMResponse:
     """Call the provider once (with transient-retry) and return a normalized response.
 
     This function does not run the tool loop; it performs a single logical
     completion (possibly retried on transient failure) and returns the parsed,
     normalized result. Cancellation propagates naturally via ``asyncio``.
+
+    ``extra_payload`` carries per-agent generation settings (top_p, penalties,
+    reasoning switches...) straight into the request body. ``_drop_params`` is
+    internal: the one-shot retry below re-runs the call without a parameter the
+    model refused.
     """
     from backend.agent import (  # lazy import to avoid cycle
         _sanitize_messages_for_provider,
@@ -499,6 +597,10 @@ async def call_llm_normalized(
                     latency_ms=latency,
                     retry_count=attempt,
                 )
+                if result.eval_duration:
+                    normalized.eval_ms = int(result.eval_duration / 1_000_000)
+                if result.prompt_eval_duration:
+                    normalized.prompt_ms = int(result.prompt_eval_duration / 1_000_000)
                 normalized.raw_response = None
                 normalized.raw_response_available = True
                 return normalized
@@ -534,6 +636,62 @@ async def call_llm_normalized(
     timeout = timeout if timeout is not None else get_request_timeout()
     max_retries = max_retries if max_retries is not None else get_max_retries()
 
+    # ── Mandatory redaction gateway ─────────────────────────────────────────
+    # The local Ollama model is the trust boundary: nothing leaves the box for
+    # a non-local api_base without a pass through detect_and_redact first. This
+    # runs on every single call (not once per turn), so tool outputs appended
+    # to `messages` in a later tool-loop iteration get scrubbed too, not just
+    # the turn's original user/assistant messages.
+    #
+    # A caller like agent.py's tool loop reuses the same `messages` list (and
+    # the same dict objects inside it) across many calls, appending as it
+    # goes — so without caching, message #1 would get re-sent through
+    # detect_and_redact's local-model confirmation pass on every single one of
+    # up to max_tool_iterations calls, an O(n^2) blow-up in local-model calls
+    # for one user turn. Each message dict is redacted at most once: its
+    # per-message mapping (possibly empty) is cached on the dict itself under
+    # _REDACTION_MARK, both to skip re-scanning already-clean history and so a
+    # later call can still restore a placeholder an earlier message minted,
+    # without needing a turn-scoped cache threaded through every call site.
+    # Mutating the caller's dicts in place is safe here: DB/memory persistence
+    # always uses the original text or the restored response, never this
+    # in-memory list, and each conversational turn builds its own fresh list.
+    _redaction_mapping: Dict[str, str] = {}
+    if not is_local:
+        from backend.redaction import detect_and_redact
+
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if not isinstance(content, str) or not content:
+                continue
+            cached_mapping = msg.get(_REDACTION_MARK)
+            if cached_mapping is not None:
+                _redaction_mapping.update(cached_mapping)
+                continue
+            redacted_content, mapping = await detect_and_redact(content)
+            msg["content"] = redacted_content
+            msg[_REDACTION_MARK] = mapping
+            if mapping:
+                _redaction_mapping.update(mapping)
+
+    def _restore(resp: NormalizedLLMResponse) -> NormalizedLLMResponse:
+        if not _redaction_mapping:
+            return resp
+        from backend.redaction import restore_secrets_with_mapping
+
+        if resp.content:
+            resp.content = restore_secrets_with_mapping(resp.content, _redaction_mapping)
+        if resp.reasoning:
+            resp.reasoning = restore_secrets_with_mapping(resp.reasoning, _redaction_mapping)
+        for call in resp.tool_calls or []:
+            fn = call.get("function") if isinstance(call, dict) else None
+            args = fn.get("arguments") if isinstance(fn, dict) else None
+            if isinstance(args, str) and args:
+                fn["arguments"] = restore_secrets_with_mapping(args, _redaction_mapping)
+        return resp
+
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -558,6 +716,12 @@ async def call_llm_normalized(
     # keyword-based routing in agent.py; we strip them from the payload.
     if tools and not is_local:
         payload["tools"] = tools
+
+    for key, value in (extra_payload or {}).items():
+        if key not in _PROTECTED_PAYLOAD_KEYS and value is not None:
+            payload[key] = value
+    for key in (_drop_params or set()) | remembered_refusals(api_base, model):
+        payload.pop(key, None)
 
     actual_payload = translate_to_anthropic_payload(payload) if is_openmodel else payload
 
@@ -596,6 +760,27 @@ async def call_llm_normalized(
                         "LLM provider HTTP %s (attempt %s): %s",
                         status_code, attempt, body,
                     )
+                    # Some models refuse a specific sampling parameter outright
+                    # (kimi-k3: "invalid temperature: only 1 is allowed for this
+                    # model"). That is a permanent 400 for a value the agent has
+                    # no way to know about, so drop just that field and retry
+                    # once instead of failing the whole turn.
+                    if status_code == 400 and not _drop_params:
+                        refused = _refused_parameter(response.text, actual_payload)
+                        if refused:
+                            _remember_refusal(api_base, model, refused)
+                            logger.warning(
+                                "Model %s refused parameter '%s' — retrying without it, and omitting it from now on",
+                                model, refused,
+                            )
+                            return await call_llm_normalized(
+                                api_base=api_base, api_key=api_key, model=model, messages=messages,
+                                temperature=temperature, max_tokens=max_tokens, tools=tools,
+                                timeout=timeout, max_retries=max_retries, extra_headers=extra_headers,
+                                client=client, stream_callback=stream_callback,
+                                provider_options=provider_options, extra_payload=extra_payload,
+                                _drop_params={refused},
+                            )
                     last = NormalizedLLMResponse(
                         status=STATUS_PROVIDER_ERROR, provider=provider, model=model,
                         latency_ms=latency, retry_count=attempt,
@@ -609,12 +794,28 @@ async def call_llm_normalized(
                     try:
                         raw_data = response.json()
                     except Exception:
-                        return NormalizedLLMResponse(
-                            status=STATUS_PARSE_ERROR, provider=provider, model=model,
-                            latency_ms=latency, retry_count=attempt,
-                            request_id=response.headers.get("x-request-id"),
-                            error_message="Provider response was not valid JSON.",
-                        )
+                        raw_data = None
+                    if raw_data is None:
+                        # Not everything that answers a non-streaming request
+                        # answers with bare JSON: 9Router replies HTTP 200 with
+                        # content-type text/event-stream and appends a
+                        # "data: [DONE]" trailer to an otherwise complete body.
+                        frames = _decode_sse_frames(response.text)
+                        if not frames:
+                            return NormalizedLLMResponse(
+                                status=STATUS_PARSE_ERROR, provider=provider, model=model,
+                                latency_ms=latency, retry_count=attempt,
+                                request_id=response.headers.get("x-request-id"),
+                                error_message="Provider response was not valid JSON.",
+                            )
+                        first_choice = (frames[0].get("choices") or [{}])[0]
+                        if len(frames) == 1 and isinstance(first_choice.get("message"), dict):
+                            raw_data = frames[0]  # whole completion, just SSE-wrapped
+                        else:
+                            return _restore(normalize_stream_chunks(
+                                frames, provider=provider, model=model,
+                                request_id=response.headers.get("x-request-id"), latency_ms=latency,
+                            ))
                     data = translate_to_openai_response(raw_data) if is_openmodel else raw_data
                     request_id = _extract_request_id(response, raw_data)
                     normalized = normalize_openai_response(
@@ -622,7 +823,7 @@ async def call_llm_normalized(
                         request_id=request_id, latency_ms=latency,
                         retry_count=attempt,
                     )
-                    return normalized
+                    return _restore(normalized)
 
             # Decide whether to retry this transient failure.
             if attempt < max_retries and last and last.status in _RETRYABLE_STATUSES:

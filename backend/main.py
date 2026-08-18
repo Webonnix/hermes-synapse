@@ -81,6 +81,15 @@ class SubagentUpdate(BaseModel):
     budget_usd_limit: Optional[float] = None
     budget_period: str = "monthly"
     tier_id: Optional[str] = None
+    # Additional provider_bindings ids (besides model_provider) this agent may
+    # fall back to, in priority order — see backend/agent_provider_access.py.
+    # Empty = unrestricted (legacy behavior).
+    allowed_provider_ids: List[str] = []
+    # When true, an exhausted budget degrades the agent to the free local
+    # model instead of refusing the turn outright.
+    budget_fallback_to_local: bool = False
+    # Which named project (backend/projects.py) this agent belongs to.
+    project_id: Optional[str] = None
 
 class SubagentPosition(BaseModel):
     id: str
@@ -584,6 +593,7 @@ KNOWN_API_KEYS = [
     {"key_name": "OBSIDIAN_API_KEY", "label": "Obsidian", "description": "Доступ к Obsidian Local REST API (skill obsidian_rag).", "category": "Интеграции"},
     {"key_name": "GITEA_TOKEN", "label": "Gitea", "description": "Доступ агентов к dev-репозиторию (skill git_dev).", "category": "Интеграции"},
     {"key_name": "OPENROUTER_API_KEY", "label": "OpenRouter", "description": "Облачный провайдер для основной модели, если выбран OpenRouter.", "category": "LLM"},
+    {"key_name": "ROUTER_API_KEY", "label": "AI Router (9Router)", "description": "Ключ из 9Router → Dashboard → API Keys. Используется в разделе «AI Router» только для проверки доступности и списка моделей (GET /v1/models) — квоты и usage смотрите в самом 9Router. Тот же ключ можно использовать и для провайдер-биндинга агентов через Админку → Providers.", "category": "LLM"},
     {"key_name": "NOWPAYMENTS_API_KEY", "label": "NOWPayments (API)", "description": "Выставление криптосчетов за подписки на ботов.", "category": "Биллинг"},
     {"key_name": "NOWPAYMENTS_IPN_SECRET", "label": "NOWPayments (IPN)", "description": "Секрет для проверки подписи callback-ов об оплате. Без него платежи не подтверждаются.", "category": "Биллинг"},
 ]
@@ -987,6 +997,18 @@ async def save_subagent_api(subagent: SubagentUpdate):
     # Basic slug validation for ID
     import re
     clean_id = re.sub(r'[^a-zA-Z0-9_-]', '', subagent.id).lower()
+    # Tier ceiling: a tier that forbids external providers wins over whatever
+    # the form submitted, so a save can't silently smuggle external access
+    # back in for an agent assigned to a "local only" tier (defense in depth —
+    # agent_provider_access.py enforces the same ceiling again at call time).
+    allowed_provider_ids = subagent.allowed_provider_ids
+    model_provider = subagent.model_provider
+    if subagent.tier_id:
+        from backend.agent_tiers import get_tier
+        tier = get_tier(subagent.tier_id)
+        if tier and not tier["allow_external_provider"]:
+            allowed_provider_ids = []
+            model_provider = "ollama"
     save_subagent(
         clean_id,
         subagent.name,
@@ -1001,12 +1023,15 @@ async def save_subagent_api(subagent: SubagentUpdate):
         subagent.role,
         subagent.status,
         subagent.is_enabled,
-        subagent.model_provider,
+        model_provider,
         subagent.model_type,
         subagent.model_params,
         subagent.budget_usd_limit,
         subagent.budget_period,
         subagent.tier_id,
+        allowed_provider_ids,
+        subagent.budget_fallback_to_local,
+        subagent.project_id,
     )
     return {"status": "success", "id": clean_id}
 
@@ -1088,25 +1113,40 @@ class DevRunCreateRequest(BaseModel):
     # False = land in the Kanban "Backlog" column without starting execution;
     # the board promotes it to planned via /start once dragged to "To Do".
     start: bool = True
+    # Set = this card continues that run: same product, next revision, cloned
+    # working tree and shared published URL (see dev_runs.create_run).
+    parent_run_id: str | None = None
 
 @app.post("/api/dev-runs")
 async def create_dev_run_api(request: DevRunCreateRequest):
     from backend import dev_runs
     if not request.goal.strip():
         raise HTTPException(status_code=400, detail="Goal is required")
-    kwargs: dict = {"assignee_agent_id": request.assignee_agent_id, "start": request.start}
+    kwargs: dict = {"assignee_agent_id": request.assignee_agent_id, "start": request.start,
+                    "parent_run_id": request.parent_run_id}
     if request.iter_budget is not None:
         kwargs["iter_budget"] = request.iter_budget
     if request.cost_budget is not None:
         kwargs["cost_budget"] = request.cost_budget
     if request.wall_minutes is not None:
         kwargs["wall_minutes"] = request.wall_minutes
-    return await asyncio.to_thread(dev_runs.create_run, request.goal, **kwargs)
+    try:
+        return await asyncio.to_thread(dev_runs.create_run, request.goal, **kwargs)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Parent dev-run not found")
 
 @app.get("/api/dev-runs")
 async def list_dev_runs_api(limit: int = 50):
     from backend import dev_runs
     return await asyncio.to_thread(dev_runs.list_runs, limit)
+
+# Declared before /api/dev-runs/{run_id} so "metrics" is not swallowed as a run id.
+@app.get("/api/dev-runs/metrics")
+async def dev_runs_metrics_api(limit: int = 200):
+    """Autonomy metrics: success/failure, autonomous completion, tool error and
+    verification rates across recent runs (see dev_runs.metrics)."""
+    from backend import dev_runs
+    return await asyncio.to_thread(dev_runs.metrics, limit)
 
 @app.get("/api/dev-runs/{run_id}")
 async def get_dev_run_api(run_id: str):
@@ -1115,6 +1155,30 @@ async def get_dev_run_api(run_id: str):
     if not run:
         raise HTTPException(status_code=404, detail="Dev-run not found")
     return run
+
+@app.get("/api/dev-runs/{run_id}/lineage")
+async def dev_run_lineage_api(run_id: str):
+    """Every revision of the product this card belongs to, oldest first, each
+    flagged with whether its snapshot survives and which one the stable URL
+    currently serves (see dev_runs.lineage)."""
+    from backend import dev_runs
+    try:
+        return await asyncio.to_thread(dev_runs.lineage, run_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Dev-run not found")
+
+@app.post("/api/dev-runs/{run_id}/promote")
+async def promote_dev_run_revision_api(run_id: str):
+    """Serves this revision from the product's stable /demo/site-<root>/ URL —
+    the rollback (and roll-forward) path. Reversible: snapshots are immutable
+    and this only moves a pointer."""
+    from backend import dev_runs
+    try:
+        return await asyncio.to_thread(dev_runs.promote_revision, run_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Dev-run not found")
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 @app.post("/api/dev-runs/{run_id}/pause")
 async def pause_dev_run_api(run_id: str):
@@ -1167,6 +1231,47 @@ async def assign_dev_run_api(run_id: str, request: DevRunAssignRequest):
         return await asyncio.to_thread(dev_runs.reassign_run, run_id, request.assignee_agent_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Dev-run not found")
+
+@app.delete("/api/dev-runs/{run_id}")
+async def delete_dev_run_api(run_id: str):
+    from backend import dev_runs, dev_sandbox
+    run = await asyncio.to_thread(dev_runs.get_run, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Dev-run not found")
+    if run["status"] in dev_runs.ACTIVE_STATUSES + ("paused", "awaiting_approval"):
+        try:
+            await dev_sandbox.release_sandbox(run_id)
+        except Exception:
+            logging.getLogger("hermes.main").warning("release_sandbox failed for %s during delete", run_id, exc_info=True)
+    await asyncio.to_thread(dev_runs.delete_run, run_id)
+    return {"status": "deleted"}
+
+@app.get("/api/dev-runs/{run_id}/download")
+async def download_dev_run_demo_api(run_id: str):
+    """Zips the run's published /demo/<run_id>/ output for download. 404 if
+    the run never published a demo (see tools.dev_publish_demo)."""
+    import io
+    import zipfile
+    from backend import dev_sandbox
+
+    demo_dir = dev_sandbox.PREVIEWS_ROOT / run_id
+    if not demo_dir.is_dir():
+        raise HTTPException(status_code=404, detail="No published demo for this run")
+
+    def build_zip() -> bytes:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for path in demo_dir.rglob("*"):
+                if path.is_file():
+                    archive.write(path, path.relative_to(demo_dir))
+        return buffer.getvalue()
+
+    zip_bytes = await asyncio.to_thread(build_zip)
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{run_id}-demo.zip"'},
+    )
 
 @app.get("/api/control-plane/summary")
 async def get_control_plane_summary_api(limit: int = 100):
@@ -1476,6 +1581,15 @@ class ProviderBindingRequest(BaseModel):
     provider_type: str = "openai_compatible"
     api_base: str
     api_key: str
+    # Optional billing-accuracy override, USD per 1M tokens — leave both null
+    # to keep using cost.py's model-name-substring pricing guess.
+    cost_per_1m_input: Optional[float] = None
+    cost_per_1m_output: Optional[float] = None
+
+
+class ProviderPricingRequest(BaseModel):
+    cost_per_1m_input: Optional[float] = None
+    cost_per_1m_output: Optional[float] = None
 
 @app.get("/api/mcp/servers")
 async def get_mcp_servers():
@@ -1558,6 +1672,8 @@ async def add_provider_api(binding: ProviderBindingRequest):
             binding.provider_type,
             binding.api_base,
             binding.api_key,
+            binding.cost_per_1m_input,
+            binding.cost_per_1m_output,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1579,6 +1695,357 @@ async def delete_provider_api(binding_id: str):
         raise HTTPException(status_code=404, detail="Binding not found")
     return {"status": "success", "id": binding_id}
 
+@app.put("/api/providers/{binding_id}/pricing")
+async def update_provider_pricing_api(binding_id: str, payload: ProviderPricingRequest):
+    """Sets/clears a provider's billing-accuracy pricing override — plain R0
+    edit, no new secret or network surface (see provider_governance.update_binding_pricing)."""
+    from backend.provider_governance import update_binding_pricing
+    try:
+        return await asyncio.to_thread(
+            update_binding_pricing, binding_id, payload.cost_per_1m_input, payload.cost_per_1m_output,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Binding not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/router/stats")
+async def router_stats_api():
+    """Reachability/catalog check for the optional 9Router sidecar (Admin -> AI Router).
+
+    Deliberately does NOT try to read quota or usage numbers: 9Router's own
+    docs advertise `GET /api/quota` and `GET /api/usage` as Bearer-key-
+    authenticated, but against an actual running instance both 404 — they
+    don't exist at that path/version. `/api/providers` and `/api/combos` do
+    exist, but only accept the dashboard's own session cookie, not an API
+    key, so a headless backend can't call them without a full login flow
+    against an undocumented, versionless internal API — not worth building
+    against. `GET /v1/models` (Bearer-key auth) is the one endpoint that is
+    both documented and confirmed working, so that's what this checks:
+    reachability, key validity, and the model catalog size. Real quota/usage/
+    combo detail stays a dashboard-only concern — see `dashboard_url`.
+
+    Best-effort and read-only: this never touches agent LLM routing (that's a
+    normal provider_bindings entry, same as any other openai_compatible
+    provider). Degrades gracefully — no container running or no key
+    configured just report `reachable`/`available: false` instead of
+    raising, since the sidecar is optional and off by default.
+    """
+    from backend import database as db
+
+    router_api_key = db.get_api_key("ROUTER_API_KEY") or os.getenv("ROUTER_API_KEY", "")
+    router_api_base = os.getenv("ROUTER_API_BASE", "http://9router:20128").rstrip("/")
+    dashboard_url = os.getenv("ROUTER_PUBLIC_BASE_URL", "http://localhost:20128")
+
+    if not router_api_key:
+        return {
+            "available": False,
+            "reachable": None,
+            "model_count": None,
+            "provider_count": None,
+            "sample_models": [],
+            "dashboard_url": dashboard_url,
+            "error": "ROUTER_API_KEY not configured (Settings -> API Keys -> AI Router).",
+        }
+
+    headers = {"Authorization": f"Bearer {router_api_key}"}
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{router_api_base}/v1/models", headers=headers)
+    except httpx.HTTPError as exc:
+        logger.warning("AI Router reachability check failed: %s", exc)
+        return {
+            "available": True,
+            "reachable": False,
+            "model_count": None,
+            "provider_count": None,
+            "sample_models": [],
+            "dashboard_url": dashboard_url,
+            "error": "9Router sidecar not reachable — is the '9router' container running?",
+        }
+
+    if resp.status_code != 200:
+        detail = "invalid ROUTER_API_KEY" if resp.status_code in (401, 403) else f"HTTP {resp.status_code}"
+        return {
+            "available": True,
+            "reachable": False,
+            "model_count": None,
+            "provider_count": None,
+            "sample_models": [],
+            "dashboard_url": dashboard_url,
+            "error": f"GET /v1/models failed: {detail}",
+        }
+
+    try:
+        models = resp.json().get("data") or []
+    except ValueError:
+        models = []
+    owners = {m.get("owned_by") for m in models if isinstance(m, dict) and m.get("owned_by")}
+
+    from backend.provider_governance import list_bindings
+    bindings = await asyncio.to_thread(list_bindings)
+
+    return {
+        "available": True,
+        "reachable": True,
+        "model_count": len(models),
+        "provider_count": len(owners),
+        "sample_models": [m.get("id") for m in models[:8] if isinstance(m, dict) and m.get("id")],
+        "providers": bindings,
+        "dashboard_url": dashboard_url,
+        "error": None,
+    }
+
+
+@app.get("/api/router/models")
+async def router_models_api():
+    """Full 9Router model catalog for the AI Router tab's "Добавить тир" form —
+    GET /api/router/stats only returns an 8-item sample_models preview for the
+    diagnostics panel, this is the complete list the tier form's model picker
+    needs. Catalog entries are namespaced by provider (e.g. 'kimi/kimi-k3',
+    'ds/deepseek-chat') — a tier's model_override must match one of these
+    verbatim, which a free-text field made easy to get wrong (a user typed
+    'deepseek-chat' instead of 'ds/deepseek-chat' and the tier would have
+    silently 404'd against 9Router on first use)."""
+    from backend import database as db
+
+    router_api_key = db.get_api_key("ROUTER_API_KEY") or os.getenv("ROUTER_API_KEY", "")
+    router_api_base = os.getenv("ROUTER_API_BASE", "http://9router:20128").rstrip("/")
+    if not router_api_key:
+        return {"available": False, "models": [], "error": "ROUTER_API_KEY not configured (Settings -> API Keys -> AI Router)."}
+
+    headers = {"Authorization": f"Bearer {router_api_key}"}
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{router_api_base}/v1/models", headers=headers)
+    except httpx.HTTPError as exc:
+        logger.warning("AI Router model catalog fetch failed: %s", exc)
+        return {"available": True, "models": [], "error": "9Router sidecar not reachable — is the '9router' container running?"}
+
+    if resp.status_code != 200:
+        detail = "invalid ROUTER_API_KEY" if resp.status_code in (401, 403) else f"HTTP {resp.status_code}"
+        return {"available": True, "models": [], "error": f"GET /v1/models failed: {detail}"}
+
+    try:
+        raw = resp.json().get("data") or []
+    except ValueError:
+        raw = []
+    seen: set[str] = set()
+    models = []
+    for entry in raw:
+        model_id = isinstance(entry, dict) and entry.get("id")
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        # capabilities drive the agent form's per-model settings panel (context
+        # window, output ceiling, whether reasoning can be switched off).
+        models.append({
+            "id": model_id,
+            "owned_by": entry.get("owned_by") or "",
+            "capabilities": entry.get("capabilities") if isinstance(entry.get("capabilities"), dict) else {},
+        })
+    models.sort(key=lambda m: m["id"])
+    return {"available": True, "models": models, "error": None}
+
+
+class RouterSessionCredentialRequest(BaseModel):
+    password: str
+
+
+@app.get("/api/router/session-status")
+async def router_session_status_api():
+    """Whether a 9Router dashboard session is configured/pending/active —
+    powers the combos/connections panels' setup state in the AI Router tab."""
+    from backend.router_session import is_configured, has_pending_proposal
+
+    return {
+        "configured": is_configured(),
+        "pending_task_id": has_pending_proposal(),
+    }
+
+
+@app.post("/api/router/session-credential")
+async def router_session_credential_propose_api(body: RouterSessionCredentialRequest):
+    """Stage the 9Router dashboard password behind one Telegram/dashboard
+    R3 approval — see backend/router_session.py for why this needs the same
+    governance as an external provider binding, not less."""
+    from backend.router_session import propose_router_password
+
+    try:
+        proposal = await asyncio.to_thread(propose_router_password, body.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return proposal
+
+
+@app.delete("/api/router/session-credential")
+async def router_session_credential_revoke_api():
+    from backend.router_session import revoke_router_password
+
+    await asyncio.to_thread(revoke_router_password)
+    return {"status": "success"}
+
+
+@app.get("/api/router/combos")
+async def router_combos_api():
+    """Proxies 9Router's own GET /api/combos through a backend-held dashboard
+    session — this data has no Bearer-key API, only the session-cookie one.
+    Degrades to {"available": false} rather than raising when no session is
+    configured or 9Router can't be reached, since this whole panel is optional.
+    """
+    from backend.router_session import session_request, is_configured
+
+    if not is_configured():
+        return {"available": False, "combos": None, "error": "9Router dashboard session not configured."}
+
+    resp = await session_request("GET", "/api/combos")
+    if resp is None:
+        return {"available": True, "combos": None, "error": "9Router session unavailable — check the password or container status."}
+    if resp.status_code != 200:
+        return {"available": True, "combos": None, "error": f"9Router returned HTTP {resp.status_code} for /api/combos."}
+    try:
+        data = resp.json()
+    except ValueError:
+        return {"available": True, "combos": None, "error": "9Router returned invalid JSON for /api/combos."}
+    return {"available": True, "combos": data.get("combos") if isinstance(data, dict) else data, "error": None}
+
+
+@app.get("/api/router/connections")
+async def router_connections_api():
+    """Proxies 9Router's own GET /api/providers (its connected upstream AI
+    accounts — Claude subscription, GLM key, etc.) — deliberately named
+    differently from this app's own GET /api/providers (agent provider
+    bindings), which is an unrelated concept that happens to share a name
+    with 9Router's endpoint."""
+    from backend.router_session import session_request, is_configured
+
+    if not is_configured():
+        return {"available": False, "connections": None, "error": "9Router dashboard session not configured."}
+
+    resp = await session_request("GET", "/api/providers")
+    if resp is None:
+        return {"available": True, "connections": None, "error": "9Router session unavailable — check the password or container status."}
+    if resp.status_code != 200:
+        return {"available": True, "connections": None, "error": f"9Router returned HTTP {resp.status_code} for /api/providers."}
+    try:
+        data = resp.json()
+    except ValueError:
+        return {"available": True, "connections": None, "error": "9Router returned invalid JSON for /api/providers."}
+    return {"available": True, "connections": data.get("connections") if isinstance(data, dict) else data, "error": None}
+
+
+@app.post("/api/router/bind-self")
+async def router_bind_self_api():
+    """Convenience: create a governed provider_binding pointing at the 9Router
+    sidecar itself, reusing the already-configured ROUTER_API_KEY instead of
+    making the user copy/paste it into the generic 'Add provider' form. This
+    is the only way accounts connected inside 9Router's own dashboard (see
+    /api/router/connections) become usable as a fallback-chain tier — a tier
+    always routes through one provider_binding + a model_override, never
+    directly at a 9Router-native connection. Still goes through the normal
+    single-Telegram-approval flow, same as any other binding."""
+    from backend import database as db
+    from backend.provider_governance import create_binding_proposal, list_bindings
+
+    router_api_key = db.get_api_key("ROUTER_API_KEY") or os.getenv("ROUTER_API_KEY", "")
+    if not router_api_key:
+        raise HTTPException(status_code=400, detail="ROUTER_API_KEY not configured (Settings -> API Keys -> AI Router).")
+
+    existing = await asyncio.to_thread(list_bindings)
+    if any("9router" in (b.get("api_base") or "") for b in existing):
+        raise HTTPException(status_code=409, detail="A provider binding for 9Router already exists.")
+
+    router_api_base = os.getenv("ROUTER_API_BASE", "http://9router:20128").rstrip("/") + "/v1"
+    try:
+        proposal = await asyncio.to_thread(
+            create_binding_proposal, "9Router", "openai_compatible", router_api_base, router_api_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "status": proposal["status"],
+        "binding_id": proposal["id"],
+        "task_id": proposal["control_task_id"],
+        "risk_class": "R3",
+        "message": "Binding validated. One owner approval is required before it can be used.",
+    }
+
+
+class RouterTierRequest(BaseModel):
+    label: str
+    tier_rank: int
+    kind: str = "binding"
+    provider_binding_id: Optional[str] = None
+    model_override: str = ""
+    quota_limit: Optional[int] = None
+    quota_window_hours: float = 24
+    is_active: bool = True
+
+
+@app.get("/api/router/tiers")
+async def list_router_tiers_api():
+    """The native fallback chain the local model escalates through — this is
+    Hermes's own concept, distinct from (and not fed by) 9Router's own combos,
+    which stay session-only-visible in the panel above. Each tier is annotated
+    with its live quota usage from backend/router_usage.py so the AI Router tab
+    never needs to leave this page to show a real number."""
+    from backend import router_tiers, router_usage
+
+    tiers = await asyncio.to_thread(router_tiers.list_tiers)
+    for tier in tiers:
+        tier["quota"] = router_usage.tier_quota_status(tier["id"], tier.get("quota_limit"), tier["quota_window_hours"])
+    return tiers
+
+
+@app.post("/api/router/tiers")
+async def create_router_tier_api(payload: RouterTierRequest):
+    from backend import router_tiers
+    try:
+        return await asyncio.to_thread(
+            router_tiers.create_tier,
+            payload.label, payload.tier_rank, payload.kind, payload.provider_binding_id,
+            payload.model_override, payload.quota_limit, payload.quota_window_hours, payload.is_active,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/router/tiers/{tier_id}")
+async def update_router_tier_api(tier_id: str, payload: RouterTierRequest):
+    from backend import router_tiers
+    try:
+        return await asyncio.to_thread(
+            router_tiers.update_tier, tier_id,
+            label=payload.label, tier_rank=payload.tier_rank, kind=payload.kind,
+            provider_binding_id=payload.provider_binding_id, model_override=payload.model_override,
+            quota_limit=payload.quota_limit, quota_window_hours=payload.quota_window_hours,
+            is_active=payload.is_active,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Tier not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/router/tiers/{tier_id}")
+async def delete_router_tier_api(tier_id: str):
+    from backend import router_tiers
+    await asyncio.to_thread(router_tiers.delete_tier, tier_id)
+    return {"status": "success", "id": tier_id}
+
+
+@app.get("/api/router/overview")
+async def router_overview_api():
+    """Stat-card data for the AI Router tab's header row — active chain label,
+    24h request volume, an honest 'economy' figure (share of the last 24h's
+    traffic that did NOT need the top/most-expensive tier), and provider
+    binding health. All computed from Hermes's own usage log, never from
+    9Router (which has no quota/usage API at all — see router_stats_api)."""
+    from backend import router_usage
+
+    return await asyncio.to_thread(router_usage.overview_stats)
+
 
 # ── Agent budgets, tiers, and per-agent messenger bindings ──────────────────
 
@@ -1595,6 +2062,11 @@ class AgentTierRequest(BaseModel):
     allow_messenger: bool = True
     is_active: bool = True
 
+class ProjectRequest(BaseModel):
+    name: str
+    description: str = ""
+    is_active: bool = True
+
 class AgentTelegramBindingRequest(BaseModel):
     bot_token: str
     allowed_chat_ids: List[str] = Field(default_factory=list)
@@ -1603,9 +2075,11 @@ class AgentTelegramBindingRequest(BaseModel):
 
 class AgentMatrixBindingRequest(BaseModel):
     homeserver_url: str
-    user_id: str
+    user_id: str = ""
     password: str = ""
     access_token: str = ""
+    refresh_token: str = ""
+    device_flow_id: str = ""
     allowed_room_ids: List[str] = Field(default_factory=list)
     system_prompt: str = ""
     response_mode: str = "draft"
@@ -1617,6 +2091,9 @@ class MessengerBindingUpdateRequest(BaseModel):
     default_plan_id: Optional[str] = None
     welcome_message: Optional[str] = None
     allowed_chat_ids: Optional[List[str]] = None
+    auto_reply_disclosure: Optional[str] = None
+    human_takeover_pause_minutes: Optional[int] = None
+    escalation_enabled: Optional[bool] = None
 
 class MessengerBindingReconnectRequest(BaseModel):
     """One shape covering all 5 platforms' credential fields — the endpoint reads
@@ -1629,6 +2106,8 @@ class MessengerBindingReconnectRequest(BaseModel):
     user_id: Optional[str] = None
     password: Optional[str] = None
     access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
+    device_flow_id: Optional[str] = None
     imap_host: Optional[str] = None
     imap_port: Optional[int] = None
     smtp_host: Optional[str] = None
@@ -1684,6 +2163,8 @@ async def set_agent_budget_api(agent_id: str, payload: AgentBudgetRequest):
         subagent["temperature"], subagent["role"], subagent["status"], subagent["is_enabled"],
         subagent["model_provider"], subagent["model_type"], subagent["model_params"],
         payload.budget_usd_limit, payload.budget_period, subagent.get("tier_id"),
+        subagent.get("allowed_provider_ids"), subagent.get("budget_fallback_to_local", False),
+        subagent.get("project_id"),
     )
     return {"status": "success", "id": agent_id}
 
@@ -1727,6 +2208,39 @@ async def delete_agent_tier_api(tier_id: str):
     return {"status": "success", "id": tier_id}
 
 
+@app.get("/api/projects")
+async def list_projects_api():
+    from backend.projects import list_projects
+    return await asyncio.to_thread(list_projects)
+
+@app.post("/api/projects")
+async def create_project_api(project: ProjectRequest):
+    from backend.projects import create_project
+    try:
+        return await asyncio.to_thread(create_project, project.name, project.description, project.is_active)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+@app.put("/api/projects/{project_id}")
+async def update_project_api(project_id: str, project: ProjectRequest):
+    from backend.projects import update_project
+    try:
+        return await asyncio.to_thread(
+            update_project, project_id,
+            name=project.name, description=project.description, is_active=project.is_active,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Project not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+@app.delete("/api/projects/{project_id}")
+async def delete_project_api(project_id: str):
+    from backend.projects import delete_project
+    await asyncio.to_thread(delete_project, project_id)
+    return {"status": "success", "id": project_id}
+
+
 @app.get("/api/agents/{agent_id}/telegram")
 async def list_agent_telegram_bindings_api(agent_id: str):
     from backend.agent_messenger_governance import list_telegram_bindings
@@ -1767,6 +2281,34 @@ async def list_agent_matrix_bindings_api(agent_id: str):
     from backend.agent_messenger_governance import list_matrix_bindings
     return await asyncio.to_thread(list_matrix_bindings, agent_id)
 
+class MatrixDeviceLoginRequest(BaseModel):
+    homeserver_url: str
+
+
+@app.post("/api/matrix/device-login/start")
+async def start_matrix_device_login_api(payload: MatrixDeviceLoginRequest):
+    """Begins the browser (device-code) login used by MAS-backed homeservers —
+    the only Matrix credential that renews itself instead of expiring minutes
+    after it is pasted."""
+    from backend.matrix_oauth import start_device_login
+    try:
+        return await asyncio.to_thread(start_device_login, payload.homeserver_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/matrix/device-login/{flow_id}/poll")
+async def poll_matrix_device_login_api(flow_id: str):
+    """Returns {'status': 'pending'} until the owner confirms the code in the
+    browser, then {'status': 'complete', 'user_id': ...}. The tokens themselves
+    stay server-side and are picked up by device_flow_id when the binding is created."""
+    from backend.agent_messenger_governance import poll_matrix_device_login
+    try:
+        return await asyncio.to_thread(poll_matrix_device_login, flow_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/agents/{agent_id}/matrix")
 async def create_agent_matrix_binding_api(agent_id: str, payload: AgentMatrixBindingRequest):
     """Validates a Matrix login (or access token) and creates a single-confirmation (R3) approval proposal."""
@@ -1775,8 +2317,8 @@ async def create_agent_matrix_binding_api(agent_id: str, payload: AgentMatrixBin
         proposal = await asyncio.to_thread(
             create_matrix_binding_proposal,
             agent_id, payload.homeserver_url, payload.user_id,
-            payload.password, payload.access_token, payload.allowed_room_ids,
-            payload.system_prompt, "", "", payload.response_mode,
+            payload.password, payload.access_token, payload.refresh_token, payload.device_flow_id,
+            payload.allowed_room_ids, payload.system_prompt, "", "", payload.response_mode,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1957,6 +2499,9 @@ async def update_messenger_binding_api(binding_id: str, payload: MessengerBindin
             default_plan_id=payload.default_plan_id,
             welcome_message=payload.welcome_message,
             allowed_chat_ids=payload.allowed_chat_ids,
+            auto_reply_disclosure_text=payload.auto_reply_disclosure,
+            human_takeover_pause_minutes=payload.human_takeover_pause_minutes,
+            escalation_enabled=payload.escalation_enabled,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc) or "Binding not found") from exc
@@ -2012,11 +2557,12 @@ async def reconnect_messenger_binding_api(binding_id: str, payload: MessengerBin
                 raise HTTPException(status_code=400, detail="bot_token обязателен")
             return await reconnect_discord_binding(binding_id, payload.bot_token)
         if platform == "matrix":
-            if not payload.homeserver_url or not payload.user_id:
+            if not payload.homeserver_url or not (payload.user_id or payload.device_flow_id):
                 raise HTTPException(status_code=400, detail="homeserver_url и user_id обязательны")
             return await reconnect_matrix_binding(
-                binding_id, payload.homeserver_url, payload.user_id,
+                binding_id, payload.homeserver_url, payload.user_id or "",
                 password=payload.password or "", access_token=payload.access_token or "",
+                refresh_token=payload.refresh_token or "", device_flow_id=payload.device_flow_id or "",
             )
         if platform == "slack":
             if not payload.bot_token or not payload.app_token:
@@ -2540,19 +3086,20 @@ async def get_history_sessions():
         # surface the timestamp this query already computes instead of discarding it.
         last_time_map = {r[0]: r[1] for r in session_rows}
         
-        # Fetch all custom titles and agent_ids from session_metadata
-        cursor.execute("SELECT session_id, title, agent_id FROM session_metadata")
-        metadata_map = {r[0]: {"title": r[1], "agent_id": r[2]} for r in cursor.fetchall()}
+        # Fetch all custom titles, agent_ids and project_ids from session_metadata
+        cursor.execute("SELECT session_id, title, agent_id, project_id FROM session_metadata")
+        metadata_map = {r[0]: {"title": r[1], "agent_id": r[2], "project_id": r[3]} for r in cursor.fetchall()}
         conn.close()
-        
+
         # Filter out subagents, and keep only "dashboard" and custom sessions
         user_sessions = [s for s in sessions if s not in subagent_ids and s != "dashboard" and not s.startswith("archive_")]
-        
+
         sessions_response = []
         for s in ["dashboard"] + user_sessions:
             meta = metadata_map.get(s, {})
             title = meta.get("title")
             agent_id = meta.get("agent_id")
+            project_id = meta.get("project_id")
             if not title:
                 if s == "dashboard":
                     title = "Main Terminal"
@@ -2562,6 +3109,7 @@ async def get_history_sessions():
                 "id": s,
                 "title": title,
                 "agent_id": agent_id,
+                "project_id": project_id,
                 "updated_at": last_time_map.get(s)
             })
         return sessions_response
@@ -2582,6 +3130,26 @@ async def set_session_agent(session_id: str, payload: SessionAgentPayload):
     except Exception as e:
         logger.exception(f"Failed to set session agent for {session_id}: {e}")
         return {"status": "error", "message": "Failed to set session agent. Check server logs."}
+
+class SessionProjectPayload(BaseModel):
+    project_id: Optional[str] = None
+
+@app.post("/api/history/{session_id}/project")
+async def set_session_project(session_id: str, payload: SessionProjectPayload):
+    """Updates which project (backend/projects.py) a session belongs to. A
+    null project_id clears the assignment (conversation goes back to
+    'no project')."""
+    from backend.database import save_session_metadata, get_session_title
+    try:
+        title = get_session_title(session_id) or session_id
+        # save_session_metadata treats agent_id=None as "leave unchanged" — an
+        # explicit two-step (agent unchanged, project set) call keeps that
+        # contract intact for this endpoint's one job.
+        save_session_metadata(session_id, title, project_id=payload.project_id or "")
+        return {"status": "success", "message": f"Session {session_id} project set to {payload.project_id}"}
+    except Exception as e:
+        logger.exception(f"Failed to set session project for {session_id}: {e}")
+        return {"status": "error", "message": "Failed to set session project. Check server logs."}
 
 @app.get("/api/history/{chat_id}")
 async def get_history_api(chat_id: str, limit: int = 40):
@@ -2856,6 +3424,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         "finish_reason": run_meta.get("finish_reason"),
                         "request_id": run_meta.get("request_id"),
                         "latency_ms": run_meta.get("latency_ms"),
+                        # LLM-only time, so the UI can show a generation speed that
+                        # isn't diluted by however long a tool took, and the pure
+                        # decode time the token rate is actually computed from.
+                        "generation_ms": run_meta.get("generation_ms"),
+                        "decode_ms": run_meta.get("decode_ms"),
+                        "prompt_ms": run_meta.get("prompt_ms"),
                         "input_tokens": run_meta.get("input_tokens"),
                         "output_tokens": run_meta.get("output_tokens"),
                         "tool_iterations": run_meta.get("tool_iterations"),

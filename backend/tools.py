@@ -3,6 +3,7 @@ import json
 import logging
 import asyncio
 import contextvars
+import re
 import uuid
 import httpx
 from datetime import datetime, timedelta, timezone
@@ -11,6 +12,13 @@ from typing import Dict, Any, List, Optional
 logger = logging.getLogger("hermes.tools")
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(os.getenv(key, str(default)))
+    except (TypeError, ValueError):
+        return default
+
 
 def _env(key: str) -> Optional[str]:
     """Read a secret: env var first (server .env), falling back to a
@@ -283,14 +291,7 @@ def get_weather(location: str, days_ahead: int = 0) -> str:
     if days_ahead == 0:
         # Run async OWM call from sync context
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(asyncio.run, _fetch_weather_owm(location))
-                    data = future.result(timeout=10)
-            else:
-                data = loop.run_until_complete(_fetch_weather_owm(location))
+            data = _run_async(_fetch_weather_owm(location), timeout=10)
         except Exception as e:
             data = None
             logger.error(f"Weather fetch error: {e}")
@@ -314,14 +315,7 @@ def get_weather(location: str, days_ahead: int = 0) -> str:
     else:
         # Fetch 5-day forecast
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(asyncio.run, _fetch_weather_forecast_owm(location))
-                    data = future.result(timeout=10)
-            else:
-                data = loop.run_until_complete(_fetch_weather_forecast_owm(location))
+            data = _run_async(_fetch_weather_forecast_owm(location), timeout=10)
         except Exception as e:
             data = None
             logger.error(f"Weather forecast fetch error: {e}")
@@ -642,22 +636,33 @@ async def _todoist_post(endpoint: str, token: str, payload: Dict) -> Optional[Di
         logger.warning(f"Todoist POST {endpoint} error: {e}")
         return None
 
-def _run_async(coro):
-    """Run async coro from a sync context safely."""
+def _run_async(coro, timeout: float = 15.0, *, raise_errors: bool = False):
+    """Run an async coroutine from a sync tool.
+
+    Tools are dispatched through ``asyncio.to_thread`` (backend/agent.py), so a
+    tool body runs in a worker thread that has **no** event loop — and since
+    Python 3.10 ``asyncio.get_event_loop()`` raises there instead of quietly
+    creating one. Every caller that started with ``loop = get_event_loop()``
+    therefore died with "There is no current event loop in thread 'asyncio_0'"
+    before doing any work; ``call_subagent`` failing that way is why delegation
+    looked like the model "choosing" to answer alone.
+
+    The only question that matters is whether *this* thread is already inside a
+    running loop: if it isn't, run the coroutine here; if it is, hand it to a
+    separate thread so we never re-enter the caller's loop.
+    """
     try:
         try:
-            loop = asyncio.get_event_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                return pool.submit(asyncio.run, coro).result(timeout=15)
-        return loop.run_until_complete(coro)
+            return asyncio.run(coro)
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            return pool.submit(asyncio.run, coro).result(timeout=timeout)
     except Exception as e:
         logger.error(f"_run_async error: {e}")
+        if raise_errors:
+            raise
         return None
 
 
@@ -752,6 +757,28 @@ def delete_todoist_task(task_id: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 TOOLS_SCHEMA = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_tools",
+            "description": (
+                "Ищет инструменты, которых сейчас нет в списке доступных, и активирует "
+                "найденные на оставшуюся часть задачи. Вызывайте, когда для следующего шага "
+                "нужен инструмент, которого вы не видите — например, задача начиналась как "
+                "работа с сайтом, а результат нужно сохранить в заметки."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Что нужно сделать, своими словами: 'сохранить заметку', 'календарь', 'курс акций'.",
+                    }
+                },
+                "required": ["query"],
+            },
+        }
+    },
     {
         "type": "function",
         "function": {
@@ -1450,14 +1477,11 @@ def generate_image(prompt: str, aspect_ratio: str = "1:1", style_preset: str = "
         aspect_ratio = "1:1"
 
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(asyncio.run, _call_stability_image_api(prompt, aspect_ratio, style_preset or None))
-                response = future.result(timeout=65)
-        else:
-            response = loop.run_until_complete(_call_stability_image_api(prompt, aspect_ratio, style_preset or None))
+        response = _run_async(
+            _call_stability_image_api(prompt, aspect_ratio, style_preset or None),
+            timeout=65,
+            raise_errors=True,
+        )
     except RuntimeError as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
     except Exception as e:
@@ -1777,14 +1801,13 @@ def call_subagent(subagent_id: str, query: str) -> str:
         return json.dumps({"error": f"Субагент с id '{clean_id}' не найден."}, ensure_ascii=False)
         
     try:
-        # Run the async agent respond call inside sync context
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                response = pool.submit(asyncio.run, agent_instance.respond(query, session_id=clean_id)).result(timeout=45)
-        else:
-            response = loop.run_until_complete(agent_instance.respond(query, session_id=clean_id))
+        # 45s was also too tight: a local 27B subagent with reasoning on needs
+        # minutes, and the timeout killed the delegation mid-answer.
+        response = _run_async(
+            agent_instance.respond(query, session_id=clean_id),
+            timeout=_env_float("SUBAGENT_CALL_TIMEOUT", 300.0),
+            raise_errors=True,
+        )
         return json.dumps({
             "subagent_id": clean_id,
             "query": query,
@@ -1980,62 +2003,15 @@ def execute_command(command: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# GIT DEV REPOSITORY — narrow, reversible git operations scoped to a dedicated
-# read-write clone (backend/data/dev-repo, backed by a Gitea container). Never
-# touches the read-only /workspace project mount. Unlike execute_command (R4, two
-# owner approvals), these are classified R2 in control_plane.py — a single commit
-# or push here is small-blast-radius and easy to undo (git revert / force-push).
+# GIT DEV REPOSITORY — narrow, reversible git operations. Proxied to whichever
+# dev-runner sandbox is currently active (see _dev_runner_request below), same
+# as dev_read_file/dev_write_file/etc — a dev-run's git_status/git_commit/
+# git_push must see the working tree it actually wrote to via dev_write_file,
+# not some other run's clone or the shared base repo. Classified R2 in
+# control_plane.py (not R4 like execute_command) — a single commit or push
+# here is small-blast-radius and easy to undo (git revert / force-push).
+# Definitions live after _dev_runner_request further down this file.
 # ═══════════════════════════════════════════════════════════════════════════════
-
-_DEV_REPO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "dev-repo")
-
-
-def _run_git(args: list) -> Dict[str, Any]:
-    import subprocess
-    if not os.path.isdir(os.path.join(_DEV_REPO_PATH, ".git")):
-        return {"error": "Dev repository is not initialized at backend/data/dev-repo."}
-    try:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=_DEV_REPO_PATH,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            shell=False,
-        )
-        return {
-            "exit_code": result.returncode,
-            "stdout": (result.stdout or "")[-4000:],
-            "stderr": (result.stderr or "")[-2000:],
-        }
-    except subprocess.TimeoutExpired:
-        return {"error": "Git command timed out after 30 seconds."}
-    except Exception as exc:
-        return {"error": f"Failed to run git: {exc}"}
-
-
-def git_status() -> str:
-    """Shows the working tree status of the agent's dev repository (backend/data/dev-repo)."""
-    return json.dumps(_run_git(["status", "--short", "--branch"]), ensure_ascii=False)
-
-
-def git_diff() -> str:
-    """Shows unstaged and staged changes in the agent's dev repository."""
-    return json.dumps(_run_git(["diff", "HEAD"]), ensure_ascii=False)
-
-
-def git_commit(message: str) -> str:
-    """Stages all changes and commits them in the agent's dev repository."""
-    add_result = _run_git(["add", "-A"])
-    if add_result.get("error") or add_result.get("exit_code") != 0:
-        return json.dumps({"error": "git add failed", "detail": add_result}, ensure_ascii=False)
-    commit_result = _run_git(["commit", "-m", (message or "Agent commit")[:500]])
-    return json.dumps(commit_result, ensure_ascii=False)
-
-
-def git_push() -> str:
-    """Pushes committed changes in the agent's dev repository to its Gitea remote."""
-    return json.dumps(_run_git(["push", "origin", "HEAD"]), ensure_ascii=False)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2103,6 +2079,26 @@ def dev_patch(path: str, unified_diff: str) -> str:
     return _dev_runner_request("/fs/patch", {"path": path, "unified_diff": unified_diff}, timeout=90.0)
 
 
+def git_status() -> str:
+    """Shows the working tree status of the agent's current dev-repo sandbox."""
+    return _dev_runner_request("/git/status", {})
+
+
+def git_diff() -> str:
+    """Shows unstaged and staged changes in the agent's current dev-repo sandbox."""
+    return _dev_runner_request("/git/diff", {})
+
+
+def git_commit(message: str) -> str:
+    """Stages all changes and commits them in the agent's current dev-repo sandbox."""
+    return _dev_runner_request("/git/commit", {"message": message or "Agent commit"})
+
+
+def git_push() -> str:
+    """Pushes committed changes in the agent's current dev-repo sandbox to its Gitea remote."""
+    return _dev_runner_request("/git/push", {}, timeout=60.0)
+
+
 def dev_list_dir(path: str) -> str:
     return _dev_runner_request("/fs/list", {"path": path})
 
@@ -2125,10 +2121,17 @@ DEV_PUBLISH_MAX_FILES = 5000
 
 
 def dev_publish_demo(build_dir: str) -> str:
-    """Copies a built static site (e.g. `dist/`, `build/`) out of the current
-    dev-run's own sandbox checkout into the shared preview directory nginx
-    serves at /demo/<run_id>/, and records the demo_url on the run's Kanban
-    card. Only usable from inside a dev-run (needs CURRENT_DEV_RUN_ID)."""
+    """Publishes a built static site (e.g. `dist/`, `build/`) out of the current
+    dev-run's own sandbox checkout.
+
+    Two things come out of one publish. The revision's build is copied into its
+    own immutable /demo/<run_id>/ snapshot, which never changes again and is
+    what makes rollback possible. The chain's stable /demo/site-<root>/ URL is
+    then repointed at it, so the link the owner shared for revision 1 serves
+    revision 7 without anyone re-sending it. Both land on the Kanban card
+    (demo_url = stable, demo_snapshot_url = this revision).
+
+    Only usable from inside a dev-run (needs CURRENT_DEV_RUN_ID)."""
     import shutil
 
     run_id = CURRENT_DEV_RUN_ID.get()
@@ -2147,8 +2150,15 @@ def dev_publish_demo(build_dir: str) -> str:
         return json.dumps({"error": f"'{build_dir}' is not a directory in this run's checkout."},
                           ensure_ascii=False)
 
+    # /demo/<run_id>/ is served by nginx to anyone with the URL, no auth —
+    # .git (or any other dotfile/dir at the build root) must never end up
+    # there. A build_dir of "." (the whole checkout, not a dist/ subfolder)
+    # would otherwise ship the repo's full history, including its Gitea
+    # remote URL in .git/config, to an unauthenticated static file server.
     total_bytes, total_files = 0, 0
     for path in candidate.rglob("*"):
+        if any(part.startswith(".") for part in path.relative_to(candidate).parts):
+            continue
         if path.is_file():
             total_files += 1
             total_bytes += path.stat().st_size
@@ -2163,14 +2173,36 @@ def dev_publish_demo(build_dir: str) -> str:
         if dest.exists():
             shutil.rmtree(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(candidate, dest)
+        shutil.copytree(
+            candidate, dest,
+            ignore=lambda _dir, names: [n for n in names if n.startswith(".")],
+        )
     except OSError as exc:
         return json.dumps({"error": f"Publish failed: {type(exc).__name__}: {exc}"}, ensure_ascii=False)
 
-    demo_url = f"/demo/{run_id}/"
     from backend import dev_runs
-    dev_runs.update_run(run_id, demo_url=demo_url)
-    return json.dumps({"demo_url": demo_url, "files_published": total_files}, ensure_ascii=False)
+
+    snapshot_url = f"/demo/{run_id}/"
+    # A run whose row cannot be read (or that predates lineage) is its own
+    # chain root — publishing must still succeed, never fail on bookkeeping.
+    try:
+        run = dev_runs.get_run(run_id) or {}
+    except Exception as exc:
+        logger.warning("Could not read dev-run %s while publishing: %s", run_id, exc)
+        run = {}
+    root_run_id = run.get("root_run_id") or run_id
+    demo_url = snapshot_url
+    try:
+        demo_url = dev_sandbox.point_site_alias(root_run_id, run_id)
+    except (OSError, ValueError) as exc:
+        logger.warning("Stable site URL for %s not updated (%s); serving the snapshot URL.",
+                       root_run_id, exc)
+    try:
+        dev_runs.update_run(run_id, demo_url=demo_url, demo_snapshot_url=snapshot_url)
+    except Exception as exc:
+        logger.warning("Could not record demo URLs on run %s: %s", run_id, exc)
+    return json.dumps({"demo_url": demo_url, "snapshot_url": snapshot_url,
+                       "files_published": total_files}, ensure_ascii=False)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2260,6 +2292,47 @@ def get_browser_live_frame() -> Dict[str, Any]:
 # TOOL ROUTER
 # ═══════════════════════════════════════════════════════════════════════════════
 
+MAX_DISCOVERED_TOOLS = 8
+
+
+def list_tools(query: str = "") -> str:
+    """Capability discovery: which tools exist for a described need.
+
+    The agent loop only puts keyword-matched tools in front of the model, which
+    is right for a small local model but leaves a multi-step task stuck the
+    moment step 2 needs a tool step 1 did not match. This lets the model ask,
+    and the loop activates what comes back for the rest of the turn.
+
+    Discovery is not a security boundary — execution is. Tool names are public
+    repository facts; every activated tool still passes the principal filter in
+    agent.py and the risk/approval gates in control_plane before it runs.
+    """
+    terms = [term for term in re.findall(r"[\w-]{3,}", (query or "").lower(), flags=re.UNICODE)][:12]
+    scored: List[tuple] = []
+    for schema in TOOLS_SCHEMA:
+        function = schema.get("function", {})
+        name = function.get("name", "")
+        if name == "list_tools":
+            continue
+        haystack = f"{name} {function.get('description', '')}".lower()
+        score = sum(3 if term in name.lower() else 1 for term in terms if term in haystack)
+        if score:
+            scored.append((score, name, function.get("description", "")[:200]))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    matched = [{"name": name, "description": description}
+               for _, name, description in scored[:MAX_DISCOVERED_TOOLS]]
+    return json.dumps({
+        "status": "ok",
+        "query": query,
+        "matched": matched,
+        "message": (
+            "Эти инструменты активированы и доступны для следующего вызова."
+            if matched else
+            "Подходящих инструментов нет — решайте задачу доступными средствами или объясните ограничение."
+        ),
+    }, ensure_ascii=False)
+
+
 def execute_tool(name: str, arguments: Dict[str, Any], chat_id: str = "default") -> str:
     # Arguments can contain personal data or credentials. The Control Plane stores
     # a redacted form; application logs only need the selected tool name.
@@ -2271,6 +2344,9 @@ def execute_tool(name: str, arguments: Dict[str, Any], chat_id: str = "default")
             return bcm_execute_tool(name, arguments)
         except ImportError:
             return json.dumps({"error": f"Tool '{name}' is not configured locally."}, ensure_ascii=False)
+
+    if name == "list_tools":
+        return list_tools(str(arguments.get("query", "")))
 
     if name == "get_system_stats":
         return get_system_stats()

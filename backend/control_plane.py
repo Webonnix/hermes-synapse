@@ -19,6 +19,8 @@ RISK_ORDER = {"R0": 0, "R1": 1, "R2": 2, "R3": 3, "R4": 4}
 OPEN_STATUSES = ("queued", "running", "awaiting_approval", "approved", "blocked")
 
 TOOL_RISKS = {
+    # Pure metadata lookup over the tool registry — no side effects, no data.
+    "list_tools": "R0",
     "get_system_stats": "R0",
     "diagnose_capabilities": "R0",
     "get_current_time_israel": "R0",

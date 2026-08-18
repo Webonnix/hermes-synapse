@@ -1,6 +1,53 @@
+# AI Router (9Router) dashboard, reachable at https://${ROUTER_HOSTNAME}/ — a
+# separate server block keyed on Host/SNI rather than a location prefix under
+# the main site, because 9Router is its own Next.js app: its HTML/JS reference
+# assets and API routes (/_next/..., /api/...) at absolute root paths with no
+# basePath support, so hosting it under a subpath of the main site (e.g.
+# /router/) would silently 404 half its requests — and /api/ would collide
+# outright with the main site's own backend proxy below. Same origin cert as
+# the main block; Cloudflare tolerates the CN/SAN mismatch the same way it
+# already does for the primary hostname (this deployment isn't in Strict SSL
+# mode). Only takes effect once ${ROUTER_HOSTNAME} has a DNS record pointed at
+# this origin.
+#
+# THIS BLOCK MUST NOT BE nginx's default_server: with no explicit
+# default_server marker, nginx silently makes the *first* server block for a
+# given listen socket the fallback for every non-matching Host header —
+# regardless of its own server_name — which would hijack all traffic to the
+# main site below (including plain IP access and any Host nginx doesn't
+# recognize) the moment this block appears first in the file. The main site's
+# block carries `default_server` for exactly this reason; don't remove it,
+# and don't reorder these two blocks without keeping that in mind.
 server {
     listen 80;
     listen 443 ssl;
+    ssl_certificate /etc/nginx/ssl/hermes.crt;
+    ssl_certificate_key /etc/nginx/ssl/hermes.key;
+    server_name ${ROUTER_HOSTNAME};
+
+    resolver 127.0.0.11 valid=10s;
+    set $router_upstream http://9router:20128;
+
+    location / {
+        proxy_pass $router_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 120s;
+    }
+}
+
+server {
+    # default_server: catches every Host nginx doesn't otherwise recognize
+    # (plain IP access, ROUTER_HOSTNAME before its DNS record exists, etc.)
+    # — see the comment on the AI Router server block above for why this
+    # must stay explicit rather than relying on file order.
+    listen 80 default_server;
+    listen 443 ssl default_server;
     ssl_certificate /etc/nginx/ssl/hermes.crt;
     ssl_certificate_key /etc/nginx/ssl/hermes.key;
     server_name _;
@@ -88,7 +135,18 @@ server {
         proxy_pass $ollama_upstream;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
-        proxy_read_timeout 300s;
+        # The model's window is 262144 tokens, which is roughly 1 MB of JSON —
+        # exactly nginx's default body limit, so long prompts were silently
+        # 413ing here and capping usable context at ~65k tokens. Vision
+        # requests carry base64 images on top of that.
+        client_max_body_size 256m;
+        # Without this every prompt over 16k gets spooled to /var/cache/nginx
+        # first ("a client request body is buffered to a temporary file").
+        client_body_buffer_size 2m;
+        # Prompt processing of a full 256k context runs ~145 s before the first
+        # token, and thinking adds more; 300 s cut those requests off.
+        proxy_read_timeout 900s;
+        proxy_send_timeout 900s;
     }
 
     # Kanban dev-run demo previews — static files only, no proxying, so the

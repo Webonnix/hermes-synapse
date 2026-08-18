@@ -156,14 +156,33 @@ class AgentEmailChannelManager:
             return
 
         sender = _sender_address(msg)
-        allowed = self._allowed_senders.get(binding_id) or []
-        if allowed and sender not in allowed:
-            logger.info("Agent email channel %s: ignoring message from non-allow-listed sender %s", binding_id, sender)
-            return  # left unseen deliberately — an owner reviewing the inbox should still notice it
-
         body = _extract_body(msg)
         if not body:
             await asyncio.to_thread(self._mark_seen, credentials, uid)
+            return
+
+        subject = _decode_header_value(msg.get("Subject", ""))
+        message_id = msg.get("Message-ID", "")
+        references = msg.get("References", "")
+
+        from backend import bot_access_gate
+
+        # The subject line matters here: people paste an access token into the
+        # subject as often as into the body, so the gate sees both.
+        decision = await asyncio.to_thread(
+            bot_access_gate.authorize, binding_id, "email", sender, f"{subject}\n{body}", sender, sender,
+        )
+        if decision.action == bot_access_gate.IGNORE:
+            logger.info("Agent email channel %s: ignoring message from %s", binding_id, sender)
+            return  # left unseen deliberately — an owner reviewing the inbox should still notice it
+        if decision.action == bot_access_gate.REPLY:
+            try:
+                await asyncio.to_thread(
+                    self._send_smtp, credentials, sender, subject, decision.reply_text, message_id, references,
+                )
+                await asyncio.to_thread(self._mark_seen, credentials, uid)
+            except Exception:
+                logger.exception("Agent email channel %s: failed to send the access reply", binding_id)
             return
 
         from backend.database import get_subagent
@@ -174,26 +193,29 @@ class AgentEmailChannelManager:
 
         from backend.agent_messenger_governance import apply_binding_overrides
         subagent = apply_binding_overrides(subagent, self._overrides.get(binding_id))
+        subagent = bot_access_gate.apply_subscriber_context(subagent, decision)
 
         from backend.agent import agent_instance
 
-        session_id = f"emailchannel:{binding_id}:{sender}"
+        session_id = decision.session_id or f"emailchannel:{binding_id}:{sender}"
         try:
             response_text = await agent_instance._respond_as_subagent(body, subagent, chat_id=session_id)
         except Exception:
             logger.exception("Agent email channel %s: error generating reply", binding_id)
+            bot_access_gate.record_turn(decision, agent_instance.last_run_metadata.get(session_id), "")
             return
+        bot_access_gate.record_turn(
+            decision, agent_instance.last_run_metadata.get(session_id), response_text
+        )
 
-        subject = _decode_header_value(msg.get("Subject", ""))
-        message_id = msg.get("Message-ID", "")
-        references = msg.get("References", "")
-
-        mode = self._response_modes.get(binding_id, "draft")
+        mode = bot_access_gate.effective_response_mode(
+            decision, self._response_modes.get(binding_id, "draft")
+        )
         if mode == "auto_labeled":
-            from backend.agent_messenger_governance import AUTO_REPLY_DISCLOSURE
+            from backend.agent_messenger_governance import auto_reply_disclosure
             try:
                 await asyncio.to_thread(
-                    self._send_smtp, credentials, sender, subject, response_text + AUTO_REPLY_DISCLOSURE,
+                    self._send_smtp, credentials, sender, subject, response_text + auto_reply_disclosure(binding_id),
                     message_id, references,
                 )
             except Exception:

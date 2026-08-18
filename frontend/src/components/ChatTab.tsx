@@ -20,7 +20,7 @@ import {
   FileText,
   X as XIcon
 } from 'lucide-react';
-import type { ChatMessage, SystemConfig, ChatSession } from '../types';
+import type { ChatMessage, SystemConfig, ChatSession, Project } from '../types';
 import { styles } from '../styles';
 import { renderMarkdown } from '../utils';
 
@@ -67,8 +67,10 @@ interface ChatTabProps {
   onRetryLast?: () => void;
   hasLastUserMessage?: boolean;
   onChangeModel?: () => void;
-  subagents?: Array<{ id: string; name: string; agent_type?: string }>;
+  subagents?: Array<{ id: string; name: string; agent_type?: string; project_id?: string | null }>;
   handleSetSessionAgent?: (sessionId: string, agentId: string) => void;
+  projects?: Project[];
+  handleSetSessionProject?: (sessionId: string, projectId: string) => void;
   /** Latest dev-run event (when a dev-run was launched from this dialog) —
    * renders a compact status card above the message stream. */
   activeDevRun?: { run_id: string; status: string; event: string; summary: string } | null;
@@ -113,6 +115,8 @@ export function ChatTab({
   onChangeModel,
   subagents = [],
   handleSetSessionAgent = () => undefined,
+  projects = [],
+  handleSetSessionProject = () => undefined,
   activeDevRun = null,
   onOpenDevRuns
 }: ChatTabProps) {
@@ -216,32 +220,62 @@ export function ChatTab({
             </span>
           </div>
 
-          {/* Active Session Orchestrator Selector */}
-          {currentChatId !== 'dashboard' && !subagents.some(a => a.id === currentChatId) && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginLeft: '8px', background: 'rgba(255, 255, 255, 0.02)', padding: '6px 12px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.06)' }}>
-              <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>ORCHESTRATOR:</span>
-              <select
-                value={chatSessions.find(s => s.id === currentChatId)?.agent_id || 'jarvis'}
-                onChange={(e) => handleSetSessionAgent(currentChatId, e.target.value)}
-                style={{
-                  background: 'transparent',
-                  border: 'none',
-                  color: 'var(--accent-cyan)',
-                  fontSize: '0.78rem',
-                  fontWeight: 600,
-                  outline: 'none',
-                  cursor: 'pointer'
-                }}
-              >
-                <option value="jarvis" style={{ background: '#0b0f19', color: '#fff' }}>Vexa (Main)</option>
-                {subagents.map(a => (
-                  <option key={a.id} value={a.id} style={{ background: '#0b0f19', color: '#fff' }}>
-                    {a.name} ({a.agent_type === 'orchestrator' || a.agent_type === 'sub-orchestrator' ? 'Orchestrator' : 'Agent'})
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
+          {/* Active Session Project + Orchestrator Selectors */}
+          {currentChatId !== 'dashboard' && !subagents.some(a => a.id === currentChatId) && (() => {
+            const activeProjectId = chatSessions.find(s => s.id === currentChatId)?.project_id || '';
+            // A project narrows which agents make sense here — once one is
+            // picked, only agents assigned to it (plus Vexa, always
+            // available) show up in the orchestrator dropdown below.
+            const scopedSubagents = activeProjectId ? subagents.filter(a => a.project_id === activeProjectId) : subagents;
+            return (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginLeft: '8px', background: 'rgba(255, 255, 255, 0.02)', padding: '6px 12px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.06)' }}>
+                  <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>PROJECT:</span>
+                  <select
+                    value={activeProjectId}
+                    onChange={(e) => handleSetSessionProject(currentChatId, e.target.value)}
+                    style={{
+                      background: 'transparent',
+                      border: 'none',
+                      color: 'var(--accent-cyan)',
+                      fontSize: '0.78rem',
+                      fontWeight: 600,
+                      outline: 'none',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <option value="" style={{ background: '#0b0f19', color: '#fff' }}>— No project —</option>
+                    {projects.map(p => (
+                      <option key={p.id} value={p.id} style={{ background: '#0b0f19', color: '#fff' }}>{p.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginLeft: '8px', background: 'rgba(255, 255, 255, 0.02)', padding: '6px 12px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.06)' }}>
+                  <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>ORCHESTRATOR:</span>
+                  <select
+                    value={chatSessions.find(s => s.id === currentChatId)?.agent_id || 'jarvis'}
+                    onChange={(e) => handleSetSessionAgent(currentChatId, e.target.value)}
+                    style={{
+                      background: 'transparent',
+                      border: 'none',
+                      color: 'var(--accent-cyan)',
+                      fontSize: '0.78rem',
+                      fontWeight: 600,
+                      outline: 'none',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <option value="jarvis" style={{ background: '#0b0f19', color: '#fff' }}>Vexa (Main)</option>
+                    {scopedSubagents.map(a => (
+                      <option key={a.id} value={a.id} style={{ background: '#0b0f19', color: '#fff' }}>
+                        {a.name} ({a.agent_type === 'orchestrator' || a.agent_type === 'sub-orchestrator' ? 'Orchestrator' : 'Agent'})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </>
+            );
+          })()}
 
           {/* TTS speaking pulse indicator */}
           {isSpeaking && (

@@ -34,6 +34,11 @@ class OllamaChatResult:
     completion_tokens: Optional[int] = None
     total_duration: Optional[int] = None
     load_duration: Optional[int] = None
+    # Nanoseconds spent generating (decode) and ingesting the prompt, straight
+    # from Ollama. eval_duration excludes prompt processing and model load, so
+    # eval_count / eval_duration is the token rate the model actually sustained.
+    eval_duration: Optional[int] = None
+    prompt_eval_duration: Optional[int] = None
 
 
 def normalize_ollama_base_url(value: Optional[str] = None) -> str:
@@ -298,6 +303,13 @@ class OllamaClient:
         if max_tokens is not None:
             options["num_predict"] = max_tokens
         options["num_ctx"] = num_ctx or int(os.getenv("OLLAMA_NUM_CTX", "8192"))
+        # Prefill batch. Measured on 2x3090 with Qwen3.6-35B-A3B at 262k context:
+        # 512 -> 15.8s TTFT on a 60k prompt, 1024 -> 13.4s (+2.2 GiB VRAM),
+        # 2048 -> 12.4s (+6.5 GiB). Ollama defaults to 512 and reloads the runner
+        # when the value changes, so keep it stable across callers.
+        num_batch = os.getenv("OLLAMA_NUM_BATCH", "").strip()
+        if num_batch.isdigit():
+            options["num_batch"] = int(num_batch)
         payload: Dict[str, Any] = {
             "model": model,
             "messages": _ollama_messages(messages),
@@ -332,6 +344,8 @@ class OllamaClient:
                 completion_tokens=data.get("eval_count"),
                 total_duration=data.get("total_duration"),
                 load_duration=data.get("load_duration"),
+                eval_duration=data.get("eval_duration"),
+                prompt_eval_duration=data.get("prompt_eval_duration"),
             )
 
         owns_client = self._client is None
@@ -377,6 +391,8 @@ class OllamaClient:
                         result.completion_tokens = chunk.get("eval_count")
                         result.total_duration = chunk.get("total_duration")
                         result.load_duration = chunk.get("load_duration")
+                        result.eval_duration = chunk.get("eval_duration")
+                        result.prompt_eval_duration = chunk.get("prompt_eval_duration")
                 if not saw_done:
                     raise OllamaError("Ollama stream ended before the terminal event.", code="interrupted_stream")
                 return result

@@ -51,28 +51,33 @@ services:
       - VOICE_TTS_VOICE_EN=${VOICE_TTS_VOICE_EN:-slt}
       - VOICE_TTS_XTTS_URL=${VOICE_TTS_XTTS_URL:-http://xtts:8700}
       - VOICE_TTS_XTTS_TIMEOUT_SECONDS=${VOICE_TTS_XTTS_TIMEOUT_SECONDS:-120}
-      # backend/dev_sandbox.py talks to the HOST Docker daemon over the mounted
-      # docker.sock (sibling-container pattern) to give each parallel Kanban
-      # dev-run its own runner container, so this must be a HOST path (this
-      # container's own /app/backend/data/... view is not visible to the host
-      # daemon). ${PWD} is this compose file's directory (src/) at `docker
-      # compose up` time — override if you invoke compose from somewhere else,
-      # or on a deployment whose backend/data mount lives at a different host
-      # path (see dev_sandbox.py's docstring — this is deliberately not
-      # derived from a project-root guess).
+      # backend/dev_sandbox.py talks to the Docker daemon (via the docker-proxy
+      # sidecar below, never a raw socket — see its module docstring) to give
+      # each parallel Kanban dev-run its own runner container, so bind-mount
+      # sources must be HOST paths (this container's own /app/backend/data/...
+      # view is not visible to the daemon). ${PWD} is this compose file's
+      # directory (src/) at `docker compose up` time — override if you invoke
+      # compose from somewhere else, or on a deployment whose backend/data
+      # mount lives at a different host path (this is deliberately not derived
+      # from a project-root guess, see dev_sandbox.py).
       - DEV_SANDBOX_HOST_RUNS_ROOT=${DEV_SANDBOX_HOST_RUNS_ROOT:-${PWD}/backend/data/dev-repo-runs}
       - DEV_SANDBOX_MAX_CONCURRENT=${DEV_SANDBOX_MAX_CONCURRENT:-3}
+      # Picked up automatically by docker.from_env() in dev_sandbox.py — routes
+      # Docker API calls through the access-controlled proxy below instead of
+      # a raw socket. No /var/run/docker.sock mount on this service, ever.
+      - DOCKER_HOST=tcp://docker-proxy:2375
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./backend:/app/backend
       - ./:/workspace:ro
       - ${HERMES_ENV_FILE:-.env}:/app/.env:ro
-      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       qdrant:
         condition: service_healthy
       ollama:
+        condition: service_healthy
+      docker-proxy:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3).read()"]
@@ -84,6 +89,50 @@ services:
     networks:
       - hermes-net
       - dev-net
+      - docker-proxy-net
+
+  # Guards the real Docker socket: only this sidecar ever mounts it, and it
+  # exposes just enough of the Docker API for backend/dev_sandbox.py to
+  # create/start/stop/remove per-run containers — not exec into arbitrary
+  # containers, not volumes/swarm/secrets/plugins/builds. Reachable only from
+  # `backend`, on its own internal network; the dev-run sandboxes it manages
+  # live on `dev-net` instead and can never reach this proxy, so an
+  # agent-controlled `dev_exec` shell command inside a sandbox has no path to
+  # the Docker API even if it tried.
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:v0.4.2
+    container_name: hermes-docker-proxy
+    restart: unless-stopped
+    environment:
+      - CONTAINERS=1
+      - IMAGES=1
+      - NETWORKS=1
+      - INFO=1
+      - VERSION=1
+      - POST=1
+      - EXEC=0
+      - VOLUMES=0
+      - BUILD=0
+      - SWARM=0
+      - SERVICES=0
+      - TASKS=0
+      - NODES=0
+      - SECRETS=0
+      - CONFIGS=0
+      - PLUGINS=0
+      - SYSTEM=0
+      - DISTRIBUTION=0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:2375/version || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging: *default-logging
+    networks:
+      - docker-proxy-net
 
   dev-runner:
     build:
@@ -183,12 +232,49 @@ services:
     networks:
       - hermes-net
 
+  # AI Router / token-saver sidecar (github.com/decolua/9router). Fronts
+  # external LLM providers with an OpenAI-compatible endpoint, 3-tier
+  # fallback and tool-output token compression. Internal-only — the backend
+  # reaches it at http://9router:20128/v1 via a normal provider_bindings
+  # entry (Admin -> Providers); the redaction gateway in llm_client.py
+  # applies to every call through it exactly like any other external
+  # provider_type=openai_compatible binding. Deliberately not a backend
+  # dependency, same reasoning as xtts above.
+  9router:
+    image: decolua/9router:latest
+    container_name: hermes-9router
+    restart: unless-stopped
+    environment:
+      - PORT=20128
+      - DATA_DIR=/app/data
+      - JWT_SECRET=${ROUTER_JWT_SECRET:?Set ROUTER_JWT_SECRET in .env}
+      - INITIAL_PASSWORD=${ROUTER_INITIAL_PASSWORD:?Set ROUTER_INITIAL_PASSWORD in .env}
+      - NEXT_PUBLIC_BASE_URL=${ROUTER_PUBLIC_BASE_URL:-http://localhost:20128}
+    ports:
+      - "${ROUTER_PUBLISH_HOST:-127.0.0.1}:20128:20128"
+    volumes:
+      - router9_data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:20128/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging: *default-logging
+    networks:
+      - hermes-net
+
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: jarvis-dashboard
     restart: unless-stopped
+    environment:
+      # Must always be set — see docker-compose.yml (root) for why an unset
+      # var here is a hard nginx config parse error, not a soft failure.
+      - ROUTER_HOSTNAME=${ROUTER_HOSTNAME:-router.invalid}
+      - OLLAMA_PROXY_TOKEN=${OLLAMA_PROXY_TOKEN:-}
     ports:
       - "9119:80"
     volumes:
@@ -265,9 +351,15 @@ networks:
   dev-net:
     driver: bridge
     internal: true
+  # backend <-> docker-proxy only. Deliberately never shared with dev-net —
+  # see docker-proxy's service comment for why that separation matters.
+  docker-proxy-net:
+    driver: bridge
+    internal: true
 
 volumes:
   qdrant_data:
   ollama_data:
   xtts_models:
   xtts_speakers:
+  router9_data:

@@ -166,3 +166,52 @@ def test_obsidian_tools(mock_search_memory):
 def test_execute_command():
     res = tools.execute_command("echo hello")
     assert "hello" in res
+
+
+def test_run_async_works_in_a_worker_thread_without_a_loop():
+    """Tools are dispatched with asyncio.to_thread, so their thread has no event
+    loop. The old `asyncio.get_event_loop()` opener raised "There is no current
+    event loop in thread 'asyncio_0'" there, which is how call_subagent —
+    delegation itself — failed on every single call."""
+    import asyncio
+
+    async def work():
+        return "ok"
+
+    async def main():
+        return await asyncio.to_thread(lambda: tools._run_async(work(), raise_errors=True))
+
+    assert asyncio.run(main()) == "ok"
+
+
+def test_run_async_from_inside_a_running_loop_uses_a_separate_thread():
+    import asyncio
+
+    async def work():
+        return "ok"
+
+    async def main():
+        return tools._run_async(work(), timeout=10, raise_errors=True)
+
+    assert asyncio.run(main()) == "ok"
+
+
+def test_call_subagent_delegates_in_a_worker_thread():
+    """End-to-end shape of the delegation bug: call_subagent invoked the way the
+    agent loop invokes it must return the subagent's answer, not an error."""
+    import asyncio
+
+    async def fake_respond(query, session_id=None):
+        return f"answer for {query} from {session_id}"
+
+    with patch("backend.database.get_subagent", return_value={"id": "research", "name": "Search"}), \
+         patch("backend.agent.agent_instance") as fake_agent:
+        fake_agent.respond = fake_respond
+
+        async def main():
+            return await asyncio.to_thread(tools.call_subagent, "research", "погода в Тель-Авиве")
+
+        payload = json.loads(asyncio.run(main()))
+
+    assert "error" not in payload, payload
+    assert payload["response"] == "answer for погода в Тель-Авиве from research"

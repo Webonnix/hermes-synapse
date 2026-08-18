@@ -7,6 +7,12 @@ export interface LLMRunMeta {
   finish_reason?: string | null;
   request_id?: string | null;
   latency_ms?: number | null;
+  /** Time spent inside LLM calls only — latency_ms minus tool execution. */
+  generation_ms?: number | null;
+  /** Pure decode time from the provider (no prompt ingestion, no model load). */
+  decode_ms?: number | null;
+  /** Time the provider spent ingesting the prompt. */
+  prompt_ms?: number | null;
   input_tokens?: number | null;
   output_tokens?: number | null;
   tool_iterations?: number | null;
@@ -107,10 +113,9 @@ export interface AgentModel {
   created_at?: string;
   agent_type?: string;
   parent_id?: string | null;
-  project?: string;
-  project_id?: string;
-  project_name?: string;
-  workspace?: string;
+  // Which named project (backend/projects.py) this agent belongs to. null/
+  // unset = unassigned.
+  project_id?: string | null;
   skills?: string;
   x?: number;
   y?: number;
@@ -130,6 +135,13 @@ export interface AgentModel {
   budget_usd_limit?: number | null;
   budget_period?: 'monthly' | 'lifetime' | string;
   tier_id?: string | null;
+  // Additional provider_bindings ids (besides model_provider) this agent may
+  // fall back to, in priority order — backend/agent_provider_access.py.
+  // Empty = unrestricted (legacy behavior).
+  allowed_provider_ids?: string[];
+  // When true, an exhausted budget degrades the agent to the free local
+  // model instead of refusing the turn outright.
+  budget_fallback_to_local?: boolean;
 }
 
 // Spend vs. configured budget for one agent — backend/database.py::get_agent_budget_status.
@@ -140,6 +152,17 @@ export interface AgentBudgetStatus {
   used_usd: number;
   remaining_usd: number | null;
   exceeded: boolean;
+  by_provider: { provider_id: string; calls: number; used_usd: number }[];
+}
+
+// A named grouping a chat session and/or an agent can belong to — backend/projects.py.
+export interface Project {
+  id: string;
+  name: string;
+  description: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
 }
 
 // A named preset of feature-flag defaults an agent can be assigned to — backend/agent_tiers.py.
@@ -202,6 +225,15 @@ export interface MessengerBinding {
   access_mode: 'owner_only' | 'token' | string;
   default_plan_id?: string | null;
   welcome_message?: string | null;
+  /** Signature appended to every auto-labeled reply on this channel. Null/empty
+   * means the default "личный AI-ассистент, а не человек" wording. */
+  auto_reply_disclosure?: string | null;
+  /** Matrix-only: minutes to go silent in a DM after the owner (same account,
+   * different device) types there personally. 0 disables the behavior. */
+  human_takeover_pause_minutes?: number | null;
+  /** When true, a message that looks like it needs the owner personally gets
+   * a scripted offer to notify them, instead of the usual agent answer. */
+  escalation_enabled?: boolean;
   last_error?: string | null;
 }
 
@@ -246,6 +278,154 @@ export interface ProviderBinding {
   control_task_id?: string;
   created_at: string;
   updated_at: string;
+  // Optional billing-accuracy override, USD per 1M tokens — null on either
+  // means cost.py falls back to its model-name-substring pricing guess.
+  cost_per_1m_input?: number | null;
+  cost_per_1m_output?: number | null;
+}
+
+// Read-only reachability/catalog snapshot from the optional 9Router sidecar
+// (GET /api/router/stats) — model_count/provider_count/sample_models come
+// from GET /v1/models, the one 9Router endpoint that's both documented and
+// confirmed working with a Bearer API key. Combos and 9Router's own
+// connected accounts are read separately, through a backend-held dashboard
+// session — see RouterSessionStatus/RouterCombosResponse/
+// RouterConnectionsResponse below. Quota/usage numbers genuinely have no API
+// in this 9Router version (confirmed: every plausible path 404s regardless
+// of auth) — `dashboard_url` is the only place those are visible.
+export interface RouterStats {
+  available: boolean;
+  reachable: boolean | null;
+  model_count: number | null;
+  provider_count: number | null;
+  sample_models: string[];
+  providers?: ProviderBinding[];
+  dashboard_url: string;
+  error: string | null;
+}
+
+// GET /api/router/session-status
+export interface RouterSessionStatus {
+  configured: boolean;
+  pending_task_id: string | null;
+}
+
+// GET /api/router/models — 9Router's full model catalog, namespaced by
+// provider (e.g. 'kimi/kimi-k3', 'ds/deepseek-chat'). Powers the "Добавить
+// тир" form's model picker once a tier is bound to the 9Router provider.
+/** Passed through from 9Router's catalog, so every field is best-effort:
+ *  older entries and other gateways may omit `capabilities` entirely. */
+export interface RouterModelCapabilities {
+  vision?: boolean;
+  tools?: boolean;
+  reasoning?: boolean;
+  thinkingCanDisable?: boolean;
+  contextWindow?: number;
+  maxOutput?: number;
+}
+
+export interface RouterModel {
+  id: string;
+  owned_by: string;
+  capabilities?: RouterModelCapabilities;
+}
+export interface RouterModelsResponse {
+  available: boolean;
+  models: RouterModel[];
+  error: string | null;
+}
+
+// A single tier within a 9Router combo — shape is best-effort/defensive
+// since it's passed through from 9Router's own (undocumented) session API.
+export interface RouterComboTier {
+  model?: string;
+  provider?: string;
+  [key: string]: unknown;
+}
+
+export interface RouterCombo {
+  name?: string;
+  id?: string;
+  tiers?: RouterComboTier[];
+  models?: string[];
+  [key: string]: unknown;
+}
+
+// GET /api/router/combos
+export interface RouterCombosResponse {
+  available: boolean;
+  combos: RouterCombo[] | null;
+  error: string | null;
+}
+
+// A connected upstream account inside 9Router itself (e.g. a Claude
+// subscription or a GLM API key) — distinct from this app's own
+// ProviderBinding (an agent's binding to reach an external API, which may or
+// may not be 9Router).
+export interface RouterConnection {
+  name?: string;
+  id?: string;
+  // 9Router's actual GET /api/providers response (confirmed live) uses
+  // `provider`/`testStatus`/`isActive` — `type`/`status` are kept only as a
+  // fallback shape in case a future 9Router version renames them back.
+  provider?: string;
+  type?: string;
+  testStatus?: string;
+  isActive?: boolean;
+  status?: string;
+  // OAuth (device-code) connections carry a short-lived token — apikey ones
+  // don't expire from this side, so these are absent/null for them.
+  authType?: string;
+  expiresIn?: number;
+  lastError?: string | null;
+  [key: string]: unknown;
+}
+
+// GET /api/router/connections
+export interface RouterConnectionsResponse {
+  available: boolean;
+  connections: RouterConnection[] | null;
+  error: string | null;
+}
+
+// backend/router_usage.py's tier_quota_status() — requests-per-window is
+// tracked by Hermes itself (9Router has no quota API to read this from).
+export interface RouterTierQuota {
+  used: number;
+  limit: number | null;
+  window_hours: number;
+  resets_at: string | null;
+  pct: number | null;
+  exhausted: boolean;
+}
+
+// A rung on the local-orchestrated fallback chain (backend/router_tiers.py).
+// Rank 0 (the local model) is implicit and never a row here — the frontend
+// synthesizes it as the always-first card.
+export interface RouterTier {
+  id: string;
+  label: string;
+  tier_rank: number;
+  kind: 'local' | 'binding';
+  provider_binding_id: string | null;
+  model_override: string;
+  quota_limit: number | null;
+  quota_window_hours: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  quota: RouterTierQuota;
+}
+
+// GET /api/router/overview — the AI Router tab's stat-card row. Computed
+// entirely from Hermes's own usage log, not from 9Router.
+export interface RouterOverview {
+  active_combo_label: string;
+  active_combo_tier_count: number;
+  token_savings_pct: number | null;
+  requests_24h: number;
+  providers_healthy: number;
+  providers_total: number;
 }
 
 export interface AgentEvent {
@@ -496,6 +676,8 @@ export interface ChatSession {
   id: string;
   title: string;
   agent_id?: string;
+  // Which named project (backend/projects.py) this conversation belongs to.
+  project_id?: string | null;
   /** ISO timestamp of the session's most recent message; absent for a brand-new chat. */
   updated_at?: string | null;
 }
@@ -531,9 +713,26 @@ export interface DevRun {
   created_at: string;
   updated_at: string;
   assignee_agent_id?: string | null;
+  /** The chain's stable published URL — the same for every revision. */
   demo_url?: string | null;
+  /** This revision's own immutable snapshot, kept for rollback. */
+  demo_snapshot_url?: string | null;
   sandbox_container?: string | null;
+  /** Set when this card continues another one (the previous revision). */
+  parent_run_id?: string | null;
+  /** First card of the chain; equals `id` for a card that started a product. */
+  root_run_id?: string | null;
+  /** Position in the chain, 1-based. */
+  revision?: number;
   steps?: DevRunStep[];
+}
+
+/** One entry of GET /api/dev-runs/{id}/lineage — a revision of one product. */
+export interface DevRunRevision extends DevRun {
+  /** True for the revision the chain's stable URL currently serves. */
+  is_live: boolean;
+  /** False once the snapshot has been deleted — cannot be promoted. */
+  has_snapshot: boolean;
 }
 
 export interface DevRunEvent {

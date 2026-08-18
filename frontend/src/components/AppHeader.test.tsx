@@ -37,10 +37,10 @@ describe('AppHeader', () => {
   });
 
   it('reuses an externally provided summary without polling', () => {
-    const fetchMock = vi.fn();
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ active: false }) }));
     vi.stubGlobal('fetch', fetchMock);
     render(<AppHeader language="en" onOpenProcesses={() => undefined} onOpenBrowserView={() => undefined} summary={summary} />);
     expect(screen.getByTestId('approvals-badge')).toHaveTextContent('3');
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining('/api/control-plane/summary'));
   });
 });

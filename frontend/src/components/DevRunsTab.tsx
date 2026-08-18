@@ -1,16 +1,22 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Ban,
   CircleDot,
+  Download,
   ExternalLink,
   GitCommitHorizontal,
   Hammer,
+  LayoutGrid,
   ListChecks,
+  ListTree,
+  MoreVertical,
   Pause,
   Play,
   RefreshCw,
   Rocket,
   ShieldAlert,
+  Trash2,
+  Wrench,
 } from 'lucide-react';
 import type { DevRun, DevRunEvent } from '../types';
 import { DiffViewer, looksLikeUnifiedDiff } from './DiffViewer';
@@ -32,6 +38,11 @@ const COPY = {
     report: 'Финальный отчёт', changedFiles: 'Изменения', tests: 'Тесты', commit: 'Коммит',
     openGitea: 'Открыть в Gitea', reason: 'Причина', goal: 'Цель',
     noSteps: 'Шагов ещё нет.', failedLoad: 'Не удалось загрузить dev-runs.',
+    viewRuns: 'Прогоны', viewShowcase: 'Витрина демо', openDemo: 'Открыть демо',
+    noDemos: 'Опубликованных демо пока нет — агент вызывает dev_publish_demo, когда результат готов к показу.',
+    published: 'опубликовано',
+    cardMenu: 'Действия', refine: 'Доработки', download: 'Скачать', deleteRun: 'Удалить',
+    confirmDeleteRun: 'Удалить прогон и его демо? Это необратимо.',
   },
   en: {
     title: 'Dev Runs — Mission Control', subtitle: 'Autonomous development runs in the dev-repo sandbox',
@@ -43,6 +54,11 @@ const COPY = {
     report: 'Final report', changedFiles: 'Changes', tests: 'Tests', commit: 'Commit',
     openGitea: 'Open in Gitea', reason: 'Reason', goal: 'Goal',
     noSteps: 'No steps yet.', failedLoad: 'Could not load dev-runs.',
+    viewRuns: 'Runs', viewShowcase: 'Demo showcase', openDemo: 'Open demo',
+    noDemos: 'No published demos yet — the agent calls dev_publish_demo once a result is ready to show.',
+    published: 'published',
+    cardMenu: 'Actions', refine: 'Refine', download: 'Download', deleteRun: 'Delete',
+    confirmDeleteRun: 'Delete this run and its demo? This cannot be undone.',
   },
 } as const;
 
@@ -85,6 +101,18 @@ export function DevRunsTab({ language, lastEvent, giteaBaseUrl }: Props) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
   const [loading, setLoading] = useState(true);
+  const [view, setView] = useState<'runs' | 'showcase'>('runs');
+  const [openCardMenu, setOpenCardMenu] = useState('');
+  const cardMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!openCardMenu) return;
+    const onDocClick = (event: MouseEvent) => {
+      if (cardMenuRef.current && !cardMenuRef.current.contains(event.target as Node)) setOpenCardMenu('');
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [openCardMenu]);
 
   const loadRuns = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
@@ -171,6 +199,60 @@ export function DevRunsTab({ language, lastEvent, giteaBaseUrl }: Props) {
 
   const statusOf = (run: DevRun) => STATUS_LABEL[run.status]?.[language === 'ru' ? 0 : 1] || run.status;
 
+  // "Refine" reuses the existing Runs-tab inspector (resume/pause/cancel,
+  // step feed) rather than duplicating those controls in the showcase card —
+  // it just navigates the owner to that run.
+  const refineRun = (run: DevRun) => {
+    setOpenCardMenu('');
+    setView('runs');
+    setSelectedId(run.id);
+  };
+
+  const downloadDemo = async (run: DevRun) => {
+    setOpenCardMenu('');
+    // A plain window.open() bypasses the app's fetch-based auth interceptor
+    // (window.fetch is monkey-patched to attach the Bearer token — see
+    // utils.tsx's initFetchInterceptor — but raw navigations never go through
+    // it), so this fetches the zip itself and saves it via a blob URL.
+    try {
+      const response = await fetch(`/api/dev-runs/${run.id}/download`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${run.id}-demo.zip`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    }
+  };
+
+  const deleteRun = async (run: DevRun) => {
+    setOpenCardMenu('');
+    if (!window.confirm(copy.confirmDeleteRun)) return;
+    setBusy(`delete-${run.id}`);
+    try {
+      const response = await fetch(`/api/dev-runs/${run.id}`, { method: 'DELETE' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (selectedId === run.id) { setSelected(null); setSelectedId(''); }
+      await loadRuns(true);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      setBusy('');
+    }
+  };
+
+  // Every run that has ever called dev_publish_demo — a run can be cancelled/
+  // failed afterward and its demo stays valid (the /demo/<id>/ files on disk
+  // aren't touched by status changes), so this deliberately isn't filtered by
+  // status the way the workspace's active-run list implicitly is.
+  const demos = useMemo(() => runs.filter(run => run.demo_url), [runs]);
+
   const report = useMemo(() => {
     if (!selected?.steps || !['done', 'failed', 'cancelled'].includes(selected.status)) return null;
     const steps = selected.steps;
@@ -194,6 +276,15 @@ export function DevRunsTab({ language, lastEvent, giteaBaseUrl }: Props) {
           <p>{copy.subtitle}</p>
         </div>
         <div className="control-actions">
+          <div className="admin-subnav" role="tablist">
+            <button type="button" role="tab" aria-selected={view === 'runs'} className={view === 'runs' ? 'is-active' : ''} onClick={() => setView('runs')}>
+              <ListTree size={14} />{copy.viewRuns}
+            </button>
+            <button type="button" role="tab" aria-selected={view === 'showcase'} className={view === 'showcase' ? 'is-active' : ''} onClick={() => setView('showcase')}>
+              <LayoutGrid size={14} />{copy.viewShowcase}
+              {demos.length > 0 && <em className="admin-subnav-count">{demos.length}</em>}
+            </button>
+          </div>
           <button type="button" className="icon-btn" onClick={() => void loadRuns()} title={copy.refresh} aria-label={copy.refresh}>
             <RefreshCw size={16} />
           </button>
@@ -216,6 +307,57 @@ export function DevRunsTab({ language, lastEvent, giteaBaseUrl }: Props) {
         </button>
       </section>
 
+      {view === 'showcase' && (
+        <section className="devrun-showcase" aria-label={copy.viewShowcase}>
+          {!demos.length && <p className="control-empty">{copy.noDemos}</p>}
+          <div className="devrun-showcase-grid">
+            {demos.map(run => (
+              <div key={run.id} className="devrun-showcase-card">
+                <a className="devrun-showcase-linkarea" href={run.demo_url!} target="_blank" rel="noreferrer">
+                  <div className="devrun-showcase-frame">
+                    <iframe src={run.demo_url!} title={run.goal} loading="lazy" sandbox="allow-scripts allow-same-origin" />
+                  </div>
+                  <div className="devrun-showcase-body">
+                    <strong>{run.goal}</strong>
+                    <div className="devrun-showcase-meta">
+                      <span className={`task-status is-${run.status}`}><CircleDot size={11} />{statusOf(run)}</span>
+                      <span>{copy.published} {shortTime(run.updated_at)}</span>
+                    </div>
+                  </div>
+                  <span className="devrun-showcase-open"><ExternalLink size={13} />{copy.openDemo}</span>
+                </a>
+                <div className="devrun-showcase-menu" ref={openCardMenu === run.id ? cardMenuRef : undefined}>
+                  <button
+                    type="button"
+                    className="devrun-showcase-menu-btn"
+                    title={copy.cardMenu}
+                    aria-label={copy.cardMenu}
+                    onClick={() => setOpenCardMenu(openCardMenu === run.id ? '' : run.id)}
+                  >
+                    <MoreVertical size={14} />
+                  </button>
+                  {openCardMenu === run.id && (
+                    <div className="devrun-showcase-menu-popover" role="menu">
+                      <button type="button" onClick={() => refineRun(run)}><Wrench size={12} />{copy.refine}</button>
+                      <button type="button" onClick={() => void downloadDemo(run)}><Download size={12} />{copy.download}</button>
+                      <button
+                        type="button"
+                        className="is-danger"
+                        disabled={busy === `delete-${run.id}`}
+                        onClick={() => void deleteRun(run)}
+                      >
+                        <Trash2 size={12} />{copy.deleteRun}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {view === 'runs' && (
       <div className="devruns-workspace">
         <section className="devruns-list" aria-label={copy.title}>
           {!runs.length && <p className="control-empty">{copy.empty}</p>}
@@ -249,6 +391,11 @@ export function DevRunsTab({ language, lastEvent, giteaBaseUrl }: Props) {
                   <code>{selected.id}</code>
                 </div>
                 <div className="devrun-commands">
+                  {selected.demo_url && (
+                    <a className="devrun-demo-link" href={selected.demo_url} target="_blank" rel="noreferrer">
+                      <ExternalLink size={14} />{copy.openDemo}
+                    </a>
+                  )}
                   {['running', 'planned', 'verifying'].includes(selected.status) && (
                     <button type="button" disabled={Boolean(busy)} onClick={() => void post(`/api/dev-runs/${selected.id}/pause`)}>
                       <Pause size={14} />{copy.pause}
@@ -341,6 +488,7 @@ export function DevRunsTab({ language, lastEvent, giteaBaseUrl }: Props) {
           )}
         </aside>
       </div>
+      )}
     </div>
   );
 }

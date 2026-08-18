@@ -12,6 +12,7 @@ Control Plane /approve flow, this one is a dedicated line to a single agent.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Dict, List, Optional
 
@@ -56,45 +57,73 @@ class AgentBotManager:
             if not update.message or not update.message.text:
                 return
             chat_id = str(update.effective_chat.id) if update.effective_chat else ""
-            allowed = self._allowed_chat_ids.get(binding_id) or []
-            if allowed and chat_id not in allowed:
-                logger.warning("Agent bot %s: ignoring message from unauthorized chat %s", binding_id, chat_id)
+
+            # Who is this and are they allowed to spend anything? The gate owns
+            # the whitelist check, token redemption and every quota — nothing
+            # below it costs money until it says PROCEED.
+            from backend import bot_access_gate
+
+            sender = update.effective_user
+            decision = await asyncio.to_thread(
+                bot_access_gate.authorize,
+                binding_id,
+                "telegram",
+                chat_id,
+                update.message.text,
+                str(sender.id) if sender else "",
+                (f"@{sender.username}" if sender and sender.username else (sender.full_name if sender else "")),
+            )
+            if decision.action == bot_access_gate.IGNORE:
+                return
+            if decision.action == bot_access_gate.REPLY:
+                for chunk in _split_text(decision.reply_text):
+                    await update.message.reply_text(chunk)
                 return
 
             from backend.database import get_subagent
 
             subagent = get_subagent(subagent_id)
             if not subagent or not subagent.get("is_enabled"):
-                await update.message.reply_text("Этот агент сейчас отключён, Альберт.")
+                await update.message.reply_text(
+                    bot_access_gate.AGENT_OFFLINE_MESSAGE
+                    if decision.scope == "public"
+                    else "Этот агент сейчас отключён, Альберт."
+                )
                 return
 
             from backend.agent_messenger_governance import apply_binding_overrides
             subagent = apply_binding_overrides(subagent, self._overrides.get(binding_id))
+            subagent = bot_access_gate.apply_subscriber_context(subagent, decision)
 
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
             from backend.agent import agent_instance
 
-            session_id = f"tgbot:{binding_id}:{chat_id}"
+            session_id = decision.session_id or f"tgbot:{binding_id}:{chat_id}"
             try:
                 response_text = await agent_instance._respond_as_subagent(
                     update.message.text, subagent, chat_id=session_id
                 )
             except Exception:
                 logger.exception("Agent bot %s: error handling message", binding_id)
+                bot_access_gate.record_turn(decision, agent_instance.last_run_metadata.get(session_id), "")
                 await update.message.reply_text("Произошла ошибка при обработке запроса.")
                 return
+            bot_access_gate.record_turn(
+                decision, agent_instance.last_run_metadata.get(session_id), response_text
+            )
 
-            mode = self._response_modes.get(binding_id, "draft")
+            mode = bot_access_gate.effective_response_mode(
+                decision, self._response_modes.get(binding_id, "draft")
+            )
             if mode == "auto_labeled":
-                from backend.agent_messenger_governance import AUTO_REPLY_DISCLOSURE
-                for chunk in _split_text(response_text + AUTO_REPLY_DISCLOSURE):
+                from backend.agent_messenger_governance import auto_reply_disclosure
+                for chunk in _split_text(response_text + auto_reply_disclosure(binding_id)):
                     await update.message.reply_text(chunk)
                 return
 
             # draft mode: never send anything to the other person automatically —
             # queue it and let the owner review/send from the dashboard.
             from backend.channel_replies import create_pending_reply
-            sender = update.effective_user
             incoming_from = f"@{sender.username}" if sender and sender.username else (str(sender.id) if sender else "")
             create_pending_reply(
                 binding_id=binding_id,

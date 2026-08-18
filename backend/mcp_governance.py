@@ -75,7 +75,10 @@ def _validate_url(value: str, field: str) -> str:
     if address and (address.is_link_local or address.is_multicast or address.is_unspecified):
         raise ValueError(f"{field} points to a blocked network range")
     if parsed.scheme == "http":
-        private_http = host in {"localhost", "host.docker.internal"} or bool(
+        # "9router" is this deployment's own sidecar service name on the compose
+        # network (see backend/router_session.py) — not attacker-suppliable like
+        # an arbitrary hostname would be, so it's as trusted as localhost here.
+        private_http = host in {"localhost", "host.docker.internal", "9router"} or bool(
             address and (address.is_private or address.is_loopback)
         )
         if not private_http:

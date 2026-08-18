@@ -63,40 +63,68 @@ class AgentDiscordBotManager:
                 return
             channel_id = str(message.channel.id)
             is_dm = isinstance(message.channel, discord.DMChannel)
-            allowed = self._allowed_channel_ids.get(binding_id) or []
-            if allowed and not is_dm and channel_id not in allowed:
+
+            from backend import bot_access_gate
+
+            # A DM allow-list may name either the DM channel id or the user id, so
+            # the gate is asked about the channel first and the author second —
+            # whichever the owner whitelisted wins.
+            decision = await asyncio.to_thread(
+                bot_access_gate.authorize,
+                binding_id, "discord", channel_id, message.content,
+                str(message.author.id), str(message.author),
+            )
+            if is_dm and decision.action == bot_access_gate.IGNORE:
+                decision = await asyncio.to_thread(
+                    bot_access_gate.authorize,
+                    binding_id, "discord", str(message.author.id), message.content,
+                    str(message.author.id), str(message.author),
+                )
+            if decision.action == bot_access_gate.IGNORE:
                 return
-            if allowed and is_dm and str(message.author.id) not in allowed and channel_id not in allowed:
-                # Allow-list may name either the DM channel id or the user id — either counts.
+            if decision.action == bot_access_gate.REPLY:
+                for chunk in _split_text(decision.reply_text):
+                    await message.channel.send(chunk)
                 return
 
             from backend.database import get_subagent
 
             subagent = get_subagent(subagent_id)
             if not subagent or not subagent.get("is_enabled"):
-                await message.channel.send("Этот агент сейчас отключён, Альберт.")
+                await message.channel.send(
+                    bot_access_gate.AGENT_OFFLINE_MESSAGE
+                    if decision.scope == "public"
+                    else "Этот агент сейчас отключён, Альберт."
+                )
                 return
 
             from backend.agent_messenger_governance import apply_binding_overrides
             subagent = apply_binding_overrides(subagent, self._overrides.get(binding_id))
+            subagent = bot_access_gate.apply_subscriber_context(subagent, decision)
 
             async with message.channel.typing():
                 from backend.agent import agent_instance
 
-                session_id = f"discordbot:{binding_id}:{channel_id}"
+                session_id = decision.session_id or f"discordbot:{binding_id}:{channel_id}"
                 try:
                     response_text = await agent_instance._respond_as_subagent(
                         message.content, subagent, chat_id=session_id
                     )
                 except Exception:
                     logger.exception("Agent Discord bot %s: error handling message", binding_id)
+                    bot_access_gate.record_turn(decision, agent_instance.last_run_metadata.get(session_id), "")
                     await message.channel.send("Произошла ошибка при обработке запроса.")
                     return
+                bot_access_gate.record_turn(
+                    decision, agent_instance.last_run_metadata.get(session_id), response_text
+                )
 
-            mode = self._response_modes.get(binding_id, "draft")
+            mode = bot_access_gate.effective_response_mode(
+                decision, self._response_modes.get(binding_id, "draft")
+            )
             if mode == "auto_labeled":
-                from backend.agent_messenger_governance import AUTO_REPLY_DISCLOSURE
-                for chunk in _split_text(response_text + AUTO_REPLY_DISCLOSURE):
+                from backend.agent_messenger_governance import auto_reply_disclosure
+                for chunk in _split_text(response_text + auto_reply_disclosure(binding_id)):
                     await message.channel.send(chunk)
                 return
 

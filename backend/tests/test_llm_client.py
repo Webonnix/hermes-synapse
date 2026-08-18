@@ -1,6 +1,7 @@
 """Unit + integration tests for the normalized LLM client (P0)."""
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -121,6 +122,15 @@ def test_mask_secrets_bearer_and_keys():
     assert "REDACTED" in mask_secrets("Authorization: Bearer sk-or-abcdef123456")
     assert "sk-or-abcdef123456" not in mask_secrets("Bearer sk-or-abcdef123456")
     assert "REDACTED" in mask_secrets('{"api_key": "supersecretvalue"}')
+
+
+@pytest.fixture(autouse=True)
+def _forget_parameter_refusals():
+    """Refused-parameter memory is process-wide by design (it must survive
+    between user turns), so tests have to reset it or they leak into each other."""
+    lc._REFUSED_PARAMS.clear()
+    yield
+    lc._REFUSED_PARAMS.clear()
 
 
 # ── call_llm_normalized: HTTP integration (mocked) ────────────────────────────
@@ -275,3 +285,226 @@ def test_interrupted_stream_is_provider_error():
     ], provider="p", model="m")
     assert result.status == lc.STATUS_PROVIDER_ERROR
     assert result.content == "partial"
+
+
+# ── Redaction gateway (call_llm_normalized) ────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_call_redacts_secret_before_send_and_restores_in_response():
+    """A secret in an outbound message to an external provider must never hit
+    the wire, and a placeholder the provider echoes back must be restored to
+    the real value before the caller ever sees it."""
+    secret = "sk-" + "a" * 20
+    sent = {}
+
+    async def fake_post(url, json=None, headers=None):
+        sent["messages"] = json["messages"]
+        placeholder = sent["messages"][0]["content"]
+        return _mock_response(200, _make_body(f"Использую ключ {placeholder}"))
+
+    with patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=fake_post)), \
+         patch("backend.redaction._local_model_confirm", new=AsyncMock(return_value=[])):
+        r = await call_llm_normalized(
+            api_base="https://openrouter.ai/api/v1", api_key="k", model="m",
+            messages=[{"role": "user", "content": secret}], max_retries=0,
+        )
+
+    assert secret not in sent["messages"][0]["content"]
+    assert sent["messages"][0]["content"].startswith("[SECRET_")
+    assert secret in r.content
+    assert "[SECRET_" not in r.content
+
+
+@pytest.mark.asyncio
+async def test_call_does_not_redact_for_local_provider():
+    """The local model is the trust boundary — nothing gets rewritten on the
+    way to Ollama, and no local-model confirmation call is made for it."""
+    from backend.ollama_client import OllamaChatResult
+
+    secret = "sk-" + "b" * 20
+    result = OllamaChatResult(model="qwen3:8b", content="ok", thinking=None,
+                              done_reason="stop", prompt_tokens=1, completion_tokens=1)
+    with patch("backend.ollama_client.OllamaClient.chat", new=AsyncMock(return_value=result)) as chat, \
+         patch("backend.redaction.detect_and_redact") as spy:
+        await call_llm_normalized(
+            api_base="http://ollama:11434", api_key="", model="qwen3:8b",
+            messages=[{"role": "user", "content": secret}], max_retries=0,
+        )
+    assert chat.await_args.kwargs["messages"][0]["content"] == secret
+    spy.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_redaction_scans_each_message_at_most_once_across_calls():
+    """A tool loop reuses the same `messages` list across many calls as it
+    grows; each message must only ever pass through the (expensive,
+    local-model-backed) redaction pass once, not on every iteration."""
+    secret = "sk-" + "c" * 20
+    messages = [{"role": "user", "content": secret}]
+
+    async def fake_post(url, json=None, headers=None):
+        return _mock_response(200, _make_body("ok"))
+
+    with patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=fake_post)), \
+         patch("backend.redaction._local_model_confirm", new=AsyncMock(return_value=[])) as confirm:
+        await call_llm_normalized(api_base="https://openrouter.ai/api/v1", api_key="k",
+                                  model="m", messages=messages, max_retries=0)
+        messages.append({"role": "assistant", "content": "first reply"})
+        messages.append({"role": "tool", "content": "unrelated tool output", "tool_call_id": "c1"})
+        await call_llm_normalized(api_base="https://openrouter.ai/api/v1", api_key="k",
+                                  model="m", messages=messages, max_retries=0)
+
+    # 3 distinct message contents ever appeared across both calls -> exactly 3
+    # local-model confirmation calls, never re-scanning the first message.
+    assert confirm.await_count == 3
+
+
+# ── SSE-framed bodies from gateways that ignore the non-streaming request ─────
+
+def _sse_mock_response(text):
+    """A response whose .json() raises, exactly like httpx on a trailing frame."""
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = 200
+    resp.headers = {"content-type": "text/event-stream"}
+    resp.json.side_effect = ValueError("Extra data")
+    resp.text = text
+    return resp
+
+
+@pytest.mark.asyncio
+async def test_complete_body_with_sse_done_trailer_is_still_parsed():
+    """9Router answers a plain (non-streaming) request with HTTP 200,
+    content-type text/event-stream, and glues `data: [DONE]` straight onto the
+    JSON. That trailer alone used to surface to the user as 'Provider response
+    was not valid JSON' — an agent answering a Matrix message with an error."""
+    body = json.dumps(_make_body("Привет! Дела отлично.")) + "data: [DONE]\n\n"
+    with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=_sse_mock_response(body))):
+        r = await call_llm_normalized(
+            api_base="http://9router:20128/v1", api_key="k", model="ds/deepseek-v4-pro",
+            messages=[{"role": "user", "content": "привет"}], max_retries=0,
+        )
+    assert r.status == lc.STATUS_SUCCESS
+    assert r.content == "Привет! Дела отлично."
+
+
+@pytest.mark.asyncio
+async def test_real_chunk_stream_is_merged_instead_of_truncated():
+    """Several frames means a genuine delta stream — taking only the first one
+    would silently answer with a fragment of the reply."""
+    chunks = [
+        {"choices": [{"index": 0, "delta": {"content": "Привет"}}]},
+        {"choices": [{"index": 0, "delta": {"content": ", Альберт"}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    ]
+    body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
+    with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=_sse_mock_response(body))):
+        r = await call_llm_normalized(
+            api_base="http://9router:20128/v1", api_key="k", model="ds/deepseek-v4-pro",
+            messages=[{"role": "user", "content": "привет"}], max_retries=0,
+        )
+    assert r.status == lc.STATUS_SUCCESS
+    assert r.content == "Привет, Альберт"
+
+
+@pytest.mark.asyncio
+async def test_body_that_is_genuinely_not_json_still_fails_loudly():
+    with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=_sse_mock_response("<html>502</html>"))):
+        r = await call_llm_normalized(
+            api_base="http://9router:20128/v1", api_key="k", model="m",
+            messages=[{"role": "user", "content": "hi"}], max_retries=0,
+        )
+    assert r.status == lc.STATUS_PARSE_ERROR
+
+
+@pytest.mark.asyncio
+async def test_parameter_the_model_refuses_is_dropped_and_the_call_retried():
+    """kimi-k3 answers `temperature: 0.7` with HTTP 400 "invalid temperature:
+    only 1 is allowed for this model". The agent has no way to know that per
+    model, so a permanent 400 over one field must not cost the whole turn."""
+    calls = []
+
+    async def fake_post(url, json=None, headers=None):
+        calls.append(json)
+        if "temperature" in json:
+            return _mock_response(400, text='{"error":{"message":"invalid temperature: only 1 is allowed for this model"}}')
+        return _mock_response(200, _make_body("51"))
+
+    with patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=fake_post)):
+        r = await call_llm_normalized(
+            api_base="http://9router:20128/v1", api_key="k", model="kimi/kimi-k3",
+            messages=[{"role": "user", "content": "17*3"}], temperature=0.7, max_retries=0,
+        )
+    assert r.status == lc.STATUS_SUCCESS
+    assert r.content == "51"
+    assert len(calls) == 2 and "temperature" not in calls[1]
+
+
+@pytest.mark.asyncio
+async def test_refused_parameter_retry_happens_only_once():
+    """A gateway that keeps blaming fields must not put us in a strip-and-retry
+    loop that walks the whole payload apart."""
+    calls = []
+
+    async def fake_post(url, json=None, headers=None):
+        calls.append(json)
+        return _mock_response(400, text='{"error":{"message":"invalid temperature"}}')
+
+    with patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=fake_post)):
+        r = await call_llm_normalized(
+            api_base="http://9router:20128/v1", api_key="k", model="kimi/kimi-k3",
+            messages=[{"role": "user", "content": "hi"}], temperature=0.7, max_retries=0,
+        )
+    assert r.status == lc.STATUS_PROVIDER_ERROR
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_generation_params_reach_the_request_body():
+    """model_params used to be written by the UI and read by nobody."""
+    from backend.agent import _agent_generation_params
+
+    params = _agent_generation_params({"model_params": '{"top_p": 0.5, "seed": 7, "nonsense": 1, "model": "evil"}'})
+    assert params == {"top_p": 0.5, "seed": 7}
+
+    sent = {}
+
+    async def fake_post(url, json=None, headers=None):
+        sent.update(json)
+        return _mock_response(200, _make_body("ok"))
+
+    with patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=fake_post)):
+        await call_llm_normalized(
+            api_base="https://openrouter.ai/api/v1", api_key="k", model="m",
+            messages=[{"role": "user", "content": "hi"}], max_retries=0,
+            extra_payload={**params, "model": "hijacked"},
+        )
+    assert sent["top_p"] == 0.5 and sent["seed"] == 7
+    assert sent["model"] == "m"  # extra_payload can never rewrite the routed model
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_is_remembered_so_the_next_call_never_repeats_it():
+    """The retry alone is not enough: the upstream that rejected the field also
+    throttles the request that carried it ("reset after 30s"), so the immediate
+    retry can fail too. Every later call must leave the field out from the start."""
+    calls = []
+
+    async def fake_post(url, json=None, headers=None):
+        calls.append(json)
+        if "temperature" in json:
+            return _mock_response(400, text='{"error":{"message":"invalid temperature: only 1 is allowed"}}')
+        return _mock_response(200, _make_body("51"))
+
+    with patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=fake_post)):
+        for _ in range(3):
+            r = await call_llm_normalized(
+                api_base="http://9router:20128/v1", api_key="k", model="kimi/kimi-k3",
+                messages=[{"role": "user", "content": "17*3"}], temperature=0.7, max_retries=0,
+            )
+            assert r.status == lc.STATUS_SUCCESS
+
+    # first call: rejected + retry = 2 requests; the two after it: 1 each.
+    assert len(calls) == 4
+    assert all("temperature" not in payload for payload in calls[1:])
+    # Scoped to that model — a different one still gets the owner's temperature.
+    assert lc.remembered_refusals("http://9router:20128/v1", "ds/deepseek-v4-pro") == set()

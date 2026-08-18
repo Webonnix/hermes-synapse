@@ -162,3 +162,13 @@ def test_auth_flow():
             os.environ["TELEGRAM_CHAT_ID"] = original_chat_id
         else:
             os.environ.pop("TELEGRAM_CHAT_ID", None)
+
+
+def test_dev_runs_metrics_endpoint():
+    """Route order matters: /api/dev-runs/metrics must not be read as a run id."""
+    response = client.get("/api/dev-runs/metrics")
+    assert response.status_code == 200
+    data = response.json()
+    for key in ("task_success_rate", "autonomous_completion_rate",
+                "human_intervention_rate", "tool_error_rate", "by_status"):
+        assert key in data

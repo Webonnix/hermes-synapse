@@ -82,6 +82,10 @@ class TestRequest(BaseModel):
     timeout_s: int = Field(default=MAX_EXEC_TIMEOUT_S, ge=1, le=MAX_EXEC_TIMEOUT_S)
 
 
+class CommitRequest(BaseModel):
+    message: str = "Agent commit"
+
+
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok", "repo": str(REPO_ROOT), "repo_exists": REPO_ROOT.is_dir()}
@@ -214,3 +218,33 @@ async def run_tests(req: TestRequest) -> dict:
     result = await _run_argv(argv, req.timeout_s)
     result["runner"] = argv[0]
     return result
+
+
+# ── Git, scoped to this sandbox's own clone ─────────────────────────────────
+# Every dev-run gets its own /dev-repo (see dev_sandbox.py's per-run bind
+# mount) — these must stay inside the sandbox, same as /fs/* and /exec, so an
+# agent's git_status/git_commit/git_push actually see the files it wrote via
+# dev_write_file instead of some other run's (or the shared base repo's)
+# working tree.
+
+@app.post("/git/status", dependencies=[Depends(_require_token)])
+async def git_status() -> dict:
+    return await _run_argv(["git", "status", "--short", "--branch"], 30)
+
+
+@app.post("/git/diff", dependencies=[Depends(_require_token)])
+async def git_diff() -> dict:
+    return await _run_argv(["git", "diff", "HEAD"], 30)
+
+
+@app.post("/git/commit", dependencies=[Depends(_require_token)])
+async def git_commit(req: CommitRequest) -> dict:
+    add_result = await _run_argv(["git", "add", "-A"], 30)
+    if add_result["exit_code"] != 0:
+        return {"error": "git add failed", "detail": add_result}
+    return await _run_argv(["git", "commit", "-m", (req.message or "Agent commit")[:500]], 30)
+
+
+@app.post("/git/push", dependencies=[Depends(_require_token)])
+async def git_push() -> dict:
+    return await _run_argv(["git", "push", "origin", "HEAD"], 60)

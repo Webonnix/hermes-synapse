@@ -64,36 +64,63 @@ class AgentSlackBotManager:
             if not text:
                 return
             channel_id = str(event.get("channel", ""))
-            allowed = self._allowed_channel_ids.get(binding_id) or []
-            if allowed and channel_id not in allowed and str(event.get("user", "")) not in allowed:
+            slack_user = str(event.get("user", ""))
+
+            from backend import bot_access_gate
+
+            # The allow-list may name the channel or the user; ask about both,
+            # same as the pre-gate behaviour.
+            decision = await asyncio.to_thread(
+                bot_access_gate.authorize, binding_id, "slack", channel_id, text, slack_user, slack_user,
+            )
+            if decision.action == bot_access_gate.IGNORE and slack_user:
+                decision = await asyncio.to_thread(
+                    bot_access_gate.authorize, binding_id, "slack", slack_user, text, slack_user, slack_user,
+                )
+            if decision.action == bot_access_gate.IGNORE:
+                return
+            if decision.action == bot_access_gate.REPLY:
+                for chunk in _split_text(decision.reply_text):
+                    await say(text=chunk)
                 return
 
             from backend.database import get_subagent
 
             subagent = get_subagent(subagent_id)
             if not subagent or not subagent.get("is_enabled"):
-                await say(text="Этот агент сейчас отключён, Альберт.")
+                await say(
+                    text=bot_access_gate.AGENT_OFFLINE_MESSAGE
+                    if decision.scope == "public"
+                    else "Этот агент сейчас отключён, Альберт."
+                )
                 return
 
             from backend.agent_messenger_governance import apply_binding_overrides
             subagent = apply_binding_overrides(subagent, self._overrides.get(binding_id))
+            subagent = bot_access_gate.apply_subscriber_context(subagent, decision)
 
             from backend.agent import agent_instance
 
-            session_id = f"slackbot:{binding_id}:{channel_id}"
+            session_id = decision.session_id or f"slackbot:{binding_id}:{channel_id}"
             try:
                 response_text = await agent_instance._respond_as_subagent(
                     text, subagent, chat_id=session_id
                 )
             except Exception:
                 logger.exception("Agent Slack bot %s: error handling message", binding_id)
+                bot_access_gate.record_turn(decision, agent_instance.last_run_metadata.get(session_id), "")
                 await say(text="Произошла ошибка при обработке запроса.")
                 return
+            bot_access_gate.record_turn(
+                decision, agent_instance.last_run_metadata.get(session_id), response_text
+            )
 
-            mode = self._response_modes.get(binding_id, "draft")
+            mode = bot_access_gate.effective_response_mode(
+                decision, self._response_modes.get(binding_id, "draft")
+            )
             if mode == "auto_labeled":
-                from backend.agent_messenger_governance import AUTO_REPLY_DISCLOSURE
-                for chunk in _split_text(response_text + AUTO_REPLY_DISCLOSURE):
+                from backend.agent_messenger_governance import auto_reply_disclosure
+                for chunk in _split_text(response_text + auto_reply_disclosure(binding_id)):
                     await say(text=chunk)
                 return
 

@@ -153,4 +153,55 @@ describe('ChatTab Component', () => {
     expect(screen.getByText('Private model trace')).toBeInTheDocument();
     expect(screen.queryByText(/cognitive compiling/i)).not.toBeInTheDocument();
   });
+
+  describe('project selector', () => {
+    const projectProps = {
+      ...defaultProps,
+      currentChatId: 'chat_123',
+      chatSessions: [
+        { id: 'dashboard', title: 'Main Terminal' },
+        { id: 'chat_123', title: 'chat_123', project_id: 'proj-1' },
+      ],
+      projects: [
+        { id: 'proj-1', name: 'Client Site', description: '', is_active: true, created_at: '', updated_at: '' },
+        { id: 'proj-2', name: 'Internal Tools', description: '', is_active: true, created_at: '', updated_at: '' },
+      ],
+      subagents: [
+        { id: 'agent-a', name: 'Agent A', agent_type: 'agent', project_id: 'proj-1' },
+        { id: 'agent-b', name: 'Agent B', agent_type: 'agent', project_id: 'proj-2' },
+      ],
+      handleSetSessionProject: vi.fn(),
+    };
+
+    it('shows the assigned project selected and calls handleSetSessionProject on change', () => {
+      render(<ChatTab {...projectProps} />);
+      const select = screen.getByDisplayValue('Client Site') as HTMLSelectElement;
+      fireEvent.change(select, { target: { value: 'proj-2' } });
+      expect(projectProps.handleSetSessionProject).toHaveBeenCalledWith('chat_123', 'proj-2');
+    });
+
+    it('scopes the orchestrator dropdown to the selected project\'s agents', () => {
+      render(<ChatTab {...projectProps} />);
+      // Agent A belongs to proj-1 (the session's active project) and must be offered.
+      expect(screen.getByText(/Agent A/)).toBeInTheDocument();
+      // Agent B belongs to a different project and must not be.
+      expect(screen.queryByText(/Agent B/)).not.toBeInTheDocument();
+      // Vexa (the default) is always available regardless of project.
+      expect(screen.getByText('Vexa (Main)')).toBeInTheDocument();
+    });
+
+    it('offers every agent when no project is assigned to the session', () => {
+      render(
+        <ChatTab
+          {...projectProps}
+          chatSessions={[
+            { id: 'dashboard', title: 'Main Terminal' },
+            { id: 'chat_123', title: 'chat_123' },
+          ]}
+        />
+      );
+      expect(screen.getByText(/Agent A/)).toBeInTheDocument();
+      expect(screen.getByText(/Agent B/)).toBeInTheDocument();
+    });
+  });
 });

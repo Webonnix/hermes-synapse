@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from backend import control_plane, database
+from backend.tool_permissions import OWNER, SUBAGENT
 
 
 @pytest.fixture()
@@ -63,8 +64,10 @@ def test_r3_action_is_queued_until_approved(control_db):
 
 
 def test_r4_requires_two_explicit_confirmations(control_db):
+    # execute_command is owner-only (backend/tool_permissions.py); the R4
+    # double-confirmation is what gates it *for the owner*.
     pending = json.loads(control_plane.execute_governed_tool(
-        "execute_command", {"command": "uname -a"}, "dashboard"
+        "execute_command", {"command": "uname -a"}, "dashboard", principal=OWNER
     ))
     first = control_plane.approve_task(pending["task_id"])
     assert first["status"] == "awaiting_approval"
@@ -76,7 +79,9 @@ def test_r4_requires_two_explicit_confirmations(control_db):
 
 def test_kill_switch_blocks_new_tool_execution(control_db):
     control_plane.set_kill_switch(True, "incident test")
-    result = json.loads(control_plane.execute_governed_tool("get_system_stats", {}, "dashboard"))
+    result = json.loads(control_plane.execute_governed_tool(
+        "get_system_stats", {}, "dashboard", principal=OWNER
+    ))
     assert result["status"] == "killed"
     assert "incident test" in result["reason"]
 
@@ -109,3 +114,53 @@ def test_capability_review_task_is_durable_but_not_executable(control_db):
     assert task["tool_arguments"]["token"] == "[REDACTED]"
     assert task["acceptance"] == ["Exact version and checksum verified"]
     assert control_plane.approve_task(task["id"])["status"] == "approved"
+
+
+def test_a_subagent_principal_cannot_reach_the_host_even_via_the_control_plane(control_db):
+    """Third of the three enforcement layers in tool_permissions.py: agent.py
+    filters the schema and re-checks before dispatch, and this refuses even a
+    caller that skipped both."""
+    tools_module = ModuleType("backend.tools")
+    execute = MagicMock()
+    tools_module.execute_tool = execute
+    with patch.dict(sys.modules, {"backend.tools": tools_module}):
+        for tool in ("execute_command", "dev_exec", "git_push", "get_system_stats"):
+            result = json.loads(control_plane.execute_governed_tool(tool, {}, "bot", principal=SUBAGENT))
+            assert result["status"] == "forbidden"
+        execute.assert_not_called()
+        # No Control Plane task is opened either — a blocked call leaves no
+        # approval for the owner to accidentally grant later.
+        assert control_plane.list_tasks(limit=50) == []
+
+
+def test_an_approved_task_cannot_be_replayed_by_a_lesser_principal(control_db):
+    tools_module = ModuleType("backend.tools")
+    execute = MagicMock(return_value=json.dumps({"status": "success"}))
+    tools_module.execute_tool = execute
+    with patch.dict(sys.modules, {"backend.tools": tools_module}):
+        pending = json.loads(control_plane.execute_governed_tool(
+            "execute_command", {"command": "uname -a"}, "dashboard", principal=OWNER
+        ))
+        control_plane.approve_task(pending["task_id"])
+        task = control_plane.approve_task(pending["task_id"])
+        assert task["status"] == "approved"
+
+        replayed = json.loads(control_plane.execute_governed_tool(
+            "execute_command", task["tool_arguments"], "bot",
+            approved_task_id=task["id"], principal=SUBAGENT,
+        ))
+        assert replayed["status"] == "forbidden"
+        execute.assert_not_called()
+
+
+def test_the_owners_shell_still_refuses_host_wrecking_commands(control_db):
+    tools_module = ModuleType("backend.tools")
+    execute = MagicMock()
+    tools_module.execute_tool = execute
+    with patch.dict(sys.modules, {"backend.tools": tools_module}):
+        result = json.loads(control_plane.execute_governed_tool(
+            "execute_command", {"command": "rm -rf /"}, "dashboard", principal=OWNER
+        ))
+        assert result["status"] == "forbidden"
+        assert "Refused" in result["error"]
+        execute.assert_not_called()

@@ -132,6 +132,18 @@ async def send_pending_reply(reply_id: str, edited_text: Optional[str] = None) -
     if not final_text:
         raise ValueError("Cannot send an empty reply")
 
+    await send_to_channel(reply["binding_id"], reply["platform"], reply["chat_id"], final_text)
+    _set_status(reply_id, "sent", sent_at=_now())
+    return get_pending_reply(reply_id)
+
+
+async def send_to_channel(binding_id: str, platform: str, chat_id: str, final_text: str) -> None:
+    """Delivers one message on a bound channel, using that channel's own stored
+    credential. Split out of send_pending_reply() so the billing webhook can
+    tell a buyer their access is open on the same line they bought it
+    (backend/payments.py), without going through the draft queue."""
+    reply = {"binding_id": binding_id, "platform": platform, "chat_id": chat_id}
+
     if reply["platform"] == "telegram":
         from backend.agent_messenger_governance import resolve_telegram_binding_token
         from backend import agent_bot
@@ -149,23 +161,12 @@ async def send_pending_reply(reply_id: str, edited_text: Optional[str] = None) -
                 )
                 response.raise_for_status()
     elif reply["platform"] == "matrix":
-        from backend.agent_messenger_governance import resolve_matrix_binding_credentials
         from backend import agent_matrix_bot
-        from nio import AsyncClient
 
-        credentials = resolve_matrix_binding_credentials(reply["binding_id"])
-        if not credentials:
-            raise RuntimeError("This channel's credentials are no longer available — was it revoked?")
-        client = AsyncClient(credentials["homeserver_url"], credentials["user_id"])
-        client.access_token = credentials["access_token"]
-        client.user_id = credentials["user_id"]
-        try:
-            for chunk in agent_matrix_bot._split_text(final_text):
-                await client.room_send(
-                    reply["chat_id"], message_type="m.room.message", content={"msgtype": "m.text", "body": chunk}
-                )
-        finally:
-            await client.close()
+        # Sent through the running bot rather than a throwaway client: that one
+        # holds the olm store, so a reply into an encrypted room is encrypted.
+        # A fresh client would happily post it as plaintext into an E2EE room.
+        await agent_matrix_bot.manager.send_text(reply["binding_id"], reply["chat_id"], final_text)
     elif reply["platform"] == "discord":
         from backend.agent_messenger_governance import resolve_discord_binding_token
         from backend import agent_discord_bot
@@ -210,9 +211,6 @@ async def send_pending_reply(reply_id: str, edited_text: Optional[str] = None) -
         )
     else:
         raise ValueError(f"Unknown platform: {reply['platform']}")
-
-    _set_status(reply_id, "sent", sent_at=_now())
-    return get_pending_reply(reply_id)
 
 
 def discard_pending_reply(reply_id: str) -> None:

@@ -44,12 +44,14 @@ RUN pip install --no-cache-dir \
     "todoist-api-python>=2.1.3" \
     "pytest==8.3.5" \
     "pytest-asyncio==0.25.3" \
+    "respx>=0.20" \
     "faster-whisper>=1.1.0" \
     "redis>=5.0.0" \
-    "matrix-nio>=0.24.0" \
+    "matrix-nio[e2e]>=0.24.0" \
     "discord.py>=2.4.0" \
     "slack-bolt>=1.20.0" \
-    "piper-tts>=1.6.0"
+    "piper-tts>=1.6.0" \
+    "cryptography>=41.0.0"
 
 # Git is a required read-only workspace capability for planning and verification.
 RUN apt-get update && apt-get install -y --no-install-recommends git \

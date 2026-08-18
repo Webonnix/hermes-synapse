@@ -18,6 +18,37 @@ function formatBytes(value?: number) {
   return `${(value / 1024 ** unit).toFixed(unit > 2 ? 1 : 0)} ${units[unit]}`;
 }
 
+/** 262144 -> "256K". The context a model was actually loaded with is the number
+ *  that matters operationally, so it is shown the way people quote it. */
+function formatContext(tokens?: number) {
+  if (!tokens || tokens < 1) return '';
+  if (tokens >= 1024 * 1024) return `${(tokens / (1024 * 1024)).toFixed(tokens % (1024 * 1024) ? 1 : 0)}M ctx`;
+  if (tokens >= 1024) return `${Math.round(tokens / 1024)}K ctx`;
+  return `${tokens} ctx`;
+}
+
+/** Ollama reports "name" and "name:latest" interchangeably depending on the
+ *  endpoint, so compare tags the way Ollama resolves them rather than literally. */
+function sameModel(a?: string, b?: string) {
+  if (!a || !b) return false;
+  const norm = (value: string) => (value.includes(':') ? value : `${value}:latest`);
+  return norm(a) === norm(b);
+}
+
+/** What a resident model is really costing right now, straight from /api/ps. */
+function residencySummary(entry?: OllamaModel) {
+  if (!entry) return '';
+  const parts = [formatContext(entry.context_length)];
+  if (entry.size_vram) {
+    parts.push(`${formatBytes(entry.size_vram)} VRAM`);
+    if (entry.size) {
+      const onGpu = Math.round((entry.size_vram / entry.size) * 100);
+      parts.push(onGpu >= 100 ? '100% GPU' : `${onGpu}% GPU · CPU offload`);
+    }
+  }
+  return parts.filter(Boolean).join(' · ');
+}
+
 async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   const data = await response.json().catch(() => ({}));
@@ -41,7 +72,19 @@ export function OllamaManager({ selectedModel, onSelectModel, activeModel, onAct
   const [busyModel, setBusyModel] = useState('');
   const [activatingModel, setActivatingModel] = useState('');
 
-  const runningNames = useMemo(() => new Set(running.map(model => model.name || model.model || '')), [running]);
+  /** Keyed by name so each row can show its real residency, not just a yes/no. */
+  const runningByName = useMemo(() => {
+    const map = new Map<string, OllamaModel>();
+    for (const model of running) map.set(model.name || model.model || '', model);
+    return map;
+  }, [running]);
+
+  /** The configured model is what will serve the next request; whether it is
+   *  resident is a separate fact, and the two disagreeing is worth surfacing. */
+  const activeResidency = running.find(model => sameModel(model.name || model.model, activeModel));
+  const strayLoaded = running
+    .map(model => model.name || model.model || '')
+    .filter(name => name && !sameModel(name, activeModel));
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -142,7 +185,7 @@ export function OllamaManager({ selectedModel, onSelectModel, activeModel, onAct
 
   /** Switches the live agent to this model immediately — no need to touch the rest of the config form below. */
   const activateModel = async (model: string) => {
-    if (activatingModel || model === activeModel) return;
+    if (activatingModel || sameModel(model, activeModel)) return;
     setActivatingModel(model);
     setError('');
     try {
@@ -177,11 +220,26 @@ export function OllamaManager({ selectedModel, onSelectModel, activeModel, onAct
       <div className="ollama-runtime-stats">
         <div><HardDrive size={15} /><span>Installed</span><strong>{status?.models_count ?? models.length}</strong></div>
         <div><Cpu size={15} /><span>Loaded</span><strong>{status?.running_count ?? running.length}</strong></div>
-        <div><Zap size={15} /><span>Active now</span><strong title={activeModel}>{activeModel || 'None'}</strong></div>
-        {selectedModel && selectedModel !== activeModel && (
+        <div className="ollama-active-stat">
+          <Zap size={15} /><span>Active now</span>
+          <strong title={activeModel}>{activeModel || 'None'}</strong>
+          {activeModel && (
+            <em className={activeResidency ? 'is-resident' : ''}>
+              {activeResidency ? `in VRAM · ${residencySummary(activeResidency)}` : 'not loaded — loads on first request'}
+            </em>
+          )}
+        </div>
+        {selectedModel && !sameModel(selectedModel, activeModel) && (
           <div><Box size={15} /><span>Pending in form below</span><strong title={selectedModel}>{selectedModel}</strong></div>
         )}
       </div>
+
+      {strayLoaded.length > 0 && (
+        <div className="ollama-warning" role="status">
+          <AlertTriangle size={15} />
+          <span>Loaded in VRAM but not the active model: <strong>{strayLoaded.join(', ')}</strong>. It still occupies GPU memory until it expires or you unload it.</span>
+        </div>
+      )}
 
       <div className="ollama-pull">
         <label><Download size={16} /><input value={pullName} onChange={event => setPullName(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void pullModel(); } }} placeholder="Model name, e.g. qwen3:8b" disabled={pulling || !status?.available} aria-label="Model to pull" /></label>
@@ -193,18 +251,19 @@ export function OllamaManager({ selectedModel, onSelectModel, activeModel, onAct
         {!loading && status?.available && !models.length && <div className="ollama-no-models">No local models installed. Pull a model above.</div>}
         {models.map(model => {
           const name = model.name || model.model || '';
-          const isRunning = runningNames.has(name);
-          const isActive = name === activeModel;
+          const residency = runningByName.get(name);
+          const isRunning = Boolean(residency);
+          const isActive = sameModel(name, activeModel);
           const busy = busyModel === name;
           const activating = activatingModel === name;
           return (
             <article key={name} role="listitem" className={`${selectedModel === name ? 'is-selected' : ''} ${isActive ? 'is-active' : ''}`}>
               <button type="button" className="ollama-model-select" onClick={() => onSelectModel(name)} aria-pressed={selectedModel === name}>
                 <span className="ollama-model-icon"><Box size={17} /></span>
-                <span className="ollama-model-info"><strong title={name}>{name}</strong><small>{model.details?.parameter_size || 'Local model'} · {model.details?.quantization_level || model.details?.family || 'Ollama'} · {formatBytes(model.size)}</small></span>
+                <span className="ollama-model-info"><strong title={name}>{name}</strong><small>{residency ? residencySummary(residency) : `${model.details?.parameter_size || 'Local model'} · ${model.details?.quantization_level || model.details?.family || 'Ollama'} · ${formatBytes(model.size)}`}</small></span>
                 <span className="ollama-model-badges">
                   {isActive && <span className="ollama-active-badge" title="This is the model the live agent uses right now"><Zap size={11} fill="currentColor" />Active</span>}
-                  <span className={`ollama-running ${isRunning ? 'is-running' : ''}`}>{isRunning ? <><Play size={11} fill="currentColor" />Loaded</> : 'Idle'}</span>
+                  <span className={`ollama-running ${isRunning ? 'is-running' : ''}`} title={residency ? `Resident in GPU memory — ${residencySummary(residency)}` : 'Not in memory'}>{isRunning ? <><Play size={11} fill="currentColor" />Loaded</> : 'Idle'}</span>
                 </span>
               </button>
               <div className="ollama-model-actions">

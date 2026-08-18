@@ -187,6 +187,18 @@ def _json_or_empty(raw: Any) -> Dict[str, Any]:
     except Exception:
         return {}
 
+
+def _json_list_or_empty(raw: Any) -> List[str]:
+    if isinstance(raw, list):
+        return [str(v) for v in raw]
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        return [str(v) for v in parsed] if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
 def init_db():
     """Initializes the database and creates the tables if they don't exist."""
     _get_backend().init_schema()
@@ -219,6 +231,15 @@ def _init_sqlite_schema():
     try:
         cursor.execute("ALTER TABLE messages ADD COLUMN cost_usd REAL DEFAULT 0.0")
         logger.info("Migrated messages table to include cost_usd column.")
+    except sqlite3.OperationalError:
+        pass
+
+    # Per-reply generation stats (tokens, decode/prompt time, model) as JSON, so
+    # the chat can still show them after a reload — they used to live only in the
+    # websocket event and vanished with the page.
+    try:
+        cursor.execute("ALTER TABLE messages ADD COLUMN run_meta TEXT")
+        logger.info("Migrated messages table to include run_meta column.")
     except sqlite3.OperationalError:
         pass
 
@@ -258,6 +279,15 @@ def _init_sqlite_schema():
         try:
             cursor.execute("ALTER TABLE decision_logs ADD COLUMN cost_usd REAL DEFAULT 0.0")
             logger.info("Migrated decision_logs table to include cost_usd column.")
+        except sqlite3.OperationalError:
+            pass
+    if "provider_id" not in existing_dec_cols:
+        try:
+            # Which provider actually served this call: 'ollama' (or NULL, same
+            # meaning) for local, else a provider_bindings.id — powers the
+            # per-agent spend-by-provider breakdown (get_agent_provider_breakdown).
+            cursor.execute("ALTER TABLE decision_logs ADD COLUMN provider_id TEXT")
+            logger.info("Migrated decision_logs table to include provider_id column.")
         except sqlite3.OperationalError:
             pass
 
@@ -331,6 +361,19 @@ def _init_sqlite_schema():
         ("budget_usd_limit", "REAL"),
         ("budget_period", "TEXT DEFAULT 'monthly'"),
         ("tier_id", "TEXT"),
+        # JSON array of provider_bindings ids this agent may fall back to besides
+        # model_provider, in priority order. '[]'/NULL = unrestricted (legacy
+        # behavior: model_provider alone, or the full global router chain when
+        # model_provider='ollama') — see backend/agent_provider_access.py.
+        ("allowed_provider_ids", "TEXT DEFAULT '[]'"),
+        # When the agent's budget_usd_limit is exhausted: 0 (default) hard-blocks
+        # the turn as before; 1 degrades to the free local model instead of
+        # refusing, so the agent keeps responding at $0 rather than going silent.
+        ("budget_fallback_to_local", "INTEGER DEFAULT 0"),
+        # Which named project (backend/projects.py) this agent belongs to.
+        # NULL = unassigned; soft reference, same convention as tier_id above
+        # (no DB-level FK, checked in application code where it matters).
+        ("project_id", "TEXT"),
     ]:
         try:
             cursor.execute(f"ALTER TABLE subagents ADD COLUMN {col} {definition}")
@@ -604,8 +647,13 @@ def _init_sqlite_schema():
         )
     """)
     cursor.execute("PRAGMA table_info(session_metadata)")
-    if "agent_id" not in {row[1] for row in cursor.fetchall()}:
+    session_meta_cols = {row[1] for row in cursor.fetchall()}
+    if "agent_id" not in session_meta_cols:
         cursor.execute("ALTER TABLE session_metadata ADD COLUMN agent_id TEXT")
+    if "project_id" not in session_meta_cols:
+        # Which named project (backend/projects.py) this conversation belongs
+        # to. NULL = unassigned, same soft-reference convention as agent_id.
+        cursor.execute("ALTER TABLE session_metadata ADD COLUMN project_id TEXT")
 
     # Control Plane: durable tasks, approval decisions and an evidence ledger.
     cursor.execute("""
@@ -689,7 +737,7 @@ def _init_sqlite_schema():
             plan_id TEXT,
             trace_id TEXT,
             iter_used INTEGER NOT NULL DEFAULT 0,
-            iter_budget INTEGER NOT NULL DEFAULT 200,
+            iter_budget INTEGER NOT NULL DEFAULT 0,
             cost_used REAL NOT NULL DEFAULT 0,
             cost_budget REAL,
             wall_deadline TEXT,
@@ -705,16 +753,39 @@ def _init_sqlite_schema():
     """)
     # Kanban board additions: who owns the card, where its published demo lives,
     # and which ephemeral sandbox container is currently running it.
+    #
+    # Site lineage (parent_run_id / root_run_id / revision): a card can be a
+    # *continuation* of an earlier one — the same product, one revision later.
+    # Every card in a chain carries the chain's first card as root_run_id, so
+    # "all revisions of this site" is one indexed lookup, the published demo
+    # can live behind a single stable root-scoped URL (demo_url) while each
+    # revision keeps its own immutable snapshot (demo_snapshot_url), and a
+    # continuation's sandbox can be cloned from its parent's working tree
+    # instead of starting from an empty repo. See backend/dev_runs.py and
+    # tools.dev_publish_demo.
     for col, definition in [
         ("assignee_agent_id", "TEXT"),
         ("demo_url", "TEXT"),
         ("sandbox_container", "TEXT"),
+        ("parent_run_id", "TEXT"),
+        ("root_run_id", "TEXT"),
+        ("revision", "INTEGER NOT NULL DEFAULT 1"),
+        ("demo_snapshot_url", "TEXT"),
     ]:
         try:
             cursor.execute(f"ALTER TABLE dev_runs ADD COLUMN {col} {definition}")
             logger.info(f"Added column {col} to dev_runs table.")
         except sqlite3.OperationalError:
             pass
+    # Rows that predate lineage are each their own root at revision 1, so
+    # every code path can rely on root_run_id being set.
+    cursor.execute(
+        "UPDATE dev_runs SET root_run_id = id WHERE root_run_id IS NULL OR root_run_id = ''"
+    )
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_dev_runs_root
+        ON dev_runs (root_run_id, revision)
+    """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS dev_run_steps (
             id TEXT PRIMARY KEY,
@@ -732,6 +803,19 @@ def _init_sqlite_schema():
         CREATE INDEX IF NOT EXISTS idx_dev_run_steps_run
         ON dev_run_steps (run_id, seq)
     """)
+    # `summary` stays the short, UI-facing one-liner. `result` keeps the full
+    # (capped) tool output so the executor loop can actually observe what a
+    # tool returned instead of a 400-char preview, and `fingerprint` is the
+    # tool+arguments hash used for duplicate-action detection (dev_runs.py).
+    for col, definition in [
+        ("result", "TEXT NOT NULL DEFAULT ''"),
+        ("fingerprint", "TEXT NOT NULL DEFAULT ''"),
+    ]:
+        try:
+            cursor.execute(f"ALTER TABLE dev_run_steps ADD COLUMN {col} {definition}")
+            logger.info(f"Added column {col} to dev_run_steps table.")
+        except sqlite3.OperationalError:
+            pass
 
     # Running per-session summary of chat history that has fallen out of the
     # verbatim get_chat_history() window (see condenser.py). One row per
@@ -765,7 +849,8 @@ def _init_postgres_schema():
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                cost_usd REAL DEFAULT 0.0
+                cost_usd REAL DEFAULT 0.0,
+                run_meta TEXT
             )
         """)
 
@@ -796,6 +881,10 @@ def _init_postgres_schema():
             ("agent_id", "TEXT DEFAULT 'jarvis'"),
             ("completion_tokens_estimate", "INTEGER DEFAULT 0"),
             ("cost_usd", "REAL DEFAULT 0.0"),
+            # Which provider actually served this call: 'ollama' (or NULL, same
+            # meaning) for local, else a provider_bindings.id — powers the
+            # per-agent spend-by-provider breakdown (get_agent_provider_breakdown).
+            ("provider_id", "TEXT"),
         ]:
             cursor.execute(
                 "SELECT 1 FROM information_schema.columns WHERE table_name='decision_logs' AND column_name=%s",
@@ -864,9 +953,30 @@ def _init_postgres_schema():
             ("x", "INTEGER DEFAULT 100"),
             ("y", "INTEGER DEFAULT 100"),
             ("temperature", "REAL DEFAULT 0.7"),
+            ("role", "TEXT DEFAULT 'Specialist'"),
+            ("status", "TEXT DEFAULT 'idle'"),
+            ("is_enabled", "INTEGER DEFAULT 1"),
+            ("model_provider", "TEXT DEFAULT 'ollama'"),
+            ("model_type", "TEXT DEFAULT 'local'"),
+            ("model_params", "TEXT DEFAULT '{}'"),
+            ("current_task", "TEXT DEFAULT ''"),
+            ("last_action", "TEXT DEFAULT ''"),
+            ("last_error", "TEXT DEFAULT ''"),
+            ("progress", "INTEGER DEFAULT 0"),
+            ("updated_at", "TEXT"),
             ("budget_usd_limit", "REAL"),
             ("budget_period", "TEXT DEFAULT 'monthly'"),
             ("tier_id", "TEXT"),
+            # JSON array of provider_bindings ids this agent may fall back to besides
+            # model_provider, in priority order. '[]'/NULL = unrestricted (legacy
+            # behavior: model_provider alone, or the full global router chain when
+            # model_provider='ollama') — see backend/agent_provider_access.py.
+            ("allowed_provider_ids", "TEXT DEFAULT '[]'"),
+            # When the agent's budget_usd_limit is exhausted: 0 (default) hard-blocks
+            # the turn as before; 1 degrades to the free local model instead of
+            # refusing, so the agent keeps responding at $0 rather than going silent.
+            ("budget_fallback_to_local", "INTEGER DEFAULT 0"),
+            ("project_id", "TEXT"),
         ]:
             cursor.execute(
                 "SELECT 1 FROM information_schema.columns WHERE table_name='subagents' AND column_name=%s",
@@ -921,13 +1031,15 @@ def _init_postgres_schema():
             )
         """)
 
-        # PostgreSQL Migration helper: verify and add agent_id to session_metadata
-        cursor.execute(
-            "SELECT 1 FROM information_schema.columns WHERE table_name='session_metadata' AND column_name='agent_id'"
-        )
-        if not cursor.fetchone():
-            cursor.execute("ALTER TABLE session_metadata ADD COLUMN agent_id TEXT")
-            logger.info("PostgreSQL Migration: added column agent_id to session_metadata table.")
+        # PostgreSQL Migration helper: verify and add agent_id/project_id to session_metadata
+        for col in ("agent_id", "project_id"):
+            cursor.execute(
+                "SELECT 1 FROM information_schema.columns WHERE table_name='session_metadata' AND column_name=%s",
+                (col,)
+            )
+            if not cursor.fetchone():
+                cursor.execute(f"ALTER TABLE session_metadata ADD COLUMN {col} TEXT")
+                logger.info(f"PostgreSQL Migration: added column {col} to session_metadata table.")
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS condensed_summaries (
@@ -1109,17 +1221,42 @@ def save_message(session_id: str, role: str, content: str, cost_usd: float = 0.0
         logger.error(f"Error saving message: {e}")
         return None
 
+def update_message_meta(message_id: Optional[int], meta: Dict[str, Any]) -> None:
+    """Attaches the run's generation stats to an already-saved message.
+
+    The reply is persisted before the turn's totals are known, so this is a
+    second write rather than a column on the insert."""
+    if not message_id or not meta:
+        return
+    try:
+        _execute(
+            "UPDATE messages SET run_meta = ? WHERE id = ?",
+            (json.dumps(meta, ensure_ascii=False), message_id),
+        )
+    except Exception as e:
+        logger.error(f"Error saving message run_meta: {e}")
+
+
 def get_chat_history(session_id: str, limit: int = 20) -> List[Dict[str, Any]]:
     """Retrieves the last N messages for a given chat session, in chronological order."""
     try:
         rows = _execute("""
-            SELECT id, role, content, cost_usd FROM (
-                SELECT id, role, content, cost_usd FROM messages
+            SELECT id, role, content, cost_usd, run_meta FROM (
+                SELECT id, role, content, cost_usd, run_meta FROM messages
                 WHERE session_id = ?
                 ORDER BY id DESC LIMIT ?
             ) ORDER BY id ASC
         """, (session_id, limit))
-        return [{"id": r[0], "role": r[1], "content": r[2], "cost_usd": r[3]} for r in rows]
+        history = []
+        for r in rows:
+            item = {"id": r[0], "role": r[1], "content": r[2], "cost_usd": r[3]}
+            if r[4]:
+                try:
+                    item["meta"] = json.loads(r[4])
+                except (TypeError, ValueError):
+                    pass
+            history.append(item)
+        return history
     except Exception as e:
         logger.error(f"Error retrieving chat history: {e}")
         return []
@@ -1209,6 +1346,8 @@ def save_user_memory(key: str, value: str, session_id: str = "global", source: s
         return None
 
     try:
+        from backend.local_crypto import encrypt_text
+
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("""
@@ -1218,7 +1357,7 @@ def save_user_memory(key: str, value: str, session_id: str = "global", source: s
                 value = excluded.value,
                 source = excluded.source,
                 updated_at = CURRENT_TIMESTAMP
-        """, (clean_session, clean_key, clean_value, source))
+        """, (clean_session, clean_key, encrypt_text(clean_value), source))
         memory_id = cursor.lastrowid
         conn.commit()
         conn.close()
@@ -1238,7 +1377,11 @@ def get_preferred_address() -> Optional[str]:
         )
         row = cursor.fetchone()
         conn.close()
-        return row[0].strip() if row and row[0] else None
+        if not row or not row[0]:
+            return None
+        from backend.local_crypto import decrypt_text
+        decrypted = decrypt_text(row[0])
+        return decrypted.strip() if decrypted else None
     except Exception as e:
         logger.error(f"Error reading preferred address: {e}")
         return None
@@ -1257,6 +1400,9 @@ def search_user_memory(query: str, session_id: str = "global", limit: int = 4) -
         """, ((session_id or "global"),))
         rows = cursor.fetchall()
         conn.close()
+
+        from backend.local_crypto import decrypt_text
+        rows = [(r[0], r[1], r[2], decrypt_text(r[3]), r[4], r[5]) for r in rows]
 
         terms = {
             token.lower()
@@ -1303,12 +1449,13 @@ def list_user_memory(session_id: str = "global", limit: int = 100) -> List[Dict[
         """, ((session_id or "global"), limit))
         rows = cursor.fetchall()
         conn.close()
+        from backend.local_crypto import decrypt_text
         return [
             {
                 "id": row[0],
                 "session_id": row[1],
                 "key": row[2],
-                "value": row[3],
+                "value": decrypt_text(row[3]),
                 "source": row[4],
                 "updated_at": row[5],
             }
@@ -1362,8 +1509,8 @@ def save_decision_log(log: Dict[str, Any]):
             INSERT INTO decision_logs (
                 timestamp, session_id, model, latency_ms, success,
                 error, prompt_tokens_estimate, user_message, assistant_response, traces,
-                agent_id, completion_tokens_estimate, cost_usd
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                agent_id, completion_tokens_estimate, cost_usd, provider_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             log["timestamp"],
             log["session_id"],
@@ -1378,6 +1525,7 @@ def save_decision_log(log: Dict[str, Any]):
             log.get("agent_id", "jarvis"),
             log.get("completion_tokens_estimate", 0),
             log.get("cost_usd", 0.0),
+            log.get("provider_id") or "ollama",
         ))
     except Exception as e:
         logger.error(f"Error saving decision log to database: {e}")
@@ -1481,19 +1629,24 @@ def save_subagent(
     budget_usd_limit: Optional[float] = None,
     budget_period: str = "monthly",
     tier_id: Optional[str] = None,
+    allowed_provider_ids: Optional[List[str]] = None,
+    budget_fallback_to_local: bool = False,
+    project_id: Optional[str] = None,
 ):
     """Saves or updates a subagent's configuration in the database."""
     try:
         model_params_json = json.dumps(model_params or {}, ensure_ascii=False)
+        allowed_provider_ids_json = json.dumps(list(allowed_provider_ids or []), ensure_ascii=False)
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO subagents (
                 id, name, system_prompt, model, agent_type, parent_id, skills, x, y,
                 temperature, role, status, is_enabled, model_provider, model_type,
-                model_params, budget_usd_limit, budget_period, tier_id, updated_at
+                model_params, budget_usd_limit, budget_period, tier_id,
+                allowed_provider_ids, budget_fallback_to_local, project_id, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name,
                 system_prompt=excluded.system_prompt,
@@ -1513,11 +1666,15 @@ def save_subagent(
                 budget_usd_limit=excluded.budget_usd_limit,
                 budget_period=excluded.budget_period,
                 tier_id=excluded.tier_id,
+                allowed_provider_ids=excluded.allowed_provider_ids,
+                budget_fallback_to_local=excluded.budget_fallback_to_local,
+                project_id=excluded.project_id,
                 updated_at=CURRENT_TIMESTAMP
         """, (
             id, name, system_prompt, model, agent_type, parent_id, skills, x, y,
             temperature, role, status, 1 if is_enabled else 0, model_provider,
-            model_type, model_params_json, budget_usd_limit, budget_period or "monthly", tier_id
+            model_type, model_params_json, budget_usd_limit, budget_period or "monthly", tier_id,
+            allowed_provider_ids_json, 1 if budget_fallback_to_local else 0, project_id,
         ))
         conn.commit()
         conn.close()
@@ -1532,7 +1689,8 @@ def get_subagent(id: str) -> Optional[Dict[str, Any]]:
             SELECT id, name, system_prompt, model, created_at, agent_type, parent_id, skills,
                    x, y, temperature, role, status, is_enabled, model_provider, model_type,
                    model_params, current_task, last_action, last_error, progress, updated_at,
-                   budget_usd_limit, budget_period, tier_id
+                   budget_usd_limit, budget_period, tier_id, allowed_provider_ids, budget_fallback_to_local,
+                   project_id
             FROM subagents WHERE id = ?
         """, (id,))
         if rows:
@@ -1563,6 +1721,9 @@ def get_subagent(id: str) -> Optional[Dict[str, Any]]:
                 "budget_usd_limit": row[22],
                 "budget_period": row[23] or "monthly",
                 "tier_id": row[24],
+                "allowed_provider_ids": _json_list_or_empty(row[25]),
+                "budget_fallback_to_local": bool(row[26]) if row[26] is not None else False,
+                "project_id": row[27],
             }
         return None
     except Exception as e:
@@ -1578,7 +1739,8 @@ def get_all_subagents() -> List[Dict[str, Any]]:
             SELECT id, name, system_prompt, model, created_at, agent_type, parent_id, skills,
                    x, y, temperature, role, status, is_enabled, model_provider, model_type,
                    model_params, current_task, last_action, last_error, progress, updated_at,
-                   budget_usd_limit, budget_period, tier_id
+                   budget_usd_limit, budget_period, tier_id, allowed_provider_ids, budget_fallback_to_local,
+                   project_id
             FROM subagents ORDER BY id ASC
         """)
         rows = cursor.fetchall()
@@ -1610,6 +1772,9 @@ def get_all_subagents() -> List[Dict[str, Any]]:
                 "budget_usd_limit": r[22],
                 "budget_period": r[23] or "monthly",
                 "tier_id": r[24],
+                "allowed_provider_ids": _json_list_or_empty(r[25]),
+                "budget_fallback_to_local": bool(r[26]) if r[26] is not None else False,
+                "project_id": r[27],
             }
             for r in rows
         ]
@@ -1671,7 +1836,34 @@ def get_agent_budget_status(agent_id: str) -> Dict[str, Any]:
         "used_usd": round(used, 6),
         "remaining_usd": (round(max(0.0, limit - used), 6) if limit is not None else None),
         "exceeded": exceeded,
+        "by_provider": get_agent_provider_breakdown(agent_id, since_iso),
     }
+
+
+def get_agent_provider_breakdown(agent_id: str, since_iso: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Spend split by which provider actually served each call — same window
+    rules as get_agent_budget_status (whole-history if since_iso is None).
+    Powers the per-agent 'spend by provider' panel in the Agent Admin UI."""
+    try:
+        if since_iso:
+            rows = _execute(
+                """SELECT COALESCE(provider_id, 'ollama') AS pid, COUNT(*), COALESCE(SUM(cost_usd), 0)
+                   FROM decision_logs WHERE agent_id = ? AND timestamp >= ? GROUP BY pid ORDER BY 3 DESC""",
+                (agent_id, since_iso),
+            )
+        else:
+            rows = _execute(
+                """SELECT COALESCE(provider_id, 'ollama') AS pid, COUNT(*), COALESCE(SUM(cost_usd), 0)
+                   FROM decision_logs WHERE agent_id = ? GROUP BY pid ORDER BY 3 DESC""",
+                (agent_id,),
+            )
+        return [
+            {"provider_id": r[0], "calls": r[1], "used_usd": round(float(r[2]), 6)}
+            for r in rows
+        ]
+    except Exception as e:
+        logger.error(f"Error computing provider breakdown for agent {agent_id}: {e}")
+        return []
 
 
 def log_agent_event(
@@ -1773,10 +1965,11 @@ def update_agent_runtime_state(
 def db_save_subagent_memory(subagent_id: str, key: str, value: str):
     """Saves or updates a memory fact (key-value pair) for a specific subagent."""
     try:
+        from backend.local_crypto import encrypt_text
         _execute("""
             INSERT OR REPLACE INTO subagent_memory (subagent_id, key, value, updated_at)
             VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-        """, (subagent_id, key, value))
+        """, (subagent_id, key, encrypt_text(value)))
         logger.info(f"Subagent memory saved: {subagent_id} -> {key}")
     except Exception as e:
         logger.error(f"Error saving subagent memory: {e}")
@@ -1794,7 +1987,8 @@ def db_get_subagent_memory(subagent_id: str, key: Optional[str] = None) -> Dict[
                 "SELECT key, value FROM subagent_memory WHERE subagent_id = ?",
                 (subagent_id,),
             )
-        return {r[0]: r[1] for r in rows}
+        from backend.local_crypto import decrypt_text
+        return {r[0]: decrypt_text(r[1]) for r in rows}
     except Exception as e:
         logger.error(f"Error getting subagent memory: {e}")
         return {}
@@ -1877,26 +2071,39 @@ def list_configured_api_keys() -> List[str]:
 
 # ─── SESSION METADATA HELPERS ──────────────────────────────────────────────────
 
-def save_session_metadata(session_id: str, title: str, agent_id: Optional[str] = None):
-    """Saves or updates custom metadata (title and target agent) for a chat session."""
+def save_session_metadata(
+    session_id: str, title: str, agent_id: Optional[str] = None, project_id: Optional[str] = None,
+):
+    """Saves or updates custom metadata (title, target agent, project) for a
+    chat session. agent_id/project_id are selectively-updatable: passing None
+    for either preserves whatever the row already had, so a title-only rename
+    (or an agent-only reassign) never clobbers the other field."""
     try:
         # Check if row exists to preserve existing values if updating selectively
         rows = _execute(
-            "SELECT agent_id FROM session_metadata WHERE session_id = ?", (session_id,)
+            "SELECT agent_id, project_id FROM session_metadata WHERE session_id = ?", (session_id,)
         )
         final_agent_id = agent_id
-        if rows and agent_id is None:
-            final_agent_id = rows[0][0]
+        final_project_id = project_id
+        if rows:
+            if agent_id is None:
+                final_agent_id = rows[0][0]
+            if project_id is None:
+                final_project_id = rows[0][1]
 
         _execute("""
-            INSERT INTO session_metadata (session_id, title, agent_id, updated_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO session_metadata (session_id, title, agent_id, project_id, updated_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(session_id) DO UPDATE SET
                 title = excluded.title,
                 agent_id = excluded.agent_id,
+                project_id = excluded.project_id,
                 updated_at = CURRENT_TIMESTAMP
-        """, (session_id, title, final_agent_id))
-        logger.info(f"Saved custom metadata for session {session_id}: title={title}, agent_id={final_agent_id}")
+        """, (session_id, title, final_agent_id, final_project_id))
+        logger.info(
+            f"Saved custom metadata for session {session_id}: title={title}, "
+            f"agent_id={final_agent_id}, project_id={final_project_id}"
+        )
     except Exception as e:
         logger.error(f"Error saving session metadata for {session_id}: {e}")
 
@@ -1913,6 +2120,17 @@ def get_session_agent_id(session_id: str) -> Optional[str]:
         return rows[0][0] if rows else None
     except Exception as e:
         logger.error(f"Error retrieving session agent ID for {session_id}: {e}")
+        return None
+
+def get_session_project_id(session_id: str) -> Optional[str]:
+    """Retrieves the mapped project ID for a session."""
+    try:
+        rows = _execute(
+            "SELECT project_id FROM session_metadata WHERE session_id = ?", (session_id,)
+        )
+        return rows[0][0] if rows else None
+    except Exception as e:
+        logger.error(f"Error retrieving session project ID for {session_id}: {e}")
         return None
 
 def get_session_title(session_id: str) -> Optional[str]:

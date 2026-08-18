@@ -166,7 +166,7 @@ export function ObsidianTab({ authToken }: ObsidianTabProps) {
           <span style={{ fontSize: '0.78rem', color: status?.reachable ? '#00ffa0' : '#ff6060' }}>
             {status ? status.message : 'Checking...'}
           </span>
-          <button onClick={fetchStatus} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-dim)', padding: 0 }}>
+          <button type="button" onClick={fetchStatus} aria-label="Refresh status" title="Refresh status" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-dim)', padding: 0 }}>
             <RefreshCw size={12} />
           </button>
         </div>

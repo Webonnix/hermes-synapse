@@ -13,7 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN useradd --create-home --uid 10001 runner \
     && mkdir -p /dev-repo && chown runner:runner /dev-repo \
-    && git config --system safe.directory /dev-repo
+    && git config --system safe.directory /dev-repo \
+    && git config --system user.email "agent@hermes.local" \
+    && git config --system user.name "Hermes Dev Agent"
 
 COPY backend/dev_runner_api.py /runner/dev_runner_api.py
 

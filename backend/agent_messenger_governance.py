@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
 import re
 import sqlite3
 import uuid
@@ -27,6 +29,8 @@ from typing import Any, Optional
 import httpx
 
 from backend.database import DB_PATH
+
+logger = logging.getLogger("hermes.agent_messenger_governance")
 
 _TOKEN = re.compile(r"^\d+:[A-Za-z0-9_-]{30,}$")
 _PENDING_SECRET_TTL_SECONDS = 24 * 60 * 60  # abandoned proposals self-clean after a day
@@ -39,7 +43,43 @@ _PENDING_SECRET_TTL_SECONDS = 24 * 60 * 60  # abandoned proposals self-clean aft
 # auto-send mode — see the conversation that led to this file for why.
 RESPONSE_MODES = ("draft", "auto_labeled")
 DEFAULT_RESPONSE_MODE = "draft"
-AUTO_REPLY_DISCLOSURE = "\n\n— автоматический ответ ассистента Vexa, не Альберта лично."
+DEFAULT_DISCLOSURE_TEXT = "отвечает личный AI-ассистент, а не человек"
+AUTO_REPLY_DISCLOSURE = f"\n\n— {DEFAULT_DISCLOSURE_TEXT}."
+# A channel may word this its own way, but never remove it: auto-labeled mode was
+# approved on the promise that no reply ever goes out looking like the owner
+# typed it (see the acceptance list in create_*_binding_proposal).
+MAX_DISCLOSURE_LENGTH = 200
+
+
+def _format_disclosure(text: Optional[str]) -> str:
+    clean = " ".join((text or "").split())[:MAX_DISCLOSURE_LENGTH].strip(" —-")
+    return f"\n\n— {clean}" if clean else AUTO_REPLY_DISCLOSURE
+
+
+def auto_reply_disclosure(binding_id: str) -> str:
+    """The signature appended to every auto-labeled reply on this channel.
+
+    Read at send time rather than cached in each bot manager, so an edited
+    wording applies to the next message without restarting the sync loop.
+    """
+    binding = get_binding(binding_id) or {}
+    return _format_disclosure(binding.get("auto_reply_disclosure"))
+
+
+
+# Who is allowed to talk to a bound bot at all.
+#   'owner_only'  — only the chat ids in allowed_chat_ids (today's behaviour, and
+#                   the default every existing binding is migrated to).
+#   'token'       — a social bot: anyone may start it, but the first thing it
+#                   asks for is an access token issued in backend/bot_access.py.
+#                   The owner's own chat ids still get through without one.
+ACCESS_MODES = ("owner_only", "token")
+DEFAULT_ACCESS_MODE = "owner_only"
+
+DEFAULT_WELCOME_MESSAGE = (
+    "Здравствуйте! Для начала работы отправьте, пожалуйста, ваш токен доступа "
+    "(строка вида HRM-…). Без него я не смогу отвечать."
+)
 
 
 def _clean_response_mode(value: Optional[str]) -> str:
@@ -47,6 +87,32 @@ def _clean_response_mode(value: Optional[str]) -> str:
     if mode not in RESPONSE_MODES:
         raise ValueError(f"response_mode must be one of {RESPONSE_MODES}, got {value!r}")
     return mode
+
+
+def _clean_access_mode(value: Optional[str]) -> str:
+    mode = (value or DEFAULT_ACCESS_MODE).strip().lower()
+    if mode not in ACCESS_MODES:
+        raise ValueError(f"access_mode must be one of {ACCESS_MODES}, got {value!r}")
+    return mode
+
+
+# Matrix-only: the account this binding talks through IS the owner's own
+# account (see [[matrix-mas-device-login]]), so a message the owner types
+# themselves in the same room is trivially distinguishable from the bot's own
+# replies — every other channel's bot has its own separate identity/token, so
+# there is no equally reliable way to tell "the owner, typing personally" apart
+# from any other sender there.
+DEFAULT_HUMAN_TAKEOVER_PAUSE_MINUTES = 120
+MAX_HUMAN_TAKEOVER_PAUSE_MINUTES = 1440  # 24h — a hard ceiling against "silent forever" by typo
+
+
+def _clean_pause_minutes(value: Optional[int]) -> int:
+    if value is None:
+        return DEFAULT_HUMAN_TAKEOVER_PAUSE_MINUTES
+    minutes = int(value)
+    if not (0 <= minutes <= MAX_HUMAN_TAKEOVER_PAUSE_MINUTES):
+        raise ValueError(f"human_takeover_pause_minutes must be between 0 and {MAX_HUMAN_TAKEOVER_PAUSE_MINUTES}")
+    return minutes
 
 
 def _runtime_module_for_platform(platform: str):
@@ -106,6 +172,27 @@ def _init_schema() -> None:
             connection.execute(
                 f"ALTER TABLE agent_messenger_bindings ADD COLUMN response_mode TEXT NOT NULL DEFAULT '{DEFAULT_RESPONSE_MODE}'"
             )
+        # Public token access (backend/bot_access.py). 'owner_only' is the
+        # pre-existing behaviour — the allowed_chat_ids whitelist and nothing
+        # else — so every binding that already exists keeps it on migration.
+        if "access_mode" not in existing_columns:
+            connection.execute(
+                f"ALTER TABLE agent_messenger_bindings ADD COLUMN access_mode TEXT NOT NULL DEFAULT '{DEFAULT_ACCESS_MODE}'"
+            )
+        if "default_plan_id" not in existing_columns:
+            connection.execute("ALTER TABLE agent_messenger_bindings ADD COLUMN default_plan_id TEXT")
+        if "welcome_message" not in existing_columns:
+            connection.execute("ALTER TABLE agent_messenger_bindings ADD COLUMN welcome_message TEXT")
+        if "last_error" not in existing_columns:
+            connection.execute("ALTER TABLE agent_messenger_bindings ADD COLUMN last_error TEXT")
+        if "auto_reply_disclosure" not in existing_columns:
+            connection.execute("ALTER TABLE agent_messenger_bindings ADD COLUMN auto_reply_disclosure TEXT")
+        if "human_takeover_pause_minutes" not in existing_columns:
+            connection.execute("ALTER TABLE agent_messenger_bindings ADD COLUMN human_takeover_pause_minutes INTEGER")
+        if "escalation_enabled" not in existing_columns:
+            connection.execute(
+                "ALTER TABLE agent_messenger_bindings ADD COLUMN escalation_enabled INTEGER NOT NULL DEFAULT 0"
+            )
 
 
 def _verify_bot_token(bot_token: str) -> str:
@@ -147,7 +234,17 @@ def apply_binding_overrides(subagent: dict[str, Any], overrides: Optional[dict[s
 
 
 def _check_messenger_allowed(subagent: dict[str, Any]) -> None:
-    """Raises ValueError if the subagent's tier has opted out of messenger bindings."""
+    """Raises ValueError if this agent may not be bound to a messenger at all —
+    either because it is the main agent (Vexa answers to the owner only, never
+    over a channel someone else can reach) or because its tier opted out."""
+    from backend.tool_permissions import MAIN_AGENT_IDS
+
+    if subagent.get("id") in MAIN_AGENT_IDS:
+        raise ValueError(
+            "The main agent cannot be bound to a messenger channel — Vexa is reachable "
+            "only by the owner, through the dashboard or the admin-gated Telegram bot."
+        )
+
     tier_id = subagent.get("tier_id")
     if not tier_id:
         return
@@ -158,6 +255,92 @@ def _check_messenger_allowed(subagent: dict[str, Any]) -> None:
         raise ValueError(f"Tier '{tier['name']}' does not allow messenger bindings for this agent")
 
 
+def _check_public_access_allowed(binding: dict[str, Any]) -> None:
+    """Guards the one-way door of opening a bot to strangers."""
+    from backend.tool_permissions import MAIN_AGENT_IDS
+
+    if binding.get("subagent_id") in MAIN_AGENT_IDS:
+        raise ValueError("The main agent can never be opened to token holders.")
+
+    from backend.database import get_subagent
+
+    subagent = get_subagent(binding["subagent_id"])
+    if not subagent:
+        raise KeyError(f"Unknown agent: {binding['subagent_id']}")
+    _check_messenger_allowed(subagent)
+
+
+def _notify_owner_access_mode_changed(binding: dict[str, Any], new_mode: str) -> None:
+    """Opening a bot to anyone with a token widens its exposure well beyond what
+    the original binding approval covered, so the owner always hears about the
+    switch — same best-effort owner ping channel_replies.py uses for drafts."""
+    import asyncio
+
+    async def _send() -> None:
+        try:
+            import backend.bot as bot
+
+            chat_id = os.getenv("TELEGRAM_CHAT_ID", "").split(",")[0].strip()
+            if not chat_id or not getattr(bot, "telegram_app", None) or not bot.telegram_app.bot:
+                return
+            if new_mode == "token":
+                text = (
+                    f"🔓 Канал @{binding.get('bot_username') or binding['id']} ({binding['platform']}) "
+                    f"переведён в режим доступа по токенам: писать боту теперь может любой, "
+                    f"у кого есть выданный вами токен. Агент: {binding['subagent_id']}."
+                )
+            else:
+                text = (
+                    f"🔒 Канал @{binding.get('bot_username') or binding['id']} ({binding['platform']}) "
+                    f"снова закрыт — отвечает только вам."
+                )
+            await bot.telegram_app.bot.send_message(chat_id=int(chat_id), text=text)
+        except Exception as exc:
+            logger.warning("Access-mode owner notification failed: %s", exc)
+
+    try:
+        asyncio.get_running_loop().create_task(_send())
+    except RuntimeError:
+        pass
+
+
+def notify_owner_escalation(binding: dict[str, Any], platform: str, chat_id: str, requester: str, excerpt: str) -> None:
+    """Pings the owner on the main Telegram bot when bot_access_gate's
+    escalation classifier decided a conversation needs them personally and the
+    other person confirmed. Despite the "Позвонить?" wording shown to that
+    person (backend/bot_access_gate.py's _ESCALATION_OFFER_TEXT) there is no
+    telephony integration anywhere in this codebase — this notification is
+    what actually happens, same best-effort admin-ping channel used for new
+    drafts (channel_replies.py) and dev-run failures (dev_runs.py).
+
+    Called from bot_access_gate.authorize(), which runs inside a worker thread
+    (asyncio.to_thread from the channel manager) — there is no running event
+    loop to schedule a task on, so this blocks briefly on its own loop instead
+    of the fire-and-forget pattern _notify_owner_access_mode_changed uses.
+    """
+    async def _send() -> None:
+        try:
+            import backend.bot as bot
+
+            chat_ids = [c.strip() for c in os.getenv("TELEGRAM_CHAT_ID", "").split(",") if c.strip()]
+            if not chat_ids or not getattr(bot, "telegram_app", None) or not bot.telegram_app.bot:
+                return
+            preview = (excerpt or "").strip().replace("\n", " ")[:300]
+            text = (
+                f"📞 {requester or 'Собеседник'} ({platform}, {binding.get('bot_username') or binding['id']}) "
+                f"просит связаться лично — агент «{binding.get('subagent_id')}» предложил позвать вас, "
+                f"собеседник согласился.\n\n«{preview}»"
+            )
+            await bot.telegram_app.bot.send_message(chat_id=int(chat_ids[0]), text=text)
+        except Exception as exc:
+            logger.warning("Escalation owner notification failed: %s", exc)
+
+    try:
+        asyncio.run(_send())
+    except Exception:
+        logger.exception("Escalation owner notification crashed for binding %s", binding.get("id"))
+
+
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     item = dict(row)
     item.pop("valkey_secret_key", None)  # never surfaced outside this module
@@ -165,6 +348,8 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         item["allowed_chat_ids"] = json.loads(item.get("allowed_chat_ids") or "[]")
     except Exception:
         item["allowed_chat_ids"] = []
+    item["access_mode"] = item.get("access_mode") or DEFAULT_ACCESS_MODE
+    item["escalation_enabled"] = bool(item.get("escalation_enabled"))
     return item
 
 
@@ -259,7 +444,7 @@ def get_telegram_binding_proposal(control_task_id: str) -> Optional[dict[str, An
     _init_schema()
     with _connect() as connection:
         row = connection.execute(
-            "SELECT * FROM agent_messenger_bindings WHERE control_task_id = ? ORDER BY created_at DESC LIMIT 1",
+            "SELECT * FROM agent_messenger_bindings WHERE control_task_id = ? AND platform = 'telegram' ORDER BY created_at DESC LIMIT 1",
             (control_task_id,),
         ).fetchone()
     return _row_to_dict(row) if row else None
@@ -267,10 +452,48 @@ def get_telegram_binding_proposal(control_task_id: str) -> Optional[dict[str, An
 
 def _set_status(binding_id: str, status: str) -> None:
     with _connect() as connection:
+        if status == "active":
+            # Clear any stale failure reason from a previous life of this binding —
+            # otherwise a fixed connection still shows its old error in the UI.
+            connection.execute(
+                "UPDATE agent_messenger_bindings SET status = ?, last_error = NULL, updated_at = ? WHERE id = ?",
+                (status, _now(), binding_id),
+            )
+        else:
+            connection.execute(
+                "UPDATE agent_messenger_bindings SET status = ?, updated_at = ? WHERE id = ?",
+                (status, _now(), binding_id),
+            )
+
+
+def mark_binding_failed(binding_id: str, reason: str) -> None:
+    """Called by a running channel manager (today: agent_matrix_bot.py) when it
+    detects its own credentials have gone bad mid-flight — e.g. an access token
+    that was valid at connect time but expired later. Without this, that kind
+    of failure was invisible: the sync/poll loop just kept silently retrying
+    and the binding stayed 'active' in the UI while doing nothing."""
+    _init_schema()
+    with _connect() as connection:
         connection.execute(
-            "UPDATE agent_messenger_bindings SET status = ?, updated_at = ? WHERE id = ?",
-            (status, _now(), binding_id),
+            "UPDATE agent_messenger_bindings SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?",
+            (reason, _now(), binding_id),
         )
+
+
+def update_matrix_binding_credentials(binding_id: str, credentials: dict[str, Any]) -> None:
+    """Called by agent_matrix_bot.py after it exchanges a dying MAS-issued access
+    token for a fresh one. Persists the whole renewed credential (tokens rotate,
+    so the refresh_token and expiry move too) into the same Valkey slot the
+    binding already uses (never the SQL DB) — this is a renewal of a capability
+    already approved, not a new grant, so no status change and no owner
+    re-approval, same reasoning as _reconnect_binding()."""
+    binding = _binding_or_raise(binding_id)
+    if binding["platform"] != "matrix":
+        raise ValueError(f"Binding {binding_id} is not a matrix binding")
+
+    from backend.valkey_client import set_value
+
+    set_value(binding["valkey_secret_key"], json.dumps(credentials), ttl_seconds=None)
 
 
 async def execute_approved_telegram_binding(control_task_id: str) -> dict[str, Any]:
@@ -317,7 +540,7 @@ async def execute_approved_telegram_binding(control_task_id: str) -> dict[str, A
 
         result = {"status": "active", "id": binding["id"], "bot_username": binding["bot_username"]}
     except Exception as exc:
-        _set_status(binding["id"], "failed")
+        mark_binding_failed(binding["id"], str(exc))
         finish_task(control_task_id, "", error=str(exc))
         raise
     finish_task(control_task_id, json.dumps(result, ensure_ascii=False))
@@ -329,11 +552,13 @@ def list_telegram_bindings(subagent_id: Optional[str] = None) -> list[dict[str, 
     with _connect() as connection:
         if subagent_id:
             rows = connection.execute(
-                "SELECT * FROM agent_messenger_bindings WHERE subagent_id = ? ORDER BY created_at DESC",
+                "SELECT * FROM agent_messenger_bindings WHERE subagent_id = ? AND platform = 'telegram' ORDER BY created_at DESC",
                 (subagent_id,),
             ).fetchall()
         else:
-            rows = connection.execute("SELECT * FROM agent_messenger_bindings ORDER BY created_at DESC").fetchall()
+            rows = connection.execute(
+                "SELECT * FROM agent_messenger_bindings WHERE platform = 'telegram' ORDER BY created_at DESC"
+            ).fetchall()
     return [_row_to_dict(row) for row in rows]
 
 
@@ -342,6 +567,13 @@ def get_telegram_binding(binding_id: str) -> Optional[dict[str, Any]]:
     with _connect() as connection:
         row = connection.execute("SELECT * FROM agent_messenger_bindings WHERE id = ?", (binding_id,)).fetchone()
     return _row_to_dict(row) if row else None
+
+
+def get_binding(binding_id: str) -> Optional[dict[str, Any]]:
+    """Platform-agnostic lookup — all five channels share one table. Same query
+    as get_telegram_binding(), named for what it actually does; used by
+    backend/bot_access_gate.py, which doesn't care which platform it's on."""
+    return get_telegram_binding(binding_id)
 
 
 def resolve_telegram_binding_token(binding_id: str) -> Optional[str]:
@@ -357,37 +589,79 @@ def resolve_telegram_binding_token(binding_id: str) -> Optional[str]:
 
 
 
-def _verify_matrix_credentials(
-    homeserver_url: str, user_id: str, password: str = "", access_token: str = ""
-) -> tuple[str, str]:
-    """Logs into Matrix (or confirms an existing access token) to prove the credential
-    works before proposing. Returns (resolved_user_id, access_token)."""
-    from nio import AsyncClient, LoginError, WhoamiError
+def _resolve_matrix_credentials(
+    homeserver_url: str, user_id: str, password: str = "", access_token: str = "", refresh_token: str = "",
+    device_flow_id: str = "",
+) -> dict[str, Any]:
+    """Turns whatever the owner supplied into a verified credential dict.
 
-    async def _run() -> tuple[str, str]:
-        client = AsyncClient(homeserver_url, user_id)
-        try:
-            if access_token:
-                client.access_token = access_token
-                client.user_id = user_id
-                response = await client.whoami()
-                if isinstance(response, WhoamiError):
-                    raise ValueError(f"Matrix rejected this access token: {response.message}")
-                return response.user_id, access_token
-            if not password:
-                raise ValueError("Provide either a password or an access_token")
-            response = await client.login(password)
-            if isinstance(response, LoginError):
-                raise ValueError(f"Matrix login failed: {response.message}")
-            return response.user_id, response.access_token
-        except ValueError:
-            raise
-        except Exception as exc:
-            raise ValueError(f"Could not reach the Matrix homeserver: {exc}") from exc
-        finally:
-            await client.close()
+    Three ways in, in descending order of how long the result survives:
+      * device_flow_id — a finished OAuth device login (MAS servers): renewable
+        forever, the only one that does not need re-pasting;
+      * password — compat login, asking for a refresh token so it renews too;
+      * access_token — a token pasted out of Element. On a MAS homeserver these
+        expire within minutes, so unless a refresh_token is pasted alongside it
+        (Element does not show one), this binding *will* fall over — that is the
+        whole point of offering the device login above.
+    """
+    from backend import matrix_oauth
 
-    return asyncio.run(_run())
+    if device_flow_id:
+        credentials = _pop_completed_matrix_login(device_flow_id)
+    elif password:
+        credentials = matrix_oauth.password_login(homeserver_url, user_id, password)
+    elif access_token:
+        homeserver_url = matrix_oauth.resolve_homeserver_base_url(homeserver_url)
+        resolved_user_id = matrix_oauth.whoami(homeserver_url, access_token)
+        credentials = {
+            "homeserver_url": homeserver_url, "user_id": resolved_user_id,
+            "access_token": access_token.strip(), "refresh_token": refresh_token.strip(),
+            "auth_kind": "token",
+        }
+    else:
+        raise ValueError("Provide a browser login, a password or an access_token")
+    return credentials
+
+
+def _verify_matrix_credentials(credentials: dict[str, Any]) -> str:
+    """Liveness probe for an already-stored credential (health check): proves the
+    access token still works. Raises ValueError if the homeserver rejects it."""
+    from backend import matrix_oauth
+
+    return matrix_oauth.whoami(credentials["homeserver_url"], credentials.get("access_token", ""))
+
+
+_COMPLETED_LOGIN_KEY_PREFIX = "matrix_completed_login:"
+_COMPLETED_LOGIN_TTL_SECONDS = 900
+
+
+def poll_matrix_device_login(flow_id: str) -> dict[str, Any]:
+    """Polled by the dashboard while the owner confirms the login in a browser.
+    The finished tokens are parked in Valkey under a one-shot handle instead of
+    being handed to the browser — the UI only ever learns the resulting user id."""
+    from backend import matrix_oauth
+    from backend.valkey_client import set_value
+
+    credentials = matrix_oauth.poll_device_login(flow_id)
+    if credentials is None:
+        # The code travels back on every poll, so the dashboard can keep showing
+        # it even if the page was reloaded or the panel re-rendered.
+        return {"status": "pending", **matrix_oauth.describe_flow(flow_id)}
+    set_value(
+        f"{_COMPLETED_LOGIN_KEY_PREFIX}{flow_id}", json.dumps(credentials),
+        ttl_seconds=_COMPLETED_LOGIN_TTL_SECONDS,
+    )
+    return {"status": "complete", "user_id": credentials["user_id"], "device_flow_id": flow_id}
+
+
+def _pop_completed_matrix_login(flow_id: str) -> dict[str, Any]:
+    from backend.valkey_client import delete_value, get_value
+
+    raw = get_value(f"{_COMPLETED_LOGIN_KEY_PREFIX}{flow_id}")
+    if not raw:
+        raise ValueError("Вход через браузер истёк — начните заново")
+    delete_value(f"{_COMPLETED_LOGIN_KEY_PREFIX}{flow_id}")
+    return json.loads(raw)
 
 
 def create_matrix_binding_proposal(
@@ -396,6 +670,8 @@ def create_matrix_binding_proposal(
     user_id: str,
     password: str = "",
     access_token: str = "",
+    refresh_token: str = "",
+    device_flow_id: str = "",
     allowed_room_ids: Optional[list[str]] = None,
     system_prompt_override: str = "",
     model_override: str = "",
@@ -411,9 +687,12 @@ def create_matrix_binding_proposal(
     _check_messenger_allowed(subagent)
 
     clean_response_mode = _clean_response_mode(response_mode)
-    resolved_user_id, resolved_token = _verify_matrix_credentials(
-        homeserver_url, user_id, password=password, access_token=access_token
+    credentials = _resolve_matrix_credentials(
+        homeserver_url, user_id, password=password, access_token=access_token, refresh_token=refresh_token,
+        device_flow_id=device_flow_id,
     )
+    resolved_user_id = credentials["user_id"]
+    homeserver_url = credentials["homeserver_url"]  # post-.well-known, the one actually used
     clean_room_ids = [str(r).strip() for r in (allowed_room_ids or []) if str(r).strip()]
 
     with _connect() as connection:
@@ -445,6 +724,7 @@ def create_matrix_binding_proposal(
             "homeserver_url": homeserver_url,
             "allowed_room_ids": clean_room_ids or "unrestricted — any room this account is in can reach the agent",
             "response_mode": mode_note,
+            "auth_kind": credentials.get("auth_kind", "token"),
             "secret_policy": "Access token stored only in Valkey (internal-only, password-protected), never in the SQL DB",
         },
         risk_class="R3",
@@ -461,7 +741,7 @@ def create_matrix_binding_proposal(
     from backend.valkey_client import set_value
 
     now = _now()
-    credentials_json = json.dumps({"homeserver_url": homeserver_url, "user_id": resolved_user_id, "access_token": resolved_token})
+    credentials_json = json.dumps(credentials)
     set_value(secret_key, credentials_json, ttl_seconds=_PENDING_SECRET_TTL_SECONDS)
     with _connect() as connection:
         connection.execute(
@@ -534,10 +814,13 @@ async def execute_approved_matrix_binding(control_task_id: str) -> dict[str, Any
             binding["id"], binding["subagent_id"], json.loads(credentials_json), allowed_room_ids,
             overrides, response_mode,
         )
+        agent_matrix_bot.manager.set_human_takeover_pause(
+            binding["id"], _clean_pause_minutes(binding.get("human_takeover_pause_minutes"))
+        )
 
         result = {"status": "active", "id": binding["id"], "matrix_user_id": binding["bot_username"]}
     except Exception as exc:
-        _set_status(binding["id"], "failed")
+        mark_binding_failed(binding["id"], str(exc))
         finish_task(control_task_id, "", error=str(exc))
         raise
     finish_task(control_task_id, json.dumps(result, ensure_ascii=False))
@@ -583,6 +866,13 @@ async def update_binding_settings(
     binding_id: str,
     system_prompt_override: Optional[str] = None,
     response_mode: Optional[str] = None,
+    access_mode: Optional[str] = None,
+    default_plan_id: Optional[str] = None,
+    welcome_message: Optional[str] = None,
+    allowed_chat_ids: Optional[list[str]] = None,
+    auto_reply_disclosure_text: Optional[str] = None,
+    human_takeover_pause_minutes: Optional[int] = None,
+    escalation_enabled: Optional[bool] = None,
 ) -> dict[str, Any]:
     """Edits an existing binding's per-channel prompt and/or response mode in
     place. Doesn't touch the bot token/credential or require a new owner
@@ -600,6 +890,47 @@ async def update_binding_settings(
         updates["system_prompt_override"] = system_prompt_override.strip() or None
     if response_mode is not None:
         updates["response_mode"] = _clean_response_mode(response_mode)
+    if allowed_chat_ids is not None:
+        # bot_access_gate.authorize() reads this straight from the DB on every
+        # incoming message, so no live-bot restart is needed for this to take
+        # effect. An empty list means "owner_only" answers anyone who DMs it —
+        # see the comment on ACCESS_MODES above.
+        updates["allowed_chat_ids"] = json.dumps([str(c).strip() for c in allowed_chat_ids if str(c).strip()])
+    if welcome_message is not None:
+        updates["welcome_message"] = welcome_message.strip() or None
+    if auto_reply_disclosure_text is not None:
+        # Empty means "use the default wording", not "send no disclosure at
+        # all" — see _format_disclosure(). Auto-labeled mode was approved on
+        # the condition that a reply always identifies itself as automated;
+        # removing the signature outright isn't a wording choice this endpoint
+        # is allowed to make.
+        updates["auto_reply_disclosure"] = auto_reply_disclosure_text.strip()[:MAX_DISCLOSURE_LENGTH] or None
+    if human_takeover_pause_minutes is not None:
+        updates["human_takeover_pause_minutes"] = _clean_pause_minutes(human_takeover_pause_minutes)
+    if escalation_enabled is not None:
+        updates["escalation_enabled"] = 1 if escalation_enabled else 0
+    if default_plan_id is not None:
+        clean_plan_id = default_plan_id.strip() or None
+        if clean_plan_id:
+            from backend.bot_access import get_plan
+
+            if not get_plan(clean_plan_id):
+                raise KeyError(f"Unknown access plan: {clean_plan_id}")
+        updates["default_plan_id"] = clean_plan_id
+    if access_mode is not None:
+        new_access_mode = _clean_access_mode(access_mode)
+        if new_access_mode != _clean_access_mode(binding.get("access_mode")):
+            if new_access_mode == "token":
+                _check_public_access_allowed(binding)
+                # Draft mode means a human must click "send" on every reply, which
+                # a stranger-facing consulting bot can't work with. Flip to the
+                # disclosed auto-reply mode unless the owner already chose it.
+                if _clean_response_mode(updates.get("response_mode") or binding.get("response_mode")) == "draft":
+                    updates["response_mode"] = "auto_labeled"
+                if not (updates.get("welcome_message") or binding.get("welcome_message")):
+                    updates["welcome_message"] = DEFAULT_WELCOME_MESSAGE
+            updates["access_mode"] = new_access_mode
+            _notify_owner_access_mode_changed(binding, new_access_mode)
 
     if updates:
         set_clause = ", ".join(f"{key} = ?" for key in updates)
@@ -619,6 +950,10 @@ async def update_binding_settings(
         mode = _clean_response_mode(binding.get("response_mode"))
         runtime = _runtime_module_for_platform(binding["platform"])
         runtime.manager.update_live_settings(binding_id, overrides, mode)
+        if binding["platform"] == "matrix":
+            runtime.manager.set_human_takeover_pause(
+                binding_id, _clean_pause_minutes(binding.get("human_takeover_pause_minutes"))
+            )
 
     with _connect() as connection:
         row = connection.execute("SELECT * FROM agent_messenger_bindings WHERE id = ?", (binding_id,)).fetchone()
@@ -647,14 +982,16 @@ async def disable_binding(binding_id: str) -> dict[str, Any]:
 
 
 async def enable_binding(binding_id: str) -> dict[str, Any]:
-    """Restarts a disabled ('revoked') binding's bot using its still-stored
+    """Restarts a disabled ('revoked') or errored ('failed') binding's bot using
+    its still-stored credential — a low-friction "try again" for a transient
+    failure (network blip, homeserver restart) that doesn't need a new
     credential. Raises ValueError if there's nothing to resolve (e.g. the
     binding predates this function and had its secret destroyed by the old
-    revoke_*_binding behaviour — the channel must be reconnected from scratch)."""
+    revoke_*_binding behaviour — the channel must be reconnected instead)."""
     binding = _binding_or_raise(binding_id)
     if binding["status"] == "active":
         return _row_to_dict(binding)
-    if binding["status"] != "revoked":
+    if binding["status"] not in ("revoked", "failed"):
         raise ValueError(f"Cannot enable a binding with status '{binding['status']}'")
 
     platform = binding["platform"]
@@ -689,10 +1026,100 @@ async def enable_binding(binding_id: str) -> dict[str, Any]:
         await runtime.manager.start(
             binding_id, binding["subagent_id"], credential_or_token, allowed, overrides, response_mode,
         )
-    except Exception:
-        _set_status(binding_id, "revoked")
+        if platform == "matrix":
+            runtime.manager.set_human_takeover_pause(
+                binding_id, _clean_pause_minutes(binding.get("human_takeover_pause_minutes"))
+            )
+    except Exception as exc:
+        mark_binding_failed(binding_id, str(exc))
         raise
     return _row_to_dict(_binding_or_raise(binding_id))
+
+
+async def _reconnect_binding(
+    binding_id: str, platform: str, credential_for_start: Any, bot_username: str, secret_value: str,
+) -> dict[str, Any]:
+    """Shared plumbing behind reconnect_*_binding(): swaps a binding's stored
+    credential in place and restarts its live bot — same binding id, same
+    prompt override/access mode/whitelist/response mode, no owner re-approval.
+    A dead or rotated token isn't a new capability grant, just a refreshed one
+    the owner already approved, so this deliberately skips create_review_task
+    entirely (unlike create_*_binding_proposal)."""
+    binding = _binding_or_raise(binding_id)
+    if binding["platform"] != platform:
+        raise ValueError(f"Binding {binding_id} is not a {platform} binding")
+
+    runtime = _runtime_module_for_platform(platform)
+    await runtime.manager.stop(binding_id)
+
+    from backend.valkey_client import set_value
+
+    set_value(binding["valkey_secret_key"], secret_value, ttl_seconds=None)
+    with _connect() as connection:
+        connection.execute(
+            "UPDATE agent_messenger_bindings SET bot_username = ?, updated_at = ? WHERE id = ?",
+            (bot_username, _now(), binding_id),
+        )
+    _set_status(binding_id, "active")  # also clears any stale last_error
+
+    binding = _binding_or_raise(binding_id)
+    overrides = {
+        "system_prompt": binding.get("system_prompt_override"),
+        "model": binding.get("model_override"),
+        "model_provider": binding.get("model_provider_override"),
+    }
+    allowed = json.loads(binding.get("allowed_chat_ids") or "[]")
+    response_mode = _clean_response_mode(binding.get("response_mode"))
+    await runtime.manager.start(
+        binding_id, binding["subagent_id"], credential_for_start, allowed, overrides, response_mode,
+    )
+    if platform == "matrix":
+        runtime.manager.set_human_takeover_pause(
+            binding_id, _clean_pause_minutes(binding.get("human_takeover_pause_minutes"))
+        )
+    return _row_to_dict(_binding_or_raise(binding_id))
+
+
+async def reconnect_telegram_binding(binding_id: str, bot_token: str) -> dict[str, Any]:
+    bot_username = _verify_bot_token(bot_token)
+    clean_token = str(bot_token).strip()
+    return await _reconnect_binding(binding_id, "telegram", clean_token, bot_username, clean_token)
+
+
+async def reconnect_discord_binding(binding_id: str, bot_token: str) -> dict[str, Any]:
+    bot_username = _verify_discord_token(bot_token)
+    clean_token = str(bot_token).strip()
+    return await _reconnect_binding(binding_id, "discord", clean_token, bot_username, clean_token)
+
+
+async def reconnect_matrix_binding(
+    binding_id: str, homeserver_url: str, user_id: str, password: str = "", access_token: str = "",
+    refresh_token: str = "", device_flow_id: str = "",
+) -> dict[str, Any]:
+    credentials = await asyncio.to_thread(
+        _resolve_matrix_credentials, homeserver_url, user_id, password, access_token, refresh_token, device_flow_id,
+    )
+    return await _reconnect_binding(
+        binding_id, "matrix", credentials, credentials["user_id"], json.dumps(credentials)
+    )
+
+
+async def reconnect_slack_binding(binding_id: str, bot_token: str, app_token: str) -> dict[str, Any]:
+    identity = _verify_slack_tokens(bot_token, app_token)
+    credentials = {"bot_token": bot_token.strip(), "app_token": app_token.strip()}
+    return await _reconnect_binding(binding_id, "slack", credentials, identity, json.dumps(credentials))
+
+
+async def reconnect_email_binding(
+    binding_id: str, imap_host: str, imap_port: int, smtp_host: str, smtp_port: int, address: str, password: str,
+) -> dict[str, Any]:
+    identity = _verify_email_credentials(imap_host, imap_port, smtp_host, smtp_port, address, password)
+    credentials = {
+        "imap_host": imap_host, "imap_port": int(imap_port),
+        "smtp_host": smtp_host, "smtp_port": int(smtp_port),
+        "address": address, "password": password,
+    }
+    return await _reconnect_binding(binding_id, "email", credentials, identity, json.dumps(credentials))
 
 
 async def delete_binding_permanently(binding_id: str) -> None:
@@ -816,6 +1243,16 @@ def create_discord_binding_proposal(
     return result
 
 
+def get_discord_binding_proposal(control_task_id: str) -> Optional[dict[str, Any]]:
+    _init_schema()
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM agent_messenger_bindings WHERE control_task_id = ? AND platform = 'discord' ORDER BY created_at DESC LIMIT 1",
+            (control_task_id,),
+        ).fetchone()
+    return _row_to_dict(row) if row else None
+
+
 async def execute_approved_discord_binding(control_task_id: str) -> dict[str, Any]:
     _init_schema()
     with _connect() as connection:
@@ -860,7 +1297,7 @@ async def execute_approved_discord_binding(control_task_id: str) -> dict[str, An
 
         result = {"status": "active", "id": binding["id"], "bot_username": binding["bot_username"]}
     except Exception as exc:
-        _set_status(binding["id"], "failed")
+        mark_binding_failed(binding["id"], str(exc))
         finish_task(control_task_id, "", error=str(exc))
         raise
     finish_task(control_task_id, json.dumps(result, ensure_ascii=False))
@@ -1014,6 +1451,16 @@ def create_slack_binding_proposal(
     return result
 
 
+def get_slack_binding_proposal(control_task_id: str) -> Optional[dict[str, Any]]:
+    _init_schema()
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM agent_messenger_bindings WHERE control_task_id = ? AND platform = 'slack' ORDER BY created_at DESC LIMIT 1",
+            (control_task_id,),
+        ).fetchone()
+    return _row_to_dict(row) if row else None
+
+
 async def execute_approved_slack_binding(control_task_id: str) -> dict[str, Any]:
     _init_schema()
     with _connect() as connection:
@@ -1059,7 +1506,7 @@ async def execute_approved_slack_binding(control_task_id: str) -> dict[str, Any]
 
         result = {"status": "active", "id": binding["id"], "slack_identity": binding["bot_username"]}
     except Exception as exc:
-        _set_status(binding["id"], "failed")
+        mark_binding_failed(binding["id"], str(exc))
         finish_task(control_task_id, "", error=str(exc))
         raise
     finish_task(control_task_id, json.dumps(result, ensure_ascii=False))
@@ -1229,6 +1676,16 @@ def create_email_binding_proposal(
     return result
 
 
+def get_email_binding_proposal(control_task_id: str) -> Optional[dict[str, Any]]:
+    _init_schema()
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM agent_messenger_bindings WHERE control_task_id = ? AND platform = 'email' ORDER BY created_at DESC LIMIT 1",
+            (control_task_id,),
+        ).fetchone()
+    return _row_to_dict(row) if row else None
+
+
 async def execute_approved_email_binding(control_task_id: str) -> dict[str, Any]:
     _init_schema()
     with _connect() as connection:
@@ -1274,7 +1731,7 @@ async def execute_approved_email_binding(control_task_id: str) -> dict[str, Any]
 
         result = {"status": "active", "id": binding["id"], "mailbox": binding["bot_username"]}
     except Exception as exc:
-        _set_status(binding["id"], "failed")
+        mark_binding_failed(binding["id"], str(exc))
         finish_task(control_task_id, "", error=str(exc))
         raise
     finish_task(control_task_id, json.dumps(result, ensure_ascii=False))
@@ -1314,6 +1771,58 @@ def resolve_email_binding_credentials(binding_id: str) -> Optional[dict[str, Any
     credentials_json = get_value(dict(row)["valkey_secret_key"])
     return json.loads(credentials_json) if credentials_json else None
 
+
+async def health_check_all_active() -> None:
+    """Periodic liveness probe for every active binding across all 5 platforms
+    — catches a dead credential (an expired Matrix token, a revoked bot token)
+    proactively instead of waiting for the admin to notice a message never
+    arrived. Read-only towards each running bot: it never restarts one, it
+    just re-runs the same 'prove this credential still works' check used at
+    connect time, and calls mark_binding_failed() if that check now fails."""
+    from backend import channel_activity
+
+    checks: list[tuple[str, Any, Any, Any]] = [
+        ("telegram", list_telegram_bindings, resolve_telegram_binding_token, _verify_bot_token),
+        ("discord", list_discord_bindings, resolve_discord_binding_token, _verify_discord_token),
+        ("matrix", list_matrix_bindings, resolve_matrix_binding_credentials, _verify_matrix_credentials),
+        (
+            "slack", list_slack_bindings, resolve_slack_binding_credentials,
+            lambda creds: _verify_slack_tokens(creds["bot_token"], creds["app_token"]),
+        ),
+        (
+            "email", list_email_bindings, resolve_email_binding_credentials,
+            lambda creds: _verify_email_credentials(
+                creds["imap_host"], creds["imap_port"], creds["smtp_host"], creds["smtp_port"],
+                creds["address"], creds["password"],
+            ),
+        ),
+    ]
+    for platform, list_fn, resolve_fn, verify_fn in checks:
+        for binding in list_fn():
+            if binding.get("status") != "active":
+                continue
+            credential = resolve_fn(binding["id"])
+            if not credential:
+                continue
+            try:
+                await asyncio.to_thread(verify_fn, credential)
+            except Exception as exc:
+                # A MAS-issued Matrix token expires every few minutes by design,
+                # so "the stored token is dead" is normal here and only means
+                # trouble if renewing it also fails.
+                if platform == "matrix":
+                    from backend import agent_matrix_bot
+
+                    if await agent_matrix_bot.manager.refresh_binding_token(binding["id"]):
+                        continue
+                reason = f"Плановая проверка связи не прошла: {exc}"
+                mark_binding_failed(binding["id"], reason)
+                channel_activity.record(binding["id"], platform, "error", reason)
+                try:
+                    runtime = _runtime_module_for_platform(platform)
+                    await runtime.manager.stop(binding["id"])
+                except Exception:
+                    logger.exception("Failed to stop %s bot %s after failed health check", platform, binding["id"])
 
 
 _init_schema()

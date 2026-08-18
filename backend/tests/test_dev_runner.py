@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,6 +22,22 @@ def runner_client(tmp_path, monkeypatch):
     client = TestClient(dev_runner_api.app)
     client.headers["Authorization"] = f"Bearer {TOKEN}"
     return client
+
+
+@pytest.fixture()
+def git_runner_client(runner_client, tmp_path):
+    """runner_client, but with an actual git repo (+ initial commit) at
+    REPO_ROOT — needed for the /git/* endpoints, unlike the plain fs/exec
+    tests above which don't care whether the sandbox is a git repo at all."""
+    repo = dev_runner_api.REPO_ROOT
+    run = lambda *args: subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+    run("init", "-q", "-b", "main")
+    run("config", "user.email", "agent@example.com")
+    run("config", "user.name", "Agent")
+    (repo / "README.md").write_text("hello\n")
+    run("add", "-A")
+    run("commit", "-q", "-m", "initial")
+    return runner_client
 
 
 # ── Risk classification ───────────────────────────────────────────────────────
@@ -152,6 +169,96 @@ def test_dev_exec_validates_argv_and_clamps_timeout(monkeypatch):
 
 def test_dev_run_tests_validates_runner():
     assert "runner" in json.loads(tools.dev_run_tests("bash"))["error"]
+
+
+# ── Git endpoints, scoped to this sandbox's own clone ─────────────────────────
+# Regression coverage for the bug where git_status/git_commit/git_push ran
+# against the shared backend/data/dev-repo instead of the calling dev-run's
+# own sandbox — a run could dev_write_file successfully but git_status would
+# show a permanently clean tree and git_commit would have nothing to commit.
+
+def test_git_status_reflects_a_write_made_through_fs_write(git_runner_client):
+    git_runner_client.post("/fs/write", json={"path": "app.py", "content": "print('hi')\n"})
+    response = git_runner_client.post("/git/status", json={})
+    body = response.json()
+    assert body["exit_code"] == 0
+    assert "app.py" in body["stdout"]
+
+
+def test_git_diff_shows_uncommitted_changes(git_runner_client):
+    git_runner_client.post("/fs/write", json={"path": "README.md", "content": "hello\nworld\n"})
+    response = git_runner_client.post("/git/diff", json={})
+    assert "+world" in response.json()["stdout"]
+
+
+def test_git_commit_stages_and_commits_a_write(git_runner_client):
+    git_runner_client.post("/fs/write", json={"path": "app.py", "content": "print('hi')\n"})
+    commit = git_runner_client.post("/git/commit", json={"message": "add app.py"})
+    body = commit.json()
+    assert body["exit_code"] == 0
+    assert "add app.py" in body["stdout"] or "add app.py" in body.get("stderr", "")
+    # The tree must be clean immediately after — proves this hit the same
+    # repo fs/write wrote into, not an unrelated one.
+    status = git_runner_client.post("/git/status", json={}).json()
+    assert status["stdout"].strip() == "## main"
+
+
+def test_git_commit_with_nothing_to_commit(git_runner_client):
+    commit = git_runner_client.post("/git/commit", json={"message": "no-op"})
+    body = commit.json()
+    assert body["exit_code"] != 0
+    assert "nothing to commit" in (body["stdout"] + body["stderr"]).lower() or "clean" in (body["stdout"] + body["stderr"]).lower()
+
+
+def test_git_push_without_a_remote_fails_cleanly_not_a_crash(git_runner_client):
+    response = git_runner_client.post("/git/push", json={})
+    assert response.status_code == 200  # the runner itself never 500s on a failed git command
+    body = response.json()
+    assert body["exit_code"] != 0
+
+
+def test_git_status_requires_valid_token(git_runner_client):
+    bare = TestClient(dev_runner_api.app)
+    assert bare.post("/git/status", json={}).status_code == 401
+
+
+# ── tools.py proxies for the git tools (mocked httpx, same pattern as dev_*) ──
+
+def test_tools_git_status_proxies_to_runner(monkeypatch):
+    monkeypatch.setenv("DEV_RUNNER_TOKEN", TOKEN)
+    ok = httpx.Response(200, json={"exit_code": 0, "stdout": "## main", "stderr": ""},
+                        request=httpx.Request("POST", "http://dev-runner:8600/git/status"))
+    with patch.object(tools.httpx, "post", return_value=ok) as mocked:
+        result = json.loads(tools.git_status())
+    assert result["stdout"] == "## main"
+    assert mocked.call_args[0][0].endswith("/git/status")
+
+
+def test_tools_git_commit_sends_message_and_proxies_to_runner(monkeypatch):
+    monkeypatch.setenv("DEV_RUNNER_TOKEN", TOKEN)
+    ok = httpx.Response(200, json={"exit_code": 0, "stdout": "1 file changed", "stderr": ""},
+                        request=httpx.Request("POST", "http://dev-runner:8600/git/commit"))
+    with patch.object(tools.httpx, "post", return_value=ok) as mocked:
+        result = json.loads(tools.git_commit("add feature"))
+    assert result["exit_code"] == 0
+    assert mocked.call_args[0][0].endswith("/git/commit")
+    assert mocked.call_args.kwargs["json"] == {"message": "add feature"}
+
+
+def test_tools_git_push_proxies_to_runner(monkeypatch):
+    monkeypatch.setenv("DEV_RUNNER_TOKEN", TOKEN)
+    ok = httpx.Response(200, json={"exit_code": 0, "stdout": "", "stderr": ""},
+                        request=httpx.Request("POST", "http://dev-runner:8600/git/push"))
+    with patch.object(tools.httpx, "post", return_value=ok) as mocked:
+        json.loads(tools.git_push())
+    assert mocked.call_args[0][0].endswith("/git/push")
+
+
+def test_tools_git_unreachable_runner_gives_actionable_error(monkeypatch):
+    monkeypatch.setenv("DEV_RUNNER_TOKEN", TOKEN)
+    with patch.object(tools.httpx, "post", side_effect=httpx.ConnectError("refused")):
+        result = json.loads(tools.git_diff())
+    assert "unreachable" in result["error"]
 
 
 def test_execute_tool_routes_dev_tools(monkeypatch):

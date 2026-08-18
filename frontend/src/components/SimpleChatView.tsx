@@ -1,7 +1,14 @@
 import { useMemo, useRef, useState } from 'react';
-import { Mic, MicOff, Paperclip, Plus, Send, Sparkles, Square, Trash2, Volume2, VolumeX, X as XIcon } from 'lucide-react';
+import { Info, Mic, MicOff, Paperclip, Plus, Send, Sparkles, Square, Trash2, Volume2, VolumeX, X as XIcon, Zap } from 'lucide-react';
 import type { ChatMessage, ChatSession } from '../types';
 import { renderMarkdown } from '../utils';
+
+// While a reply streams the backend hasn't reported a token count yet, so the
+// live figure is derived from the text so far. Qwen's BPE lands around 3-4
+// characters per token on mixed Russian/English, which is close enough for a
+// progress read-out — it is always shown with a "≈" and replaced by the exact
+// number the moment the run finishes.
+const CHARS_PER_TOKEN = 3.5;
 
 function authHeaders(): Record<string, string> {
   const token = localStorage.getItem('jarvis_auth_token');
@@ -50,6 +57,22 @@ const COPY = {
     you: 'Вы',
     voiceOn: 'Озвучивание включено',
     voiceOff: 'Озвучивание выключено',
+    tokensPerSec: 'ток/с',
+    tokens: 'токенов',
+    generating: 'генерация',
+    withTools: 'включая инструменты',
+    secondsUnit: 'с',
+    statDetails: 'Подробности генерации',
+    statResponseRate: 'Скорость ответа',
+    statPromptRate: 'Скорость чтения промпта',
+    statOutTokens: 'Токенов в ответе',
+    statInTokens: 'Токенов в промпте',
+    statDecode: 'Время генерации',
+    statPrompt: 'Обработка промпта',
+    statModelWait: 'Ожидание модели',
+    statTotal: 'Всего с инструментами',
+    statToolCalls: 'Вызовов инструментов',
+    statModel: 'Модель',
   },
   en: {
     newChat: 'New chat',
@@ -63,8 +86,130 @@ const COPY = {
     you: 'You',
     voiceOn: 'Voice replies on',
     voiceOff: 'Voice replies off',
+    tokensPerSec: 'tok/s',
+    tokens: 'tokens',
+    generating: 'generation',
+    withTools: 'including tools',
+    secondsUnit: 's',
+    statDetails: 'Generation details',
+    statResponseRate: 'Response rate',
+    statPromptRate: 'Prompt read rate',
+    statOutTokens: 'Response tokens',
+    statInTokens: 'Prompt tokens',
+    statDecode: 'Generation time',
+    statPrompt: 'Prompt processing',
+    statModelWait: 'Model wait',
+    statTotal: 'Total with tools',
+    statToolCalls: 'Tool calls',
+    statModel: 'Model',
   },
 } as const;
+
+// Widened from the literal types COPY carries, so either language's table fits.
+type Copy = { [K in keyof (typeof COPY)['ru']]: string };
+
+const seconds = (ms: number, unit: string) =>
+  ms >= 1000 ? `${(ms / 1000).toFixed(ms >= 10000 ? 0 : 1)} ${unit}` : `${Math.round(ms)} ms`;
+
+/** The per-reply generation read-out: rate always visible, full breakdown on demand. */
+function MessageStats({
+  msg,
+  copy,
+  numberFormat,
+  streamStartedAt,
+}: {
+  msg: ChatMessage;
+  copy: Copy;
+  numberFormat: string;
+  streamStartedAt: React.MutableRefObject<Map<string, number>>;
+}) {
+  const [open, setOpen] = useState(false);
+
+  if (msg.role !== 'assistant') return null;
+
+  if (msg.streaming) {
+    const key = msg.run_id || String(msg.id ?? '');
+    const text = msg.content || '';
+    if (!key || !text) return null;
+    if (!streamStartedAt.current.has(key)) streamStartedAt.current.set(key, Date.now());
+    const elapsed = (Date.now() - (streamStartedAt.current.get(key) as number)) / 1000;
+    // Below a second the rate is mostly noise from the first chunk landing.
+    if (elapsed < 1) return null;
+    return (
+      <div className="simple-chat-stats is-live">
+        <Zap size={11} />
+        <span>≈ {(text.length / CHARS_PER_TOKEN / elapsed).toFixed(0)} {copy.tokensPerSec}</span>
+      </div>
+    );
+  }
+
+  const meta = msg.meta;
+  if (!meta) return null;
+  const outputTokens = meta.output_tokens ?? 0;
+  const inputTokens = meta.input_tokens ?? 0;
+  const decodeMs = meta.decode_ms ?? null;
+  const promptMs = meta.prompt_ms ?? null;
+  const genMs = meta.generation_ms ?? null;
+  const totalMs = meta.latency_ms ?? null;
+  // The rate is decode time only — dividing by generation_ms would fold in
+  // prompt ingestion (seconds, on a long context) and report roughly half the
+  // speed the model was really running at. generation_ms/latency_ms remain the
+  // fallback for replies from a backend that doesn't report decode time.
+  const rateBaseMs = decodeMs || genMs || totalMs;
+  const waitMs = genMs || totalMs;
+  if (!outputTokens || !rateBaseMs || !waitMs) return null;
+
+  const rate = outputTokens / (rateBaseMs / 1000);
+  const promptRate = inputTokens && promptMs ? inputTokens / (promptMs / 1000) : null;
+  const toolMs = genMs != null && totalMs != null && totalMs - genMs > 500 ? totalMs : null;
+
+  const rows: [string, string][] = [
+    [copy.statResponseRate, `${rate.toFixed(2)} ${copy.tokensPerSec}`],
+    ...(promptRate ? ([[copy.statPromptRate, `${promptRate.toFixed(0)} ${copy.tokensPerSec}`]] as [string, string][]) : []),
+    [copy.statOutTokens, outputTokens.toLocaleString(numberFormat)],
+    ...(inputTokens ? ([[copy.statInTokens, inputTokens.toLocaleString(numberFormat)]] as [string, string][]) : []),
+    ...(decodeMs ? ([[copy.statDecode, seconds(decodeMs, copy.secondsUnit)]] as [string, string][]) : []),
+    ...(promptMs ? ([[copy.statPrompt, seconds(promptMs, copy.secondsUnit)]] as [string, string][]) : []),
+    [copy.statModelWait, seconds(waitMs, copy.secondsUnit)],
+    ...(toolMs ? ([[copy.statTotal, seconds(toolMs, copy.secondsUnit)]] as [string, string][]) : []),
+    ...(meta.tool_iterations ? ([[copy.statToolCalls, String(meta.tool_iterations)]] as [string, string][]) : []),
+    ...(meta.model ? ([[copy.statModel, meta.model]] as [string, string][]) : []),
+  ];
+
+  return (
+    <div className="simple-chat-stats-block">
+      <div className="simple-chat-stats">
+        <Zap size={11} />
+        <span className="simple-chat-stats-rate">{rate.toFixed(1)} {copy.tokensPerSec}</span>
+        <span>{outputTokens.toLocaleString(numberFormat)} {copy.tokens}</span>
+        <span>
+          {seconds(waitMs, copy.secondsUnit)} {copy.generating}
+          {toolMs && ` · ${seconds(toolMs, copy.secondsUnit)} ${copy.withTools}`}
+        </span>
+        <button
+          type="button"
+          className={`simple-chat-stats-toggle${open ? ' is-open' : ''}`}
+          onClick={() => setOpen(v => !v)}
+          title={copy.statDetails}
+          aria-expanded={open}
+          aria-label={copy.statDetails}
+        >
+          <Info size={11} />
+        </button>
+      </div>
+      {open && (
+        <dl className="simple-chat-stats-details">
+          {rows.map(([label, value]) => (
+            <div key={label}>
+              <dt>{label}</dt>
+              <dd>{value}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+    </div>
+  );
+}
 
 export function SimpleChatView({
   language,
@@ -98,6 +243,11 @@ export function SimpleChatView({
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
   const confirmTimerRef = useRef<number | null>(null);
   const visibleMessages = useMemo(() => messages.filter(m => m.role !== 'system'), [messages]);
+  // First time we render each streaming reply, so the live rate has a start
+  // point. Keyed by run_id, which is what the stream events carry.
+  const streamStartedAtRef = useRef<Map<string, number>>(new Map());
+
+  const numberFormat = language === 'ru' ? 'ru-RU' : 'en-US';
 
   const deleteSession = async (sessionId: string) => {
     const path = sessionId === 'dashboard' ? '/api/history/dashboard' : `/api/history/${sessionId}`;
@@ -198,6 +348,7 @@ export function SimpleChatView({
                 ) : (
                   <div className="simple-chat-assistant-text">
                     {renderMarkdown(msg.content || (msg.streaming ? '' : ''))}
+                    <MessageStats msg={msg} copy={copy} numberFormat={numberFormat} streamStartedAt={streamStartedAtRef} />
                   </div>
                 )}
               </div>
@@ -210,7 +361,7 @@ export function SimpleChatView({
           {attachedFile && (
             <div className="simple-chat-attachment">
               <span>{attachedFile.name}</span>
-              <button type="button" onClick={() => setAttachedFile(null)}><XIcon size={13} /></button>
+              <button type="button" onClick={() => setAttachedFile(null)} aria-label="Remove attachment" title="Remove attachment"><XIcon size={13} /></button>
             </div>
           )}
           <form className="simple-chat-composer" onSubmit={handleSendMessage}>

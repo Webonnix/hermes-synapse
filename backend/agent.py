@@ -5,7 +5,7 @@ import asyncio
 import hashlib
 import re
 import json
-from typing import Awaitable, Callable, List, Dict, Any, Optional
+from typing import Awaitable, Callable, List, Dict, Any, Optional, Set
 import httpx
 from dotenv import load_dotenv
 
@@ -43,6 +43,46 @@ You are an independent personal project built and maintained by Albert Yeghiazar
 Answer in the user's language — you are natively fluent in both Russian and English, so keep phrasing natural and idiomatic in whichever one they're using, never stilted or translated-sounding. Be concise, and give the final answer only. When you need to ask a clarifying question, ask it the way a person would in conversation — one natural sentence or two, not a formatted menu of bullet-point options.
 Do not reveal hidden reasoning, chain-of-thought, analysis steps, or planning notes.
 Use tools only when the user's request needs live data or an action."""
+
+_WORK_DISCIPLINE_RULES = (
+    (
+        {"web_search"},
+        "- Факты, новости, цены, документация: проверяй через web_search, а не по памяти. "
+        "Относительные даты («сегодня», «на этой неделе») переводи в конкретные даты, "
+        "указанные выше.",
+    ),
+    (
+        {"dev_read_file", "dev_write_file", "dev_patch", "dev_exec", "dev_run_tests"},
+        "- Код и правки в проекте: dev_list_dir/dev_read_file → dev_patch или dev_write_file → "
+        "dev_run_tests, и только потом git_commit. Не пересказывай правку словами вместо вызова "
+        "инструмента и не говори «готово», пока тесты не прошли.",
+    ),
+    (
+        {"call_subagent", "create_subagent", "list_subagents"},
+        "- Другие агенты: list_subagents показывает, кто уже есть, call_subagent передаёт им "
+        "задачу, create_subagent создаёт нового, если подходящего нет. Задание агенту пиши "
+        "самодостаточно — он не видит этот диалог.",
+    ),
+)
+
+_WORK_DISCIPLINE_ALWAYS = (
+    "- Многошаговую задачу доводи до конца в этом же ходу: вызвал инструмент → прочитал "
+    "результат → следующий шаг. Отчитывайся только тем, что реально вернули инструменты."
+)
+
+
+def _work_discipline(tool_names: Set[str]) -> str:
+    """How to actually run the tools that are on this turn.
+
+    The persisted prompt carries guidance like this, but fast_mode swaps it for
+    FAST_SYSTEM_PROMPT above — which says nothing about delegation or code work
+    — so a fast-mode session had the tools and no idea how to chain them. Only
+    the lines matching the tools actually offered are included, so a weather
+    question doesn't carry instructions about git.
+    """
+    lines = [text for trigger, text in _WORK_DISCIPLINE_RULES if trigger & tool_names]
+    lines.append(_WORK_DISCIPLINE_ALWAYS)
+    return "\n\nКак вести работу:\n" + "\n".join(lines)
 
 FINAL_ANSWER_RETRY_PROMPT = (
     "Предыдущая генерация не дала видимого финального ответа: она была пустой, "
@@ -90,7 +130,14 @@ TOOL_INTENT_KEYWORDS = {
         "удали задачу", "delete task"
     ],
     "web_search": [
-        "найди", "поищи", "поиск", "новости", "актуальн", "матч", "расписание игр", "latest", "search", "news"
+        "найди", "поищи", "поиск", "новости", "актуальн", "матч", "расписание игр", "latest", "search", "news",
+        # A local model has no live knowledge at all, so anything phrased as
+        # "look it up / who is / what's new" has to reach the search tool —
+        # the earlier list only fired on a handful of explicit verbs.
+        "загугли", "погугли", "гугл", "google", "в интернете", "в сети", "онлайн",
+        "что нового", "кто такой", "кто такая", "что такое", "узнай", "проверь в",
+        "источник", "ссылк", "статья", "документац", "release notes",
+        "look up", "who is", "what is", "google it",
     ],
     "get_market_prices": [
         "курс", "цена", "котиров", "btc", "bitcoin", "биткоин", "eth", "ethereum", "акции", "price"
@@ -136,6 +183,43 @@ TOOL_INTENT_KEYWORDS = {
     ],
 }
 
+# ── Capability bundles ───────────────────────────────────────────────────────
+# Some capabilities are useless one tool at a time. Real development is read →
+# patch → run tests → commit inside a single turn, and delegation is list →
+# call → remember; matching one keyword and handing over only that one tool
+# leaves the model stuck mid-chain. So a bundle keyword activates the whole
+# set. The dev/git tools had no keywords at all before this, which meant the
+# main agent literally never saw them unless it thought to call list_tools
+# first — "разрабатывать" was unreachable by phrasing alone.
+# Names that aren't in the caller's pool are dropped by the final filter in
+# _select_tools_for_query, so a bundle can never widen a principal's rights.
+TOOL_INTENT_BUNDLES: Dict[str, Dict[str, List[str]]] = {
+    "dev": {
+        "keywords": [
+            "код", "репозитор", "исходник", "codebase", "коммит", "commit", "git",
+            "патч", "patch", "рефактор", "refactor", "баг", "bug", "фикс", "fix",
+            "почини", "исправь", "ошибк", "тест", "test", "pytest",
+            "разработ", "реализуй", "имплемент", "implement", "pull request",
+            "напиши функц", "напиши скрипт", "напиши класс", "деплой", "deploy",
+        ],
+        "tools": [
+            "dev_list_dir", "dev_read_file", "dev_write_file", "dev_patch",
+            "dev_exec", "dev_run_tests",
+            "git_status", "git_diff", "git_commit", "git_push",
+        ],
+    },
+    "agents": {
+        "keywords": [
+            "агент", "agent", "сабагент", "subagent", "делегируй", "delegate",
+            "поручи", "передай задачу", "оркестр", "команда агентов",
+        ],
+        "tools": [
+            "list_subagents", "call_subagent", "create_subagent",
+            "save_subagent_memory", "get_subagent_memory",
+        ],
+    },
+}
+
 
 def _keyword_route(user_message: str) -> str:
     msg_lower = user_message.lower()
@@ -147,6 +231,12 @@ def _keyword_route(user_message: str) -> str:
     #   3. single-tool intent → direct (weather/time/system/etc.).
     #   4. remaining agent topic keywords → agent.
     #   5. default → direct.
+    # 0. Dev/git work stays on the owner's own agent: tool_permissions denies
+    #    every dev_* and git_* tool to subagents, so "проанализируй код в
+    #    проекте" routed to orchestrate lands on a path that physically cannot
+    #    open the repo and can only answer from imagination.
+    if any(kw in msg_lower for kw in TOOL_INTENT_BUNDLES["dev"]["keywords"]):
+        return "direct"
     if any(kw in msg_lower for kw in _ORCHESTRATE_KEYWORDS):
         return "orchestrate"
     if any(kw in msg_lower for kw in _AGENT_SEARCH_TRIGGERS):
@@ -165,6 +255,9 @@ def _select_tools_for_query(user_message: str, tools_schema: List[Dict[str, Any]
         for name, keywords in TOOL_INTENT_KEYWORDS.items()
         if any(keyword in msg_lower for keyword in keywords)
     }
+    for bundle in TOOL_INTENT_BUNDLES.values():
+        if any(keyword in msg_lower for keyword in bundle["keywords"]):
+            matched.update(bundle["tools"])
 
     if not matched:
         return []
@@ -174,6 +267,63 @@ def _select_tools_for_query(user_message: str, tools_schema: List[Dict[str, Any]
         matched.add("get_current_time_israel")
 
     return [tool for tool in tools_schema if tool.get("function", {}).get("name") in matched]
+
+
+def _with_discovery_tool(
+    selected: List[Dict[str, Any]], pool: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Adds the ``list_tools`` escape hatch to a keyword selection.
+
+    Keyword pre-selection is computed once, from the first user message, so a
+    chain whose second step needs another tool ("прочитай сайт и сохрани в
+    заметки") used to be stuck with whatever step one matched. This gives the
+    model a way to ask for the rest. Only added when the pool actually contains
+    it, so a public-channel agent — whose pool is already narrowed by
+    tool_permissions — never gets it.
+
+    An *empty* selection gets it too (it used to get nothing): no keyword list
+    covers every way of asking for work, and a turn that starts with zero tools
+    cannot recover — the model can only apologize or hallucinate the result. One
+    R0 schema is a cheap price for making every request reachable. Callers that
+    want the old "plain conversation" system prompt should branch on the
+    pre-discovery selection, not on this return value.
+    """
+    names = {tool.get("function", {}).get("name") for tool in selected}
+    if "list_tools" in names:
+        return selected
+    discovery = next(
+        (tool for tool in pool if tool.get("function", {}).get("name") == "list_tools"), None
+    )
+    return [*selected, discovery] if discovery else selected
+
+
+def _activate_discovered_tools(
+    selected: List[Dict[str, Any]], result_str: str, pool: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Extends the active tool set with what a ``list_tools`` call returned.
+
+    Only names that exist in ``pool`` are activated, and ``pool`` is already
+    principal-filtered by the caller — so discovery can widen what the model
+    *sees*, never what its principal is allowed to *run*. Execution still goes
+    through control_plane's risk/approval gates unchanged.
+    """
+    try:
+        payload = json.loads(result_str)
+        discovered = {item["name"] for item in payload.get("matched", []) if isinstance(item, dict)}
+    except (TypeError, ValueError, KeyError):
+        return selected
+    if not discovered:
+        return selected
+    active = {tool.get("function", {}).get("name") for tool in selected}
+    additions = [
+        tool for tool in pool
+        if tool.get("function", {}).get("name") in discovered - active
+    ]
+    if not additions:
+        return selected
+    logger.info("Activating discovered tools: %s",
+                [tool["function"]["name"] for tool in additions])
+    return [*selected, *additions]
 
 
 def _extract_message_text(content: Any) -> str:
@@ -220,17 +370,31 @@ def _thinking_enabled(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on", "low", "medium", "high"}
 
 
-def _local_model_system_hint(model: str, api_base: str) -> str:
+def _local_model_system_hint(model: str, api_base: str, think: Any = None) -> str:
     """Add a compatibility hint ONLY for models that emit hidden reasoning blocks.
 
     Qwen thinking models (qwen2.5, qwq, etc.) embed <think> blocks in their
     output.  Hermes, Llama, Mistral and most other local models do NOT need
     this hint — it can actually confuse them.
+
+    ``think`` is the active ``ollama_think`` setting. When the owner has
+    deliberately turned reasoning on (Qwen3.x hybrids take "low"/"medium"/
+    "high"), sending ``/no_think`` in the same request fights that setting and
+    strips exactly the planning the model needs for multi-step tool chains —
+    delegation and code work suffer most. In that case we only ask it to keep
+    the reasoning out of the *visible* answer, which Ollama already does by
+    returning it on a separate channel.
     """
     if not _is_qwen_model(model):
         return ""
     if not (_is_local_llm_endpoint(api_base)):
         return ""
+    if _thinking_enabled(think):
+        return (
+            "\n\n[Local model compatibility]:\n"
+            "Think as long as the task needs, but the visible answer must contain "
+            "only the result — no reasoning transcript, no <think> blocks."
+        )
     hint = (
         "\n\n[Local model compatibility]:\n"
         "Return only the final visible answer. Do not emit hidden reasoning, "
@@ -264,11 +428,14 @@ def _provider_display_name(api_base: str, is_openmodel: bool = False, provider: 
     return _KNOWN_PROVIDER_HOSTS.get(host, host or "OpenRouter")
 
 
-def _provider_cost(api_base: str, provider: str, model: str, input_tokens: int, output_tokens: int) -> float:
+def _provider_cost(
+    api_base: str, provider: str, model: str, input_tokens: int, output_tokens: int,
+    provider_id: Optional[str] = None,
+) -> float:
     from backend.ollama_client import is_ollama_provider
     if is_ollama_provider(api_base, provider):
         return 0.0
-    return calculate_cost(model, input_tokens, output_tokens)
+    return calculate_cost(model, input_tokens, output_tokens, provider_id=provider_id)
 
 
 
@@ -337,25 +504,29 @@ def _resolve_agent_llm_config(
     fallback_model: str,
     fallback_provider_name: str,
 ) -> tuple:
-    """Returns (api_base, api_key, model, provider_name, is_external) resolved from
-    agent_row['model_provider']/['model'], falling back to the given agent-instance
-    defaults when the row says 'ollama' or its provider binding isn't resolvable."""
-    provider_id = agent_row.get("model_provider") or "ollama"
+    """Returns (api_base, api_key, model, provider_name, is_external, provider_id)
+    resolved from agent_row['model_provider']/['allowed_provider_ids']/['model'].
+    Tries model_provider first, then each of allowed_provider_ids in order (see
+    backend/agent_provider_access.py) — the first active/resolvable binding
+    wins; falls back to the local model if none resolve, or if the agent's
+    tier forbids external providers outright. provider_id is None for the
+    local fallback, else the provider_bindings id actually used (for billing:
+    calculate_cost's optional pricing-override lookup)."""
+    from backend.agent_provider_access import resolve_best_provider
+    provider_id, resolved = resolve_best_provider(agent_row)
     api_base, api_key, provider_name, is_external = fallback_api_base, fallback_api_key, fallback_provider_name, False
-    if provider_id != "ollama":
-        from backend.provider_governance import resolve_binding_credentials
-        resolved = resolve_binding_credentials(provider_id)
-        if resolved:
-            api_base, api_key = resolved
-            provider_name = "openai_compatible"
-            is_external = True
-        else:
-            logger.warning(
-                "Agent '%s' is bound to provider '%s' but it is not active/resolvable — falling back to the local model.",
-                agent_row.get("id", "?"), provider_id,
-            )
+    if resolved:
+        api_base, api_key = resolved
+        provider_name = "openai_compatible"
+        is_external = True
+    elif (agent_row.get("model_provider") or "ollama") != "ollama":
+        logger.warning(
+            "Agent '%s' is bound to provider '%s' (and any configured fallbacks) but none are "
+            "active/resolvable — falling back to the local model.",
+            agent_row.get("id", "?"), agent_row.get("model_provider"),
+        )
     model = agent_row.get("model") or fallback_model
-    return api_base, api_key, model, provider_name, is_external
+    return api_base, api_key, model, provider_name, is_external, provider_id
 
 
 def _agent_budget_exceeded_status(agent_id: str) -> Optional[Dict[str, Any]]:
@@ -465,6 +636,32 @@ def _should_retry_empty_clean_response(clean_text: str) -> bool:
 def _visible_answer_retry_budget(configured_max_tokens: int) -> int:
     """Give a no-thinking recovery enough room without allowing an unbounded retry."""
     return max(512, min(4096, int(configured_max_tokens or 0)))
+
+
+# Generation settings an agent may set per model. Anything outside this list
+# stays out of the request body: an unknown field is a 400 from most gateways,
+# and model_params is free-form JSON the owner edits by hand.
+_AGENT_GENERATION_PARAMS = (
+    "max_tokens", "top_p", "top_k", "presence_penalty", "frequency_penalty",
+    "seed", "stop", "reasoning_effort", "enable_thinking", "thinking", "reasoning",
+)
+
+
+def _agent_generation_params(subagent: Dict[str, Any]) -> Dict[str, Any]:
+    """The agent's saved model_params, filtered to what may safely be sent.
+
+    Until now this column was written by the UI and read by nobody — every
+    value the owner typed there was silently discarded before the request.
+    """
+    raw = subagent.get("model_params")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw or "{}")
+        except ValueError:
+            return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {key: raw[key] for key in _AGENT_GENERATION_PARAMS if raw.get(key) is not None}
 
 
 def _visible_answer_retry_options(provider_options: Dict[str, Any]) -> Dict[str, Any]:
@@ -688,10 +885,10 @@ def _project_memory_context(user_message: str) -> str:
         return ""
 
 
-def calculate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+def calculate_cost(model: str, prompt_tokens: int, completion_tokens: int, provider_id: Optional[str] = None) -> float:
     """Backward-compatible wrapper around the centralized cost module."""
     from backend.cost import calculate_cost as _calculate_cost
-    return _calculate_cost(model, prompt_tokens, completion_tokens)
+    return _calculate_cost(model, prompt_tokens, completion_tokens, provider_id=provider_id)
 
 
 # ─── Complexity Routing (Fugu-style) ──────────────────────────────────────────────────────────
@@ -931,7 +1128,9 @@ class JarvisAgent:
         self.ollama_keep_alive = os.getenv("OLLAMA_KEEP_ALIVE", "5m")
         self.ollama_think: Any = os.getenv("OLLAMA_THINK", "false")
         # Hard ceilings to prevent runaway agent loops / cost (audit P0, P1-4).
-        self.max_tool_iterations = _env_int("LLM_MAX_TOOL_ITERATIONS", 8)
+        # 8 was too tight for a real code change: list → read → patch → test →
+        # fix → test → commit is already 7 calls before anything is reported.
+        self.max_tool_iterations = _env_int("LLM_MAX_TOOL_ITERATIONS", 12)
         self.request_timeout = _env_float("LLM_REQUEST_TIMEOUT", 60.0)
         self.auto_rag = _env_bool("RAG_AUTO_CONTEXT", False)
         self.memory_enabled = _env_bool("MEMORY_ENABLED", True)
@@ -1062,10 +1261,14 @@ class JarvisAgent:
             self.condenser_enabled = bool(kwargs["condenser_enabled"])
         if kwargs.get("condense_trigger_extra") is not None:
             self.condense_trigger_extra = max(1, min(50, int(kwargs["condense_trigger_extra"])))
+        # Ceiling raised from 4096: a code-writing turn (dev_write_file with a
+        # real file body) or a long tool chain hits 4096 output tokens and gets
+        # truncated mid-call. The local model is free and runs at 262k context,
+        # so the limit only needs to stop a runaway generation.
         if kwargs.get("max_tokens") is not None:
-            self.max_tokens = max(32, min(4096, int(kwargs["max_tokens"])))
+            self.max_tokens = max(32, min(16384, int(kwargs["max_tokens"])))
         if kwargs.get("tool_max_tokens") is not None:
-            self.tool_max_tokens = max(64, min(4096, int(kwargs["tool_max_tokens"])))
+            self.tool_max_tokens = max(64, min(16384, int(kwargs["tool_max_tokens"])))
         if kwargs.get("temperature") is not None:
             self.temperature = max(0.0, min(2.0, float(kwargs["temperature"])))
         if kwargs.get("auto_rag") is not None:
@@ -1169,12 +1372,23 @@ class JarvisAgent:
             log_agent_event(session_id, "task_received", user_message, "working", task=user_message)
             if subagent.get("agent_type") in ("orchestrator", "sub-orchestrator"):
                 from backend.orchestrator import run_orchestration
-                orch_api_base, orch_api_key, orch_model, orch_provider_name, orch_is_external = _resolve_agent_llm_config(
+                orch_api_base, orch_api_key, orch_model, orch_provider_name, orch_is_external, orch_provider_id = _resolve_agent_llm_config(
                     subagent, self.api_base, self.api_key, self.model, self.provider
                 )
                 if orch_is_external:
                     budget_status = _agent_budget_exceeded_status(subagent["id"])
-                    if budget_status:
+                    if budget_status and subagent.get("budget_fallback_to_local"):
+                        # Degrade to the free local model instead of refusing —
+                        # same opt-in graceful-fallback the main subagent path
+                        # (_respond_as_subagent) offers, see that function's docstring.
+                        log_agent_event(
+                            session_id, "info",
+                            f"Бюджет исчерпан (${budget_status['used_usd']:.4f}/${budget_status['budget_usd_limit']:.2f}) — переключение на локальную модель.",
+                            "info", task=user_message,
+                        )
+                        orch_api_base, orch_api_key, orch_provider_name = self.api_base, self.api_key, self.provider
+                        orch_is_external, orch_provider_id, budget_status = False, None, None
+                    elif budget_status:
                         update_agent_runtime_state(
                             session_id, status="idle", current_task="", last_action="Blocked: budget exceeded",
                             last_error="budget_exceeded", progress=100,
@@ -1217,7 +1431,7 @@ class JarvisAgent:
                 # Calculate cost (estimate)
                 prompt_est = len(user_message) // 4
                 completion_est = len(response_text) // 4
-                cost_usd = _provider_cost(orch_api_base, orch_provider_name, orch_model, prompt_est, completion_est)
+                cost_usd = _provider_cost(orch_api_base, orch_provider_name, orch_model, prompt_est, completion_est, orch_provider_id)
                 self.last_costs[session_id] = cost_usd
 
                 assistant_msg_id = db.save_message(session_id, "assistant", response_text, cost_usd=cost_usd)
@@ -1242,9 +1456,10 @@ class JarvisAgent:
                     "traces": orch_result.get("traces", []),
                     "agent_id": target_agent_id,
                     "completion_tokens_estimate": completion_est,
-                    "cost_usd": cost_usd
+                    "cost_usd": cost_usd,
+                    "provider_id": orch_provider_id,
                 }
-                
+
                 DECISION_LOGS.insert(0, log_entry)
                 if len(DECISION_LOGS) > 100:
                     DECISION_LOGS.pop()
@@ -1346,7 +1561,7 @@ class JarvisAgent:
             from backend.orchestrator import run_orchestration
             from backend.database import get_subagent as _get_jarvis_row
             jarvis_row = _get_jarvis_row("jarvis") or {}
-            orch_api_base, orch_api_key, orch_model, orch_provider_name, orch_is_external = _resolve_agent_llm_config(
+            orch_api_base, orch_api_key, orch_model, orch_provider_name, orch_is_external, orch_provider_id = _resolve_agent_llm_config(
                 jarvis_row, self.api_base, self.api_key, self.model, self.provider
             )
 
@@ -1428,7 +1643,7 @@ class JarvisAgent:
             # Calculate cost based on estimated tokens (no call was made if budget-blocked)
             prompt_est = len(user_message) // 4
             completion_est = len(response_text) // 4
-            cost_usd = 0.0 if budget_status else _provider_cost(orch_api_base, orch_provider_name, orch_model, prompt_est, completion_est)
+            cost_usd = 0.0 if budget_status else _provider_cost(orch_api_base, orch_provider_name, orch_model, prompt_est, completion_est, orch_provider_id)
             self.last_costs[session_id] = cost_usd
             
             # Save the clean message exchange in the DB
@@ -1456,6 +1671,7 @@ class JarvisAgent:
                 "assistant_response": response_text,
                 "traces": traces,
                 "cost_usd": cost_usd,
+                "provider_id": orch_provider_id,
             }
             DECISION_LOGS.insert(0, log_entry)
             if len(DECISION_LOGS) > 100:
@@ -1503,16 +1719,31 @@ class JarvisAgent:
         current_time_str = _now_il.strftime("%Y-%m-%d %H:%M:%S")
         day_of_week = _day_names_ru[_now_il.weekday()]
         from backend.tools import TOOLS_SCHEMA
-        selected_tools = _select_tools_for_query(user_message, TOOLS_SCHEMA)
-        if selected_tools:
+        matched_tools = _select_tools_for_query(user_message, TOOLS_SCHEMA)
+        selected_tools = _with_discovery_tool(matched_tools, TOOLS_SCHEMA)
+        if matched_tools:
             system_info = (
                 f"\n\n[Системная информация]:\n"
                 f"Текущая дата и время: {current_time_str} (Asia/Jerusalem, GMT+3)\n"
                 f"День недели: {day_of_week}\n"
                 f"Если запрос требует актуальных данных или действия, используй доступный инструмент. "
                 f"Не выдумывай текущие события, цены, погоду, календарь или состояние сервисов.\n"
+                f"Если для следующего шага нужен инструмент, которого нет в списке, вызови "
+                f"list_tools с описанием задачи — найденные инструменты станут доступны сразу.\n"
                 f"Если инструмент вернул status=awaiting_approval, действие НЕ выполнено. "
                 f"Сообщи ID задачи и попроси владельца подтвердить её в разделе «Процессы» или Telegram."
+                + _work_discipline({t["function"]["name"] for t in matched_tools})
+            )
+        elif selected_tools:
+            # Nothing matched by keyword, so the turn carries only the list_tools
+            # escape hatch — say so, otherwise the model assumes it has no tools
+            # at all and answers from memory.
+            system_info = (
+                f"\n\n[Системная информация]: {current_time_str} (Asia/Jerusalem, GMT+3), {day_of_week}.\n"
+                f"Отвечай кратко и напрямую. Не показывай ход рассуждений.\n"
+                f"Если для ответа нужны свежие данные, файлы проекта, другие агенты или любое "
+                f"действие — сначала вызови list_tools с описанием задачи, нужные инструменты "
+                f"подключатся сразу. Не отказывайся и не выдумывай результат."
             )
         else:
             system_info = (
@@ -1520,7 +1751,7 @@ class JarvisAgent:
                 f"Отвечай кратко и напрямую. Не показывай ход рассуждений."
             )
         system_prompt = FAST_SYSTEM_PROMPT if self.fast_mode else self.system_prompt
-        system_info += _local_model_system_hint(self.model, self.api_base)
+        system_info += _local_model_system_hint(self.model, self.api_base, self.ollama_think)
         system_info += _address_directive()
         messages = [{"role": "system", "content": system_prompt + system_info}]
         for msg in history:
@@ -1538,6 +1769,16 @@ class JarvisAgent:
         start_time = time.time()
         response_text = ""
         latency_ms = 0
+        # Wall time spent inside LLM calls only. latency_ms covers the whole turn
+        # including tool execution (one web_search or subagent call can dominate
+        # it), so tokens ÷ latency would report a "speed" that says more about the
+        # tools than about the model.
+        generation_ms = 0
+        # Pure decode time when the provider reports it (Ollama does). This is
+        # what a "tokens per second" figure should be divided by — generation_ms
+        # still includes prompt ingestion and any model load.
+        decode_ms = 0
+        prompt_ms = 0
         error_msg = None
         tool_executed = False
         approval_pending = False
@@ -1558,6 +1799,13 @@ class JarvisAgent:
                 STATUS_TIMEOUT,
                 call_llm_normalized,
             )
+            # Only when this agent has no explicit global provider override
+            # (self.provider == 'ollama', the default) does the local model get
+            # to decide per-turn whether to answer itself or escalate up the
+            # AI Router fallback chain (backend/router_tiers.py) — an explicit
+            # provider switch from the dashboard is a deliberate admin choice
+            # and is always honored as-is, unchanged from before this existed.
+            route_state: Dict[str, Any] = {}
             async with httpx.AsyncClient(timeout=self.request_timeout) as client:
                 while True:
                     # Hard cap on agent-loop iterations to prevent runaway
@@ -1575,10 +1823,7 @@ class JarvisAgent:
                                 "Пожалуйста, уточните запрос или разбейте его на части."
                             )
                         break
-                    normalized = await call_llm_normalized(
-                        api_base=self.api_base,
-                        api_key=self.api_key,
-                        model=self.model,
+                    call_kwargs = dict(
                         messages=messages,
                         temperature=self.temperature,
                         max_tokens=self.tool_max_tokens if selected_tools else self.max_tokens,
@@ -1589,13 +1834,37 @@ class JarvisAgent:
                         max_retries=0 if tool_executed else None,
                         client=client,
                         stream_callback=stream_callback,
-                        provider_options={
-                            "provider": self.provider,
-                            "num_ctx": self.ollama_num_ctx,
-                            "keep_alive": self.ollama_keep_alive,
-                            "think": self.ollama_think,
-                        },
                     )
+                    _call_started = time.perf_counter()
+                    if self.provider == "ollama":
+                        from backend.local_orchestrator import route_llm_call
+                        normalized = await route_llm_call(
+                            route_state=route_state,
+                            local_api_base=self.api_base, local_api_key=self.api_key,
+                            local_model=self.model, local_provider=self.provider,
+                            provider_options={
+                                "num_ctx": self.ollama_num_ctx,
+                                "keep_alive": self.ollama_keep_alive,
+                                "think": self.ollama_think,
+                            },
+                            **call_kwargs,
+                        )
+                    else:
+                        normalized = await call_llm_normalized(
+                            api_base=self.api_base,
+                            api_key=self.api_key,
+                            model=self.model,
+                            provider_options={
+                                "provider": self.provider,
+                                "num_ctx": self.ollama_num_ctx,
+                                "keep_alive": self.ollama_keep_alive,
+                                "think": self.ollama_think,
+                            },
+                            **call_kwargs,
+                        )
+                    generation_ms += int((time.perf_counter() - _call_started) * 1000)
+                    decode_ms += normalized.eval_ms or 0
+                    prompt_ms += normalized.prompt_ms or 0
                     total_prompt_tokens += normalized.usage.input_tokens or 0
                     total_completion_tokens += normalized.usage.output_tokens or 0
                     last_finish_reason = normalized.finish_reason
@@ -1621,15 +1890,25 @@ class JarvisAgent:
                         # A semantic empty retry is safe only before any tool with
                         # possible side effects. It is separate from transport retry.
                         if normalized.status == STATUS_EMPTY and not tool_executed:
+                            # If the primary call above was routed to an external
+                            # tier, retry on that same tier — not back on self.*,
+                            # which may now be stale (retrying a different
+                            # provider than the one that just answered would be
+                            # incoherent, and silently drops the tier's context).
+                            retry_target = route_state.get("resolved") or {
+                                "api_base": self.api_base, "api_key": self.api_key,
+                                "model": self.model, "provider": self.provider,
+                            }
                             retry_options = _visible_answer_retry_options({
-                                "provider": self.provider,
+                                "provider": retry_target["provider"],
                                 "num_ctx": self.ollama_num_ctx,
                                 "keep_alive": self.ollama_keep_alive,
                                 "think": self.ollama_think,
                             })
+                            _retry_started = time.perf_counter()
                             retry = await call_llm_normalized(
-                                api_base=self.api_base, api_key=self.api_key,
-                                model=self.model,
+                                api_base=retry_target["api_base"], api_key=retry_target["api_key"],
+                                model=retry_target["model"],
                                 messages=messages + [{"role": "user", "content": FINAL_ANSWER_RETRY_PROMPT}],
                                 temperature=min(self.temperature, 0.3),
                                 max_tokens=_visible_answer_retry_budget(self.max_tokens), timeout=self.request_timeout,
@@ -1637,6 +1916,9 @@ class JarvisAgent:
                                 stream_callback=stream_callback,
                                 provider_options=retry_options,
                             )
+                            generation_ms += int((time.perf_counter() - _retry_started) * 1000)
+                            decode_ms += retry.eval_ms or 0
+                            prompt_ms += retry.prompt_ms or 0
                             total_prompt_tokens += retry.usage.input_tokens or 0
                             total_completion_tokens += retry.usage.output_tokens or 0
                             last_finish_reason = retry.finish_reason or last_finish_reason
@@ -1723,8 +2005,15 @@ class JarvisAgent:
                             result_str = blocked
                         else:
                             from backend.control_plane import execute_governed_tool
+                            from backend.tool_permissions import OWNER
+
+                            # This is Vexa itself, reached only through the
+                            # authenticated dashboard or the admin-gated Telegram
+                            # bot — the owner principal. It keeps the full tool
+                            # set; the host-shell guard still applies inside.
                             result_str = await asyncio.to_thread(
-                                execute_governed_tool, tool_name, tool_args, chat_id=session_id
+                                execute_governed_tool, tool_name, tool_args,
+                                chat_id=session_id, principal=OWNER,
                             )
                             if tool_name in PAID_TOOLS:
                                 try:
@@ -1733,6 +2022,12 @@ class JarvisAgent:
                                         _record_paid_tool_spend("jarvis", session_id, tool_name, float(parsed_spend["cost_usd"]))
                                 except Exception:
                                     pass
+
+                        if tool_name == "list_tools":
+                            # Discovery widens the schema for the rest of the turn.
+                            selected_tools = _activate_discovered_tools(
+                                selected_tools, result_str, TOOLS_SCHEMA
+                            )
 
                         try:
                             res_obj = json.loads(result_str)
@@ -1844,12 +2139,31 @@ class JarvisAgent:
                 "finish_reason": last_finish_reason,
                 "request_id": last_request_id,
                 "latency_ms": latency_ms,
+                "generation_ms": generation_ms,
+                "decode_ms": decode_ms,
+                "prompt_ms": prompt_ms,
                 "input_tokens": total_prompt_tokens,
                 "output_tokens": total_completion_tokens,
                 "cost_usd": self.last_costs.get(session_id, 0.0),
                 "tool_iterations": tool_iterations,
                 "error": error_msg,
             }
+            # Persist the same numbers on the message row, so the chat still shows
+            # them after a reload instead of only for as long as the tab lives.
+            from backend.database import update_message_meta
+            meta_for_history = self.last_run_metadata[session_id]
+            update_message_meta(
+                self.last_saved_ids.get(session_id, {}).get("assistant"),
+                {
+                    key: meta_for_history.get(key)
+                    for key in (
+                        "status", "model", "provider", "finish_reason", "latency_ms",
+                        "generation_ms", "decode_ms", "prompt_ms",
+                        "input_tokens", "output_tokens", "tool_iterations",
+                    )
+                    if meta_for_history.get(key) is not None
+                },
+            )
         except Exception:
             pass
 
@@ -1872,28 +2186,35 @@ class JarvisAgent:
 
         # Per-agent provider routing. "ollama" (the default persisted by
         # database.py's subagents schema) keeps today's behavior — routed through
-        # the main agent's global api_base/api_key/provider. Anything else must be
-        # an *active* provider_bindings id (backend/provider_governance.py); an
-        # unresolved/inactive binding falls back to local rather than failing the
-        # whole turn, since the binding may have been revoked after the agent was
-        # configured to use it.
-        subagent_provider_id = subagent.get("model_provider") or "ollama"
+        # the main agent's global api_base/api_key/provider, itself subject to
+        # the global router_tiers fallback chain narrowed to this agent's own
+        # allowed_provider_ids further below. Anything else is resolved through
+        # agent_provider_access.resolve_best_provider: tries model_provider
+        # first, then allowed_provider_ids in order — the first active
+        # provider_bindings entry wins; an unresolved/inactive one just moves
+        # to the next candidate (or local) rather than failing the whole turn,
+        # since a binding may have been revoked after the agent was configured
+        # to use it. See backend/agent_provider_access.py.
+        from backend.agent_provider_access import allowed_binding_ids_for_chain, resolve_best_provider
+        subagent_provider_id, _resolved_creds = resolve_best_provider(subagent)
         subagent_api_base = self.api_base
         subagent_api_key = self.api_key
         subagent_provider_name = self.provider
         subagent_is_external = False
-        if subagent_provider_id != "ollama":
-            from backend.provider_governance import resolve_binding_credentials
-            resolved = resolve_binding_credentials(subagent_provider_id)
-            if resolved:
-                subagent_api_base, subagent_api_key = resolved
-                subagent_provider_name = "openai_compatible"
-                subagent_is_external = True
-            else:
-                logger.warning(
-                    "Sub-agent '%s' is bound to provider '%s' but it is not active/resolvable — falling back to the local model.",
-                    subagent_name, subagent_provider_id,
-                )
+        if _resolved_creds:
+            subagent_api_base, subagent_api_key = _resolved_creds
+            subagent_provider_name = "openai_compatible"
+            subagent_is_external = True
+        elif (subagent.get("model_provider") or "ollama") != "ollama":
+            logger.warning(
+                "Sub-agent '%s' is bound to provider '%s' (and any configured fallbacks) but none are "
+                "active/resolvable — falling back to the local model.",
+                subagent_name, subagent.get("model_provider"),
+            )
+        # Only relevant when the agent stays on the local default: narrows the
+        # global fallback chain to this agent's own allowed_provider_ids (None
+        # = unrestricted, unchanged legacy behavior).
+        subagent_chain_allowed_ids = allowed_binding_ids_for_chain(subagent)
 
         # Hard budget gate: an agent with a configured budget_usd_limit that has
         # already spent it out is blocked from making ANY further external-provider
@@ -1903,7 +2224,29 @@ class JarvisAgent:
         if subagent_is_external:
             from backend.database import get_agent_budget_status
             budget_status = get_agent_budget_status(subagent["id"])
-            if budget_status["exceeded"]:
+            if budget_status["exceeded"] and subagent.get("budget_fallback_to_local"):
+                # Opt-in graceful degrade: keep answering on the free local
+                # model instead of refusing the turn outright. Off by default
+                # (budget_fallback_to_local=False) — the hard block below is
+                # what every agent gets unless the owner turns this on.
+                from backend.activity_logger import log_activity as _log_budget_fallback
+                _log_budget_fallback(
+                    activity_type="active",
+                    source=subagent_name,
+                    message=(
+                        f"⚠️ Лимит расходов исчерпан (${budget_status['used_usd']:.4f} / "
+                        f"${budget_status['budget_usd_limit']:.2f}) — переключение на локальную модель."
+                    ),
+                )
+                subagent_api_base, subagent_api_key = self.api_base, self.api_key
+                subagent_provider_name = self.provider
+                subagent_is_external = False
+                subagent_provider_id = None
+                # Budget is exhausted — degrade to local only, don't let the
+                # router's own classifier escalate this turn to some *other*
+                # paid tier and defeat the point of the limit.
+                subagent_chain_allowed_ids = set()
+            elif budget_status["exceeded"]:
                 from datetime import datetime
                 from zoneinfo import ZoneInfo
                 from backend.activity_logger import log_activity as _log_budget_activity
@@ -2010,32 +2353,18 @@ class JarvisAgent:
             f"КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО искать, использовать, упоминать, цитировать или пересказывать в ответах Альберту готовые прогнозы, чужие статьи, советы или мнения о валуйных ставках (например, 'готовые прогнозы', 'валуйные ставки по версии LiveSport', 'экспертные мнения'). Вы должны искать исключительно сырые числовые данные: пары соперников, точное время начала матчей и коэффициенты (odds/котировки) букмекеров. Любые выводы и математические расчеты валуйности (EV = Probability * Odds - 1) вы обязаны делать строго самостоятельно и приводить только свои собственные результаты, не ссылаясь на чужие мнения!\n"
             f"Вы не имеете права лениться делать расчеты: если точных числовых коэффициентов в поиске нет, вы обязаны провести математическое прогнозирование (например, рассчитать вероятности победы/ничьей/поражения по распределению Пуассона на основе средней результативности или статистики голов команд) и рассчитать ожидаемую валуйность (EV = P * Odds - 1) на основе расчетных вероятностей и примерных коэффициентов, вместо выдачи сухого отказа или цитирования чужих прогнозов."
         )
-        system_info += _local_model_system_hint(subagent_model, self.api_base)
+        system_info += _local_model_system_hint(subagent_model, self.api_base, self.ollama_think)
         system_info += _address_directive()
         messages = [{"role": "system", "content": system_prompt + system_info}]
         for msg in history:
             messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": user_content})
 
-        # Mandatory redaction gateway: whenever this turn is routed to an external
-        # provider, scrub every user/assistant message (current turn + history) of
-        # anything secret-shaped before it leaves the box. The DB/memory copies
-        # saved above (db.save_message, `history`) are untouched — this only
-        # rewrites the local `messages` list actually sent over HTTP. The response
-        # gets its placeholders swapped back for the real values before it's shown
-        # to the user or persisted, right before this function returns.
-        redaction_request_id = None
-        if subagent_is_external:
-            from backend.redaction import detect_and_redact, store_mapping
-            import uuid as _uuid
-            redaction_request_id = f"{session_id}:{_uuid.uuid4().hex[:12]}"
-            combined_mapping: Dict[str, str] = {}
-            for message in messages:
-                if message.get("role") in ("user", "assistant") and message.get("content"):
-                    redacted_content, mapping = await detect_and_redact(message["content"])
-                    message["content"] = redacted_content
-                    combined_mapping.update(mapping)
-            store_mapping(redaction_request_id, combined_mapping)
+        # Sensitive-data redaction for anything routed to an external provider now
+        # happens once, centrally, in llm_client.call_llm_normalized — gated on the
+        # target api_base, not on a flag threaded through this function. That also
+        # covers tool outputs appended to `messages` on later tool-loop iterations
+        # below, which a one-time pass here never could. See redaction.py.
 
         # Default subagent access is read-only/low-risk. Mutating and shell tools
         # require an explicit skill and still pass through the Control Plane.
@@ -2125,9 +2454,30 @@ class JarvisAgent:
         else:
             allowed_tools = child_allowed
 
-        allowed_tools.update(["save_subagent_memory", "get_subagent_memory"])
+        # list_tools is R0 metadata; the principal filter right below still
+        # decides whether this agent may actually see or run anything it finds.
+        allowed_tools.update(["save_subagent_memory", "get_subagent_memory", "list_tools"])
+
+        # Principal gate (backend/tool_permissions.py). Whatever the skills say,
+        # a sub-agent never gets a server-acting tool — those stay with Vexa —
+        # and an agent answering a token holder on a public channel is narrowed
+        # further, to read-only informational tools its plan permits.
+        from backend import tool_permissions
+
+        tool_principal = (
+            tool_permissions.PUBLIC_CHANNEL
+            if subagent.get("_access_scope") == "public"
+            else tool_permissions.SUBAGENT
+        )
+        plan_allowed_tools = subagent.get("_plan_allowed_tools")
+        allowed_tools = tool_permissions.filter_tool_names(
+            tool_principal, allowed_tools, plan_allowed_tools=plan_allowed_tools
+        )
+
         subagent_tools = [t for t in TOOLS_SCHEMA if t["function"]["name"] in allowed_tools]
-        selected_subagent_tools = _select_tools_for_query(user_message, subagent_tools)
+        selected_subagent_tools = _with_discovery_tool(
+            _select_tools_for_query(user_message, subagent_tools), subagent_tools
+        )
 
         start_time = time.time()
         response_text = ""
@@ -2150,6 +2500,12 @@ class JarvisAgent:
                 STATUS_TIMEOUT,
                 call_llm_normalized,
             )
+            # Same local-first delegation as the main agent loop above — only
+            # when the subagent has no explicit provider_bindings override
+            # (subagent_is_external False, i.e. still on the local default).
+            # An explicit binding is the admin's deliberate choice and bypasses
+            # the fallback chain entirely, unchanged from before this existed.
+            route_state: Dict[str, Any] = {}
             async with httpx.AsyncClient(timeout=self.request_timeout) as client:
                 while True:
                     if tool_iterations >= self.max_tool_iterations:
@@ -2158,11 +2514,9 @@ class JarvisAgent:
                         response_text = "Задача остановлена: превышено безопасное число вызовов инструментов."
                         break
 
-                    normalized = await call_llm_normalized(
-                        api_base=subagent_api_base,
-                        api_key=subagent_api_key,
-                        model=subagent_model,
+                    call_kwargs = dict(
                         messages=messages,
+                        extra_payload=_agent_generation_params(subagent),
                         temperature=subagent.get("temperature", 0.7),
                         max_tokens=self.tool_max_tokens if selected_subagent_tools else self.max_tokens,
                         tools=selected_subagent_tools or None,
@@ -2170,13 +2524,46 @@ class JarvisAgent:
                         max_retries=0 if tool_executed else None,
                         client=client,
                         stream_callback=stream_callback,
-                        provider_options={
-                            "provider": subagent_provider_name,
-                            "num_ctx": self.ollama_num_ctx,
-                            "keep_alive": self.ollama_keep_alive,
-                            "think": self.ollama_think,
-                        },
                     )
+                    if subagent_is_external:
+                        normalized = await call_llm_normalized(
+                            api_base=subagent_api_base, api_key=subagent_api_key, model=subagent_model,
+                            provider_options={
+                                "provider": subagent_provider_name,
+                                "num_ctx": self.ollama_num_ctx,
+                                "keep_alive": self.ollama_keep_alive,
+                                "think": self.ollama_think,
+                            },
+                            **call_kwargs,
+                        )
+                    else:
+                        from backend.local_orchestrator import route_llm_call
+                        normalized = await route_llm_call(
+                            route_state=route_state,
+                            local_api_base=subagent_api_base, local_api_key=subagent_api_key,
+                            local_model=subagent_model, local_provider=subagent_provider_name,
+                            provider_options={
+                                "num_ctx": self.ollama_num_ctx,
+                                "keep_alive": self.ollama_keep_alive,
+                                "think": self.ollama_think,
+                            },
+                            allowed_binding_ids=subagent_chain_allowed_ids,
+                            **call_kwargs,
+                        )
+                        resolved = route_state.get("resolved")
+                        if resolved:
+                            # Keep the display/error-message vars (and the retry
+                            # block below) pointed at whichever tier actually
+                            # answered, not the pre-loop local default.
+                            subagent_api_base = resolved["api_base"]
+                            subagent_api_key = resolved["api_key"]
+                            subagent_model = resolved["model"]
+                            subagent_provider_name = resolved["provider"]
+                            # ...and the pricing-lookup id too, so the cost
+                            # calc below (and this turn's decision log) uses
+                            # whichever provider actually served the request,
+                            # not the pre-loop 'local' default.
+                            subagent_provider_id = (route_state.get("tier") or {}).get("provider_binding_id")
 
                     total_prompt_tokens += normalized.usage.input_tokens or 0
                     total_completion_tokens += normalized.usage.output_tokens or 0
@@ -2231,16 +2618,11 @@ class JarvisAgent:
                             error_msg = retry_error or normalized.error_message
                             response_text = _empty_model_response_fallback(subagent_name, retry_finish_reason or normalized.finish_reason)
 
-                        # Swap any [SECRET_xxxxxx] placeholders the external provider
-                        # echoed back for their real values *before* this text is saved
-                        # to the DB/memory or shown to the user — everything local stays
-                        # full-fidelity; only the outbound HTTP leg above ever saw the
-                        # redacted form.
-                        if redaction_request_id:
-                            from backend.redaction import restore_secrets
-                            response_text = restore_secrets(response_text, redaction_request_id)
+                        # normalized.content (and hence response_text) already has any
+                        # [SECRET_xxxxxx] placeholders swapped back for their real values
+                        # — call_llm_normalized restores them before returning.
 
-                        cost_usd = _provider_cost(subagent_api_base, subagent_provider_name, subagent_model, total_prompt_tokens, total_completion_tokens)
+                        cost_usd = _provider_cost(subagent_api_base, subagent_provider_name, subagent_model, total_prompt_tokens, total_completion_tokens, subagent_provider_id)
                         self.last_costs[session_id] = cost_usd
                         
                         log_activity(
@@ -2274,12 +2656,24 @@ class JarvisAgent:
                             source=subagent_name,
                             message=f"Выполнение субагента через Control Plane: '{tool_name}'"
                         )
-                        if tool_name in PAID_TOOLS and (blocked := _paid_tool_budget_block(subagent["id"], tool_name)):
+                        # Second of the three policy checks: the schema filter above
+                        # already hid this tool, so reaching here means the model
+                        # invented the name. Refuse before it costs anything.
+                        if not tool_permissions.is_tool_allowed(
+                            tool_principal, tool_name, plan_allowed_tools=plan_allowed_tools
+                        ):
+                            logger.warning(
+                                "Sub-agent '%s' (%s) attempted a blocked tool '%s'",
+                                subagent_name, tool_principal, tool_name,
+                            )
+                            result_str = tool_permissions.denial_payload(tool_principal, tool_name)
+                        elif tool_name in PAID_TOOLS and (blocked := _paid_tool_budget_block(subagent["id"], tool_name)):
                             result_str = blocked
                         else:
                             from backend.control_plane import execute_governed_tool
                             result_str = await asyncio.to_thread(
-                                execute_governed_tool, tool_name, tool_args, chat_id=session_id
+                                execute_governed_tool, tool_name, tool_args,
+                                chat_id=session_id, principal=tool_principal,
                             )
                             if tool_name in PAID_TOOLS:
                                 try:
@@ -2288,6 +2682,13 @@ class JarvisAgent:
                                         _record_paid_tool_spend(subagent["id"], session_id, tool_name, float(parsed_spend["cost_usd"]))
                                 except Exception:
                                     pass
+                        if tool_name == "list_tools":
+                            # Widened from the sub-agent's own principal-filtered
+                            # pool, so discovery can never exceed its permissions.
+                            selected_subagent_tools = _activate_discovered_tools(
+                                selected_subagent_tools, result_str, subagent_tools
+                            )
+
                         try:
                             if json.loads(result_str).get("status") == "awaiting_approval":
                                 approval_pending = True
@@ -2322,7 +2723,7 @@ class JarvisAgent:
         # Add call record to global decision logs
         prompt_est = sum(len(m.get("content") or "") for m in messages) // 4
         completion_est = len(response_text) // 4
-        cost_usd = calculate_cost(subagent_model, prompt_est, completion_est)
+        cost_usd = calculate_cost(subagent_model, prompt_est, completion_est, provider_id=subagent_provider_id)
         log_entry = {
             "timestamp": datetime.now(ZoneInfo("Asia/Jerusalem")).strftime("%Y-%m-%d %H:%M:%S"),
             "session_id": session_id,
@@ -2336,7 +2737,8 @@ class JarvisAgent:
             "traces": [],
             "agent_id": subagent["id"],
             "completion_tokens_estimate": completion_est,
-            "cost_usd": cost_usd
+            "cost_usd": cost_usd,
+            "provider_id": subagent_provider_id,
         }
         
         DECISION_LOGS.insert(0, log_entry)

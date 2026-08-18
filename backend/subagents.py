@@ -83,7 +83,7 @@ async def call_llm(messages: List[Dict[str, str]], api_key: str, model: str) -> 
         call_llm_normalized,
     )
 
-    local_hint = _local_model_system_hint(model, api_base)
+    local_hint = _local_model_system_hint(model, api_base, provider_options.get("think"))
     if local_hint:
         messages = [dict(msg) for msg in messages]
         for msg in messages:
