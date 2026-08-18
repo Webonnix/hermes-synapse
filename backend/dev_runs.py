@@ -48,6 +48,12 @@ DEV_RUN_TOOLS = (
     "git_status", "git_diff", "git_commit", "git_push",
 )
 
+# A goal is a full brief, not a title: a serious card carries requirements,
+# constraints, brand voice, acceptance criteria. The old 8k cap silently
+# truncated real multi-page specs mid-sentence, and the executor never knew
+# the rest existed.
+GOAL_MAX_CHARS = int(os.getenv("DEV_RUNS_GOAL_MAX_CHARS", "60000"))
+
 # 0 = unlimited (see _check_gates / _crossed_80_percent, both already treat a
 # falsy/<=0 budget as "no cap"). Owners who want a hard stop still set an
 # explicit iter_budget on create; the kill switch and the per-run Cancel
@@ -61,7 +67,13 @@ HISTORY_SUMMARY_MAX_CHARS = 240
 # must still never be able to spin forever, so the loop carries absolute caps
 # that are independent of the owner-set budgets.
 # Last-resort iteration ceiling; trips only if nothing else stopped the run.
-HARD_ITERATION_CAP = int(os.getenv("DEV_RUNS_HARD_ITERATION_CAP", "300"))
+# Last-resort ceiling, not a work budget: a genuinely large brief (a full site,
+# a multi-stage analysis) legitimately runs for hours and hundreds of steps.
+# 300 cut those off mid-build. Raised now that the real runaway detectors —
+# duplicate-action blocking, consecutive-failure counting (which finally sees
+# timed-out dev_exec calls), and context compaction — actually catch a stuck
+# run on their own, which is what a low ceiling was standing in for.
+HARD_ITERATION_CAP = int(os.getenv("DEV_RUNS_HARD_ITERATION_CAP", "2000"))
 # Same tool+arguments this many times in the recent window → the loop stops
 # executing it and tells the model to change strategy instead.
 DUPLICATE_ACTION_LIMIT = int(os.getenv("DEV_RUNS_DUPLICATE_ACTION_LIMIT", "3"))
@@ -169,22 +181,44 @@ def _connect() -> sqlite3.Connection:
 
 # ── CRUD ─────────────────────────────────────────────────────────────────────
 
-def auto_assign_agent() -> Optional[str]:
-    """Least-busy enabled subagent (fewest cards currently occupying it),
-    round-robin on ties by id. None if no subagent is enabled."""
+def auto_assign_agent(discipline: Optional[str] = None) -> Optional[str]:
+    """Best enabled subagent for this kind of work, least-busy among equals.
+
+    Specialists first: an agent that declares this card's discipline always
+    outranks one that does not, however busy it is — sending a landing page to
+    whoever happens to be idle is the round-robin behaviour this replaces.
+    Load only breaks ties within a qualification tier, so a busy specialist
+    still beats an idle generalist, and a generalist still gets the card when
+    nobody claims the discipline (or the card has none).
+    """
     placeholders = ", ".join("?" for _ in ASSIGNED_BUSY_STATUSES)
     with _connect() as conn:
-        row = conn.execute(
-            f"""SELECT s.id FROM subagents s
+        rows = conn.execute(
+            f"""SELECT s.id, s.disciplines, COUNT(r.id) AS load
+                FROM subagents s
                 LEFT JOIN dev_runs r
                   ON r.assignee_agent_id = s.id AND r.status IN ({placeholders})
                 WHERE s.is_enabled = 1
                 GROUP BY s.id
-                ORDER BY COUNT(r.id) ASC, s.id ASC
-                LIMIT 1""",
+                ORDER BY s.id ASC""",
             ASSIGNED_BUSY_STATUSES,
-        ).fetchone()
-    return row["id"] if row else None
+        ).fetchall()
+    if not rows:
+        return None
+
+    def rank(row) -> tuple:
+        declared: List[str] = []
+        if discipline:
+            try:
+                parsed = json.loads(row["disciplines"] or "[]")
+                declared = [str(item) for item in parsed] if isinstance(parsed, list) else []
+            except (TypeError, ValueError):
+                declared = []
+        # 0 = specialist in this discipline, 1 = everyone else. Sorting by the
+        # tier first is what makes qualification beat availability.
+        return (0 if discipline and discipline in declared else 1, row["load"], row["id"])
+
+    return min(rows, key=rank)["id"]
 
 
 def create_run(
@@ -196,10 +230,18 @@ def create_run(
     assignee_agent_id: Optional[str] = None,
     start: bool = True,
     parent_run_id: Optional[str] = None,
+    discipline: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Creates a Kanban card. With `parent_run_id` it is a *continuation*: the
     next revision of the product that run built, sharing its chain root, its
-    published URL and (via dev_sandbox) its working tree."""
+    published URL and (via dev_sandbox) its working tree.
+
+    `discipline` (backend/disciplines.py) decides who gets assigned and which
+    specialist standards the executor is held to. Left unset it is inferred
+    from the goal text — most cards are typed as a sentence rather than
+    classified, and a mandatory picker would just train people to pick the
+    first option."""
+    from backend import disciplines as disciplines_module
     goal = (goal or "").strip()
     if not goal:
         raise ValueError("Dev-run goal must not be empty")
@@ -212,6 +254,8 @@ def create_run(
         (datetime.now(timezone.utc) + timedelta(minutes=wall_minutes)).isoformat(timespec="seconds")
         if wall_minutes else None
     )
+    if not disciplines_module.is_valid(discipline):
+        discipline = None
     if parent:
         # A continuation stays with the agent that already carries this
         # product's context, and keeps its parent's budgets unless the caller
@@ -221,8 +265,12 @@ def create_run(
             iter_budget = parent["iter_budget"]
         if cost_budget is None:
             cost_budget = parent["cost_budget"]
+        # Same product, same kind of work — a "make the header sticky" follow-up
+        # must not be re-classified off the strength of its own short wording.
+        discipline = discipline or parent["discipline"]
+    discipline = discipline or disciplines_module.detect_discipline(goal)
     if not assignee_agent_id:
-        assignee_agent_id = auto_assign_agent()
+        assignee_agent_id = auto_assign_agent(discipline)
     now = _now()
     initial_status = "planned" if start else "backlog"
     root_run_id = (parent["root_run_id"] or parent["id"]) if parent else run_id
@@ -242,11 +290,11 @@ def create_run(
             """INSERT INTO dev_runs
                (id, goal, status, trace_id, iter_used, iter_budget, cost_used,
                 cost_budget, wall_deadline, created_at, updated_at, assignee_agent_id,
-                parent_run_id, root_run_id, revision)
-               VALUES (?, ?, ?, ?, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (run_id, goal[:8000], initial_status, trace_id, max(0, int(iter_budget)),
+                parent_run_id, root_run_id, revision, discipline)
+               VALUES (?, ?, ?, ?, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (run_id, goal[:GOAL_MAX_CHARS], initial_status, trace_id, max(0, int(iter_budget)),
              cost_budget, deadline, now, now, assignee_agent_id,
-             parent["id"] if parent else None, root_run_id, revision),
+             parent["id"] if parent else None, root_run_id, revision, discipline),
         )
     return get_run(run_id)  # type: ignore[return-value]
 
@@ -415,7 +463,7 @@ def start_run(run_id: str) -> Dict[str, Any]:
     if run["status"] != "backlog":
         raise ValueError(f"Dev-run cannot start from status {run['status']}")
     if not run["assignee_agent_id"]:
-        reassign_run(run_id, auto_assign_agent())
+        reassign_run(run_id, auto_assign_agent(run["discipline"]))
     return update_run(run_id, status="planned")
 
 
@@ -459,6 +507,7 @@ def list_runs(limit: int = 50) -> List[Dict[str, Any]]:
 _UPDATABLE_FIELDS = {
     "status", "plan_id", "iter_used", "cost_used", "checkpoint_step", "status_reason",
     "demo_url", "demo_snapshot_url", "sandbox_container",
+    "discipline", "progress_digest", "digest_through_seq",
 }
 
 
@@ -980,8 +1029,95 @@ def _observation_block(steps: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+# A run meant to work for hours or days cannot just keep appending to its
+# prompt — and it cannot just forget either. Past this many steps the older
+# ones are folded into a rolling narrative digest and dropped from the
+# verbatim ledger, so context stays bounded while the run still knows what it
+# already built. Chosen well above HISTORY_STEPS_IN_CONTEXT so short runs
+# never pay for compaction at all.
+COMPACT_AFTER_STEPS = int(os.getenv("DEV_RUNS_COMPACT_AFTER_STEPS", "60"))
+# How many of the oldest un-digested steps one compaction pass absorbs.
+COMPACT_BATCH_STEPS = int(os.getenv("DEV_RUNS_COMPACT_BATCH_STEPS", "40"))
+DIGEST_MAX_CHARS = int(os.getenv("DEV_RUNS_DIGEST_MAX_CHARS", "4000"))
+
+_DIGEST_PROMPT = (
+    "You are maintaining the running memory of a long autonomous development "
+    "task. Rewrite the notes below into a compact factual digest of what has "
+    "ALREADY been accomplished and learned, so the work can continue without "
+    "re-reading the full history.\n\n"
+    "Keep: files created or changed and what they now contain; decisions made "
+    "and why; commands that worked; blockers hit and how they were resolved or "
+    "worked around; anything a fresh engineer would need to not redo it. "
+    "Drop: routine directory listings, repeated reads of unchanged files, "
+    "step-by-step narration. Be specific — file paths, command names, concrete "
+    "outcomes — never vague summary prose.\n\n"
+    f"Hard limit {DIGEST_MAX_CHARS} characters. Reply with the digest text only."
+)
+
+
+async def _compact_history(run: Dict[str, Any], *, force: bool = False) -> Dict[str, Any]:
+    """Folds the oldest un-digested steps into the run's progress digest.
+
+    This is what lets a run survive for hours: the verbatim ledger stays a
+    fixed size while the narrative of everything before it is preserved in
+    compressed form. A failure here is non-fatal — the run keeps its existing
+    digest and simply carries a longer ledger this iteration."""
+    steps = get_steps(run["id"])
+    pending = [s for s in steps if s["seq"] > (run.get("digest_through_seq") or 0)]
+    # `force` is the empty-reply recovery path: the context is already too big
+    # for the model to answer at all, so compact whatever is there rather than
+    # waiting for the usual threshold. Always leave the most recent steps
+    # verbatim — those are the ones the next decision actually depends on.
+    threshold = HISTORY_STEPS_IN_CONTEXT // 2 if force else COMPACT_AFTER_STEPS
+    if len(pending) <= threshold:
+        return run
+
+    keep_recent = HISTORY_STEPS_IN_CONTEXT // 4 if force else 0
+    batch = pending[:COMPACT_BATCH_STEPS] if not force else pending[:max(1, len(pending) - keep_recent)]
+    lines = [
+        f"{s['seq']}. [{s['phase']}{'/' + s['tool'] if s['tool'] else ''} {s['status']}] "
+        f"{s['summary'][:HISTORY_SUMMARY_MAX_CHARS]}"
+        for s in batch
+    ]
+    existing = (run.get("progress_digest") or "").strip()
+    body = (f"Digest so far:\n{existing}\n\n" if existing else "") + \
+           "New steps to fold in:\n" + "\n".join(lines)
+
+    config = _llm_config()
+    try:
+        response = await call_llm_normalized(
+            api_base=config["api_base"], api_key=config["api_key"], model=config["model"],
+            messages=[{"role": "system", "content": _DIGEST_PROMPT},
+                      {"role": "user", "content": body}],
+            temperature=0.2, max_tokens=1200,
+            # Summarizing is not a reasoning task, and a runaway thinking chain
+            # here would stall the very run this is meant to keep alive.
+            provider_options={**config["provider_options"], "think": False},
+        )
+    except Exception as exc:  # noqa: BLE001 — compaction must never kill a run
+        logger.warning("Dev-run %s: history compaction failed (%s)", run["id"], exc)
+        return run
+    if not response.is_success or not (response.content or "").strip():
+        logger.warning("Dev-run %s: history compaction returned nothing usable", run["id"])
+        return run
+
+    digest = (response.content or "").strip()[:DIGEST_MAX_CHARS]
+    through = batch[-1]["seq"]
+    add_step(run["id"], "observe", "",
+             f"Compacted steps {batch[0]['seq']}–{through} into the progress digest "
+             f"({len(digest)} chars).")
+    logger.info("Dev-run %s: compacted %d steps through seq %d", run["id"], len(batch), through)
+    return update_run(run["id"], progress_digest=digest, digest_through_seq=through)
+
+
 def _build_messages(run: Dict[str, Any]) -> List[Dict[str, Any]]:
-    steps = get_steps(run["id"])[-HISTORY_STEPS_IN_CONTEXT:]
+    from backend import disciplines as disciplines_module
+
+    # Steps already folded into the digest are represented by it and must not
+    # also appear verbatim, or compaction would grow the prompt instead of
+    # bounding it.
+    digested_through = run.get("digest_through_seq") or 0
+    steps = [s for s in get_steps(run["id"]) if s["seq"] > digested_through][-HISTORY_STEPS_IN_CONTEXT:]
     # The ledger is the compressed long-term view: one short line per step, so
     # 40 verbose summaries cannot crowd the verbatim observations out of the
     # context window. Detail for the recent steps comes from _observation_block.
@@ -995,11 +1131,16 @@ def _build_messages(run: Dict[str, Any]) -> List[Dict[str, Any]]:
     budget = (f"{run['iter_used']}/{run['iter_budget']}" if run["iter_budget"]
               else f"{run['iter_used']} (no owner cap; hard ceiling {HARD_ITERATION_CAP})")
     continuation = _continuation_context(run)
+    briefing = disciplines_module.briefing(run.get("discipline"))
+    digest = (run.get("progress_digest") or "").strip()
     user = (
         f"Goal:\n{run['goal']}\n\n"
+        + (f"Specialist standards for this kind of work:\n{briefing}\n\n" if briefing else "")
         + (f"{continuation}\n\n" if continuation else "")
         + f"{_plan_context(run.get('plan_id'))}\n\n"
-        f"Executed steps so far:\n{history}\n\n"
+        + (f"What you have already accomplished (earlier steps, compacted):\n{digest}\n\n"
+           if digest else "")
+        + f"Executed steps so far:\n{history}\n\n"
         + (f"{observations}\n\n" if observations else "")
         + f"Iterations used: {budget}.\n"
         "Decide the single next action and call the corresponding tool, or finish "
@@ -1274,6 +1415,11 @@ async def _iterate(run: Dict[str, Any]) -> Dict[str, Any]:
         await _emit_event(run["id"], "failed", summary, "failed")
         return run
 
+    # Before spending another completion, fold aged-out history into the
+    # digest — a run that has been going for hours would otherwise carry a
+    # ledger that keeps growing until the model answers with nothing at all.
+    run = await _compact_history(run)
+
     config = _llm_config()
     response = await _call_executor_llm(run, config)
     cost_delta = _iteration_cost(config, response)
@@ -1331,6 +1477,26 @@ async def _iterate(run: Dict[str, Any]) -> Dict[str, Any]:
         await _emit_event(run["id"], "failed", text, "failed")
         return run
     if not response.is_success:
+        from backend.llm_client import STATUS_EMPTY
+
+        # An "empty" reply is the model spending its whole budget on reasoning
+        # and emitting no visible answer — observed live at iteration 60 of a
+        # long run, where it parked the card until a human pressed Resume. It
+        # is a symptom of an overloaded context, not a provider fault, so the
+        # recovery is to force a compaction pass and let the loop try again on
+        # a shorter prompt. Only if that has already been tried (nothing left
+        # to compact) does it become the owner's problem.
+        if response.status == STATUS_EMPTY:
+            before = run.get("digest_through_seq") or 0
+            add_step(run["id"], "observe", "",
+                     "Model returned reasoning with no answer — compacting context and retrying.",
+                     "failed")
+            compacted = await _compact_history(run, force=True)
+            if (compacted.get("digest_through_seq") or 0) > before:
+                return compacted
+            return update_run(run["id"], status="paused",
+                              status_reason="LLM returned no answer and the context could not be "
+                                            "reduced further; owner input needed.")
         add_step(run["id"], "observe", "",
                  f"LLM error: {response.status} {response.error_message or ''}"[:400], "failed")
         return update_run(run["id"], status="paused",

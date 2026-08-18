@@ -12,6 +12,12 @@ import type { DevRun, DevRunRevision } from '../types';
 
 const agents = [{ id: 'agent-a', name: 'Data Analyst', is_enabled: true }] as never;
 
+const DISCIPLINES = [
+  { id: 'web', label: 'Разработка сайта' },
+  { id: 'analytics', label: 'Аналитика и данные' },
+  { id: 'marketing', label: 'Продвижение и маркетинг' },
+];
+
 function makeRun(overrides: Partial<DevRun> = {}): DevRun {
   return {
     id: 'run-aaaaaaaaaaaa', goal: 'Собери лендинг', status: 'done', plan_id: null,
@@ -36,6 +42,7 @@ function stubFetch(runs: DevRun[], lineage: DevRunRevision[] = []) {
     if (path.startsWith('/api/dev-runs?')) return { ok: true, json: async () => runs };
     if (path.endsWith('/lineage')) return { ok: true, json: async () => lineage };
     if (path.includes('/feedback?status=open')) return { ok: true, json: async () => [] };
+    if (path.startsWith('/api/disciplines')) return { ok: true, json: async () => DISCIPLINES };
     return { ok: true, json: async () => ({}) };
   });
   vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
@@ -57,7 +64,7 @@ describe('KanbanTab — product revisions', () => {
     // about the change alone instead of restating the whole brief.
     expect(screen.getByText(/Доработка:/)).toBeTruthy();
 
-    fireEvent.change(screen.getByLabelText('Доработать'), { target: { value: 'сделать шапку липкой' } });
+    fireEvent.change(screen.getByLabelText('Что доработать'), { target: { value: 'сделать шапку липкой' } });
     fireEvent.click(screen.getByRole('button', { name: 'Начать сразу' }));
 
     await waitFor(() => {
@@ -165,5 +172,86 @@ describe('KanbanTab — queued continuations', () => {
 
     await screen.findByText('Липкая шапка');
     expect(screen.queryByText(/Ждёт завершения/)).toBeNull();
+  });
+});
+
+describe('KanbanTab — briefs and disciplines', () => {
+  it('accepts a full multi-line brief, not just a one-line title', async () => {
+    const { fetchMock } = stubFetch([]);
+    render(<KanbanTab language="ru" agents={agents} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Новая задача' }));
+    const brief = [
+      'Собери лендинг для финтех-стартапа.',
+      '',
+      'Требования:',
+      '- премиальная тёмная тема',
+      '- реальные иконки, без пустых плейсхолдеров',
+      '- адаптив 375/768/1280',
+    ].join('\n');
+    fireEvent.change(screen.getByLabelText('Техническое задание'), { target: { value: brief } });
+    fireEvent.click(screen.getByRole('button', { name: 'Начать сразу' }));
+
+    await waitFor(() => {
+      const created = fetchMock.mock.calls.find(([path, init]) =>
+        path === '/api/dev-runs' && (init as RequestInit)?.method === 'POST');
+      expect(created).toBeTruthy();
+      // The whole brief survives — newlines and all.
+      expect(JSON.parse((created![1] as RequestInit).body as string).goal).toBe(brief);
+    });
+  });
+
+  it('sends the chosen discipline so the right specialist is assigned', async () => {
+    const { fetchMock } = stubFetch([]);
+    render(<KanbanTab language="ru" agents={agents} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Новая задача' }));
+    await screen.findByRole('combobox', { name: 'Отрасль' });
+    fireEvent.change(screen.getByLabelText('Техническое задание'), { target: { value: 'Нужен отчёт' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Отрасль' }), { target: { value: 'analytics' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Начать сразу' }));
+
+    await waitFor(() => {
+      const created = fetchMock.mock.calls.find(([path, init]) =>
+        path === '/api/dev-runs' && (init as RequestInit)?.method === 'POST');
+      expect(JSON.parse((created![1] as RequestInit).body as string).discipline).toBe('analytics');
+    });
+  });
+
+  it('leaves the discipline null when the owner does not pick one', async () => {
+    const { fetchMock } = stubFetch([]);
+    render(<KanbanTab language="ru" agents={agents} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Новая задача' }));
+    fireEvent.change(screen.getByLabelText('Техническое задание'), { target: { value: 'Собери лендинг' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Начать сразу' }));
+
+    await waitFor(() => {
+      const created = fetchMock.mock.calls.find(([path, init]) =>
+        path === '/api/dev-runs' && (init as RequestInit)?.method === 'POST');
+      // null, not '' — the backend infers it from the goal text.
+      expect(JSON.parse((created![1] as RequestInit).body as string).discipline).toBeNull();
+    });
+  });
+
+  it('shows which field a card belongs to', async () => {
+    stubFetch([makeRun({ discipline: 'web' })]);
+    render(<KanbanTab language="ru" agents={agents} />);
+    expect(await screen.findByText('Разработка сайта')).toBeTruthy();
+  });
+
+  it('a refinement inherits the discipline of what it continues', async () => {
+    const { fetchMock } = stubFetch([makeRun({ discipline: 'web' })]);
+    render(<KanbanTab language="ru" agents={agents} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Доработать/ }));
+    fireEvent.change(screen.getByLabelText('Что доработать'), { target: { value: 'сделать шапку липкой' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Начать сразу' }));
+
+    await waitFor(() => {
+      const created = fetchMock.mock.calls.find(([path, init]) =>
+        path === '/api/dev-runs' && (init as RequestInit)?.method === 'POST');
+      expect(JSON.parse((created![1] as RequestInit).body as string).discipline).toBe('web');
+    });
   });
 });

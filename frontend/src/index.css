@@ -1393,6 +1393,15 @@ body::after {
 .kanban-create select { min-height: 32px; padding: 0 8px; border: 1px solid rgba(255,255,255,.12); border-radius: 5px; color: var(--text-primary); background: rgba(10,12,22,.7); font: 500 .7rem var(--font-sans); }
 .kanban-create button { min-height: 32px; padding: 0 12px; border: 1px solid rgba(0,240,255,.32); border-radius: 5px; color: var(--accent-cyan); background: rgba(0,240,255,.08); font: 700 .66rem var(--font-sans); cursor: pointer; white-space: nowrap; }
 .kanban-create button:disabled { opacity: .45; cursor: default; }
+/* The brief is a specification, not a title — it gets the full width and grows
+   with what is pasted into it. */
+.kanban-goal-input { flex-basis: 100%; width: 100%; min-height: 62px; padding: 8px 10px; border: 1px solid rgba(255,255,255,.12); border-radius: 5px; color: var(--text-primary); background: rgba(10,12,22,.7); font: 500 .74rem/1.5 var(--font-sans); resize: vertical; box-sizing: border-box; }
+.kanban-goal-hint { flex-basis: 100%; margin: -2px 0 0; color: var(--text-dim); font-size: .6rem; }
+.kanban-create-row { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; flex-basis: 100%; }
+.kanban-create-row select { min-height: 32px; padding: 0 8px; border: 1px solid rgba(255,255,255,.12); border-radius: 5px; color: var(--text-primary); background: rgba(10,12,22,.7); font: 500 .7rem var(--font-sans); }
+.kanban-create-row button { min-height: 32px; padding: 0 12px; border: 1px solid rgba(0,240,255,.32); border-radius: 5px; color: var(--accent-cyan); background: rgba(0,240,255,.08); font: 700 .66rem var(--font-sans); cursor: pointer; white-space: nowrap; }
+.kanban-create-row button:disabled { opacity: .45; cursor: default; }
+.kanban-discipline { display: inline-flex; align-items: center; height: 19px; padding: 0 7px; border: 1px solid rgba(167,139,250,.34); border-radius: 4px; color: #c4b5fd; background: rgba(167,139,250,.1); font: 700 .58rem var(--font-sans); white-space: nowrap; }
 .kanban-board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(220px,1fr); gap: 12px; overflow-x: auto; padding-bottom: 8px; }
 .kanban-column { display: flex; flex-direction: column; min-width: 0; border: 1px solid rgba(255,255,255,.09); border-radius: 6px; background: rgba(17,18,30,.4); }
 .kanban-column-head { display: flex; align-items: center; justify-content: space-between; padding: 9px 11px; border-bottom: 1px solid rgba(255,255,255,.075); color: var(--text-dim); font: 700 .62rem var(--font-mono); text-transform: uppercase; letter-spacing: .04em; }

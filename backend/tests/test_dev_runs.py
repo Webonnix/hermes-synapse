@@ -1375,3 +1375,146 @@ def test_other_tools_fingerprint_on_every_argument_as_before():
     a = dev_runs._fingerprint("dev_run_tests", {"runner": "auto", "timeout_s": 30})
     b = dev_runs._fingerprint("dev_run_tests", {"runner": "auto", "timeout_s": 90})
     assert a != b
+
+
+# ── Long runs: staying alive for hours without losing the thread ─────────────
+# A run that works for hours cannot keep appending to its prompt, and cannot
+# just forget either. Observed live: at iteration 60 of a real run the model
+# spent its whole budget on reasoning and returned no visible answer at all
+# ("LLM failure: empty"), parking the card until a human pressed Resume.
+
+@pytest.mark.asyncio
+async def test_history_is_left_alone_on_a_short_run(runs_db, monkeypatch):
+    """Compaction must cost nothing until a run is actually long."""
+    called = []
+    async def fake_call(**kwargs):
+        called.append(1)
+        return _llm_text("digest")
+    monkeypatch.setattr(dev_runs, "call_llm_normalized", fake_call)
+
+    run = dev_runs.create_run("short task")
+    for i in range(5):
+        dev_runs.add_step(run["id"], "act", "dev_read_file", f"read {i}")
+    result = await dev_runs._compact_history(dev_runs.get_run(run["id"]))
+    assert called == []
+    assert result["progress_digest"] == ""
+
+
+@pytest.mark.asyncio
+async def test_a_long_run_folds_old_steps_into_a_digest(runs_db, monkeypatch):
+    async def fake_call(**kwargs):
+        return _llm_text("Built the landing page; index.html and src/App.tsx exist and build cleanly.")
+    monkeypatch.setattr(dev_runs, "call_llm_normalized", fake_call)
+
+    run = dev_runs.create_run("long task")
+    for i in range(dev_runs.COMPACT_AFTER_STEPS + 10):
+        dev_runs.add_step(run["id"], "act", "dev_read_file", f"read file {i}")
+
+    compacted = await dev_runs._compact_history(dev_runs.get_run(run["id"]))
+    assert "landing page" in compacted["progress_digest"]
+    assert compacted["digest_through_seq"] > 0
+
+
+@pytest.mark.asyncio
+async def test_digested_steps_leave_the_verbatim_ledger(runs_db, monkeypatch):
+    """The whole point: compaction has to BOUND the prompt. If digested steps
+    kept appearing verbatim it would grow it instead."""
+    async def fake_call(**kwargs):
+        return _llm_text("earlier work summarized")
+    monkeypatch.setattr(dev_runs, "call_llm_normalized", fake_call)
+
+    run = dev_runs.create_run("long task")
+    for i in range(dev_runs.COMPACT_AFTER_STEPS + 10):
+        dev_runs.add_step(run["id"], "act", "dev_read_file", f"UNIQUE-MARKER-{i}")
+    before = dev_runs._build_messages(dev_runs.get_run(run["id"]))[1]["content"]
+
+    compacted = await dev_runs._compact_history(dev_runs.get_run(run["id"]))
+    after = dev_runs._build_messages(compacted)[1]["content"]
+
+    # A step inside the pre-compaction window but inside the compacted batch:
+    # visible verbatim before, represented only by the digest after.
+    marker = "UNIQUE-MARKER-34"
+    assert marker in before
+    assert marker not in after                 # folded away
+    assert "earlier work summarized" in after  # but not forgotten
+    assert len(after) < len(before)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_compaction_never_kills_the_run(runs_db, monkeypatch):
+    async def boom(**kwargs):
+        raise RuntimeError("provider down")
+    monkeypatch.setattr(dev_runs, "call_llm_normalized", boom)
+
+    run = dev_runs.create_run("long task")
+    for i in range(dev_runs.COMPACT_AFTER_STEPS + 10):
+        dev_runs.add_step(run["id"], "act", "dev_read_file", f"read {i}")
+    result = await dev_runs._compact_history(dev_runs.get_run(run["id"]))
+    assert result["progress_digest"] == ""   # unchanged, run continues
+
+
+@pytest.mark.asyncio
+async def test_compaction_does_not_use_thinking(runs_db, monkeypatch):
+    """Summarizing is not a reasoning task, and a runaway thinking chain here
+    would stall the very run this exists to keep alive."""
+    captured = {}
+    async def fake_call(**kwargs):
+        captured.update(kwargs)
+        return _llm_text("digest")
+    monkeypatch.setattr(dev_runs, "call_llm_normalized", fake_call)
+
+    run = dev_runs.create_run("long task")
+    for i in range(dev_runs.COMPACT_AFTER_STEPS + 10):
+        dev_runs.add_step(run["id"], "act", "dev_exec", f"step {i}")
+    await dev_runs._compact_history(dev_runs.get_run(run["id"]))
+    assert captured["provider_options"]["think"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_empty_model_reply_compacts_and_retries_instead_of_pausing(runs_db, template_plan, governed_ok, monkeypatch):
+    """The live failure this fixes: an empty reply used to park the card in
+    `paused` until a human intervened, mid-way through hours of work."""
+    calls = {"n": 0}
+    async def fake_call(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return llm_client.NormalizedLLMResponse(
+                status="empty", provider="mock", model="mock-model",
+                usage=LLMUsage(cost=0.0), error_message="Model returned reasoning only")
+        return _llm_text("compacted digest of earlier work")
+    monkeypatch.setattr(dev_runs, "call_llm_normalized", fake_call)
+
+    run = dev_runs.create_run("long task")
+    for i in range(40):
+        dev_runs.add_step(run["id"], "act", "dev_read_file", f"read {i}")
+
+    result = await dev_runs._iterate(dev_runs.get_run(run["id"]))
+    assert result["status"] != "paused"           # kept going on its own
+    assert result["digest_through_seq"] > 0       # it compacted instead
+
+
+@pytest.mark.asyncio
+async def test_an_empty_reply_with_nothing_left_to_compact_asks_the_owner(runs_db, template_plan, governed_ok, monkeypatch):
+    """Failing open forever would be worse than stopping — if the context is
+    already minimal and the model still says nothing, that is a real blocker."""
+    async def fake_call(**kwargs):
+        return llm_client.NormalizedLLMResponse(
+            status="empty", provider="mock", model="mock-model", usage=LLMUsage(cost=0.0))
+    monkeypatch.setattr(dev_runs, "call_llm_normalized", fake_call)
+
+    run = dev_runs.create_run("short task")
+    dev_runs.add_step(run["id"], "act", "dev_read_file", "one step")
+    result = await dev_runs._iterate(dev_runs.get_run(run["id"]))
+    assert result["status"] == "paused"
+    assert "could not be reduced" in result["status_reason"]
+
+
+def test_a_long_brief_is_stored_whole(runs_db):
+    """A serious card carries requirements, constraints, brand voice and
+    acceptance criteria — the old 8k cap truncated real specs mid-sentence."""
+    brief = "Build a platform.\n" + ("Requirement line with real detail.\n" * 1200)
+    assert len(brief) > 8000
+    run = dev_runs.create_run(brief)
+    # create_run strips surrounding whitespace; nothing in the middle is lost.
+    assert run["goal"] == brief.strip()
+    assert run["goal"].endswith("Requirement line with real detail.")

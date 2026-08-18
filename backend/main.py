@@ -90,6 +90,9 @@ class SubagentUpdate(BaseModel):
     budget_fallback_to_local: bool = False
     # Which named project (backend/projects.py) this agent belongs to.
     project_id: Optional[str] = None
+    # backend/disciplines.py ids this agent is qualified for. Empty = generalist:
+    # still assignable, but always outranked by a declared specialist.
+    disciplines: List[str] = []
 
 class SubagentPosition(BaseModel):
     id: str
@@ -994,6 +997,7 @@ async def get_agents_api():
 @app.post("/api/subagents")
 async def save_subagent_api(subagent: SubagentUpdate):
     from backend.database import save_subagent
+    from backend import disciplines as disciplines_module
     # Basic slug validation for ID
     import re
     clean_id = re.sub(r'[^a-zA-Z0-9_-]', '', subagent.id).lower()
@@ -1032,6 +1036,7 @@ async def save_subagent_api(subagent: SubagentUpdate):
         allowed_provider_ids,
         subagent.budget_fallback_to_local,
         subagent.project_id,
+        [d for d in subagent.disciplines if disciplines_module.is_valid(d)],
     )
     return {"status": "success", "id": clean_id}
 
@@ -1116,6 +1121,8 @@ class DevRunCreateRequest(BaseModel):
     # Set = this card continues that run: same product, next revision, cloned
     # working tree and shared published URL (see dev_runs.create_run).
     parent_run_id: str | None = None
+    # backend/disciplines.py id, or None to infer it from the goal text.
+    discipline: str | None = None
 
 @app.post("/api/dev-runs")
 async def create_dev_run_api(request: DevRunCreateRequest):
@@ -1123,7 +1130,7 @@ async def create_dev_run_api(request: DevRunCreateRequest):
     if not request.goal.strip():
         raise HTTPException(status_code=400, detail="Goal is required")
     kwargs: dict = {"assignee_agent_id": request.assignee_agent_id, "start": request.start,
-                    "parent_run_id": request.parent_run_id}
+                    "parent_run_id": request.parent_run_id, "discipline": request.discipline}
     if request.iter_budget is not None:
         kwargs["iter_budget"] = request.iter_budget
     if request.cost_budget is not None:
@@ -1134,6 +1141,13 @@ async def create_dev_run_api(request: DevRunCreateRequest):
         return await asyncio.to_thread(dev_runs.create_run, request.goal, **kwargs)
     except KeyError:
         raise HTTPException(status_code=404, detail="Parent dev-run not found")
+
+@app.get("/api/disciplines")
+async def list_disciplines_api(language: str = "ru"):
+    """The fixed discipline vocabulary the board's picker and the agent editor
+    both render — see backend/disciplines.py for why it is a closed set."""
+    from backend import disciplines
+    return disciplines.catalog("en" if language == "en" else "ru")
 
 @app.get("/api/dev-runs")
 async def list_dev_runs_api(limit: int = 50):

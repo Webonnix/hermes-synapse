@@ -374,6 +374,10 @@ def _init_sqlite_schema():
         # NULL = unassigned; soft reference, same convention as tier_id above
         # (no DB-level FK, checked in application code where it matters).
         ("project_id", "TEXT"),
+        # JSON array of backend/disciplines.py ids this agent is qualified for.
+        # '[]' = generalist: still eligible for any card, but always outranked
+        # by a declared specialist (see dev_runs.auto_assign_agent).
+        ("disciplines", "TEXT DEFAULT '[]'"),
     ]:
         try:
             cursor.execute(f"ALTER TABLE subagents ADD COLUMN {col} {definition}")
@@ -567,6 +571,26 @@ def _init_sqlite_schema():
         "UPDATE subagents SET model_provider = 'ollama', model_type = 'local' "
         "WHERE id = 'web_dev' AND model_provider != 'ollama'"
     )
+
+    # Seed the built-in specialists with the disciplines they obviously cover,
+    # so Kanban routing works on a fresh install instead of behaving like
+    # round-robin until someone hand-configures every agent. Only applied while
+    # the column is still at its '[]' default: an owner who has since edited an
+    # agent's disciplines (including deliberately clearing them) must not have
+    # that overwritten on every boot.
+    for agent_id, covered in [
+        ("web_dev", '["web"]'),
+        ("analyst", '["analytics"]'),
+        ("research", '["research", "marketing"]'),
+        ("code", '["backend", "automation"]'),
+        ("sysops", '["devops"]'),
+        ("browser", '["research"]'),
+    ]:
+        cursor.execute(
+            "UPDATE subagents SET disciplines = ? "
+            "WHERE id = ? AND (disciplines IS NULL OR disciplines = '' OR disciplines = '[]')",
+            (covered, agent_id),
+        )
 
     # Create subagent memory table
     cursor.execute("""
@@ -771,6 +795,18 @@ def _init_sqlite_schema():
         ("root_run_id", "TEXT"),
         ("revision", "INTEGER NOT NULL DEFAULT 1"),
         ("demo_snapshot_url", "TEXT"),
+        # backend/disciplines.py id — what KIND of work this card is, which
+        # decides both who gets assigned and the specialist standards the
+        # executor is held to. NULL when never set and not inferable.
+        ("discipline", "TEXT"),
+        # Rolling narrative of what the run has already accomplished, folded in
+        # as older steps age out of the verbatim context window. Without it a
+        # multi-hour run forgets its own earlier work the moment step N-40
+        # scrolls off — see dev_runs._compact_history.
+        ("progress_digest", "TEXT NOT NULL DEFAULT ''"),
+        # Highest step seq already folded into progress_digest, so compaction
+        # only ever summarizes what is new.
+        ("digest_through_seq", "INTEGER NOT NULL DEFAULT 0"),
     ]:
         try:
             cursor.execute(f"ALTER TABLE dev_runs ADD COLUMN {col} {definition}")
@@ -1004,6 +1040,7 @@ def _init_postgres_schema():
             # refusing, so the agent keeps responding at $0 rather than going silent.
             ("budget_fallback_to_local", "INTEGER DEFAULT 0"),
             ("project_id", "TEXT"),
+            ("disciplines", "TEXT DEFAULT '[]'"),
         ]:
             cursor.execute(
                 "SELECT 1 FROM information_schema.columns WHERE table_name='subagents' AND column_name=%s",
@@ -1659,11 +1696,13 @@ def save_subagent(
     allowed_provider_ids: Optional[List[str]] = None,
     budget_fallback_to_local: bool = False,
     project_id: Optional[str] = None,
+    disciplines: Optional[List[str]] = None,
 ):
     """Saves or updates a subagent's configuration in the database."""
     try:
         model_params_json = json.dumps(model_params or {}, ensure_ascii=False)
         allowed_provider_ids_json = json.dumps(list(allowed_provider_ids or []), ensure_ascii=False)
+        disciplines_json = json.dumps(list(disciplines or []), ensure_ascii=False)
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("""
@@ -1671,9 +1710,9 @@ def save_subagent(
                 id, name, system_prompt, model, agent_type, parent_id, skills, x, y,
                 temperature, role, status, is_enabled, model_provider, model_type,
                 model_params, budget_usd_limit, budget_period, tier_id,
-                allowed_provider_ids, budget_fallback_to_local, project_id, updated_at
+                allowed_provider_ids, budget_fallback_to_local, project_id, disciplines, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name,
                 system_prompt=excluded.system_prompt,
@@ -1696,12 +1735,14 @@ def save_subagent(
                 allowed_provider_ids=excluded.allowed_provider_ids,
                 budget_fallback_to_local=excluded.budget_fallback_to_local,
                 project_id=excluded.project_id,
+                disciplines=excluded.disciplines,
                 updated_at=CURRENT_TIMESTAMP
         """, (
             id, name, system_prompt, model, agent_type, parent_id, skills, x, y,
             temperature, role, status, 1 if is_enabled else 0, model_provider,
             model_type, model_params_json, budget_usd_limit, budget_period or "monthly", tier_id,
             allowed_provider_ids_json, 1 if budget_fallback_to_local else 0, project_id,
+            disciplines_json,
         ))
         conn.commit()
         conn.close()
@@ -1717,7 +1758,7 @@ def get_subagent(id: str) -> Optional[Dict[str, Any]]:
                    x, y, temperature, role, status, is_enabled, model_provider, model_type,
                    model_params, current_task, last_action, last_error, progress, updated_at,
                    budget_usd_limit, budget_period, tier_id, allowed_provider_ids, budget_fallback_to_local,
-                   project_id
+                   project_id, disciplines
             FROM subagents WHERE id = ?
         """, (id,))
         if rows:
@@ -1751,6 +1792,7 @@ def get_subagent(id: str) -> Optional[Dict[str, Any]]:
                 "allowed_provider_ids": _json_list_or_empty(row[25]),
                 "budget_fallback_to_local": bool(row[26]) if row[26] is not None else False,
                 "project_id": row[27],
+                "disciplines": _json_list_or_empty(row[28]),
             }
         return None
     except Exception as e:
@@ -1767,7 +1809,7 @@ def get_all_subagents() -> List[Dict[str, Any]]:
                    x, y, temperature, role, status, is_enabled, model_provider, model_type,
                    model_params, current_task, last_action, last_error, progress, updated_at,
                    budget_usd_limit, budget_period, tier_id, allowed_provider_ids, budget_fallback_to_local,
-                   project_id
+                   project_id, disciplines
             FROM subagents ORDER BY id ASC
         """)
         rows = cursor.fetchall()
@@ -1802,6 +1844,7 @@ def get_all_subagents() -> List[Dict[str, Any]]:
                 "allowed_provider_ids": _json_list_or_empty(r[25]),
                 "budget_fallback_to_local": bool(r[26]) if r[26] is not None else False,
                 "project_id": r[27],
+                "disciplines": _json_list_or_empty(r[28]),
             }
             for r in rows
         ]

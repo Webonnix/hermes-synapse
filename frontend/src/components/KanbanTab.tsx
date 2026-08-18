@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Check, ExternalLink, GitBranch, History, MessageSquare, Plus, RefreshCw, Rocket, ShieldAlert, Trash2, User, X } from 'lucide-react';
-import type { AgentModel, DevRun, DevRunEvent, DevRunFeedback, DevRunRevision, DevRunStatus } from '../types';
+import type { AgentModel, DevRun, DevRunEvent, DevRunFeedback, DevRunRevision, DevRunStatus, Discipline } from '../types';
 
 type Props = {
   language: 'ru' | 'en';
@@ -32,6 +32,9 @@ const COPY = {
     feedbackTitle: 'Замечания', feedbackEmpty: 'Замечаний нет — кликните 💬 на демо-странице, чтобы оставить.',
     feedbackApply: 'Собрать в задачу', feedbackDismiss: 'Отклонить',
     feedbackCount: (n: number) => `${n} ${n === 1 ? 'замечание' : n < 5 ? 'замечания' : 'замечаний'}`,
+    discipline: 'Отрасль', disciplineAuto: 'Определить автоматически',
+    goalLabel: 'Техническое задание', refineLabel: 'Что доработать',
+    goalHint: 'Можно вставить большое ТЗ целиком — Enter переносит строку, задачу запускают кнопки ниже.',
   },
   en: {
     title: 'Kanban — agent tasks', subtitle: 'Create tasks, assign agents, track progress and demos',
@@ -56,6 +59,9 @@ const COPY = {
     feedbackTitle: 'Feedback', feedbackEmpty: 'No feedback yet — click 💬 on the demo page to leave one.',
     feedbackApply: 'Turn into a task', feedbackDismiss: 'Dismiss',
     feedbackCount: (n: number) => `${n} comment${n === 1 ? '' : 's'}`,
+    discipline: 'Field', disciplineAuto: 'Detect automatically',
+    goalLabel: 'Brief', refineLabel: 'What to refine',
+    goalHint: 'Paste a full brief here — Enter adds a line, the buttons below start the task.',
   },
 } as const;
 
@@ -101,6 +107,8 @@ export function KanbanTab({ language, lastEvent, agents }: Props) {
   const [revisionsLoading, setRevisionsLoading] = useState(false);
   const [feedback, setFeedback] = useState<DevRunFeedback[]>([]);
   const [feedbackLoading, setFeedbackLoading] = useState(false);
+  const [disciplines, setDisciplines] = useState<Discipline[]>([]);
+  const [discipline, setDiscipline] = useState('');
 
   const agentName = useCallback((id?: string | null) => {
     if (!id) return copy.unassigned;
@@ -130,6 +138,22 @@ export function KanbanTab({ language, lastEvent, agents }: Props) {
   useEffect(() => {
     if (lastEvent) void loadRuns(true);
   }, [lastEvent, loadRuns]);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const response = await fetch(`/api/disciplines?language=${language}`);
+        if (response.ok) setDisciplines(await response.json() as Discipline[]);
+      } catch {
+        // A missing catalog only costs the picker; typing a goal still works,
+        // and the backend infers the discipline from the text anyway.
+      }
+    })();
+  }, [language]);
+
+  const disciplineLabel = useCallback((id?: string | null) => (
+    id ? disciplines.find(d => d.id === id)?.label || id : ''
+  ), [disciplines]);
 
   const byColumn = useMemo(() => {
     const grouped: Record<ColumnKey, DevRun[]> = { backlog: [], planned: [], running: [], review: [], paused: [], done: [], failed: [] };
@@ -195,6 +219,7 @@ export function KanbanTab({ language, lastEvent, agents }: Props) {
           assignee_agent_id: assignee || null,
           start,
           parent_run_id: parent?.id || null,
+          discipline: discipline || null,
         }),
       });
       if (!response.ok) {
@@ -203,6 +228,7 @@ export function KanbanTab({ language, lastEvent, agents }: Props) {
       }
       setGoal('');
       setAssignee('');
+      setDiscipline('');
       setParent(null);
       setShowNew(false);
       await loadRuns(true);
@@ -216,6 +242,9 @@ export function KanbanTab({ language, lastEvent, agents }: Props) {
   const startRefine = (run: DevRun) => {
     setParent(run);
     setGoal('');
+    // A follow-up is the same kind of work as what it continues; the backend
+    // inherits it too, this just keeps the picker honest about what will happen.
+    setDiscipline(run.discipline || '');
     // The continuation stays with the agent that already knows this product;
     // the backend applies the same default, so "Auto" here means "inherit".
     setAssignee('');
@@ -319,24 +348,44 @@ export function KanbanTab({ language, lastEvent, agents }: Props) {
               </button>
             </p>
           )}
-          <input
+          {/* A textarea, not an input: a real brief is a specification with
+              requirements and acceptance criteria, and a one-line field made
+              people compress that into a sentence the executor then had to
+              guess the rest of. */}
+          <textarea
+            className="kanban-goal-input"
             value={goal}
             onChange={event => setGoal(event.target.value)}
             placeholder={parent ? copy.refinePlaceholder : copy.goalPlaceholder}
-            aria-label={parent ? copy.refine : copy.newTask}
+            aria-label={parent ? copy.refineLabel : copy.goalLabel}
+            rows={goal.split('\n').length > 3 || goal.length > 160 ? 10 : 3}
           />
-          <select value={assignee} onChange={event => setAssignee(event.target.value)} aria-label={copy.assignee}>
-            <option value="">{copy.auto}</option>
-            {agents.filter(a => a.is_enabled !== false).map(a => (
-              <option key={a.id} value={a.id}>{a.name}</option>
-            ))}
-          </select>
-          <button type="button" disabled={!goal.trim() || busy === 'create'} onClick={() => void createTask(false)}>
-            {copy.toBacklog}
-          </button>
-          <button type="button" disabled={!goal.trim() || busy === 'create'} onClick={() => void createTask(true)}>
-            {copy.startNow}
-          </button>
+          <p className="kanban-goal-hint">{copy.goalHint}</p>
+          <div className="kanban-create-row">
+            <select
+              value={discipline}
+              onChange={event => setDiscipline(event.target.value)}
+              aria-label={copy.discipline}
+              title={copy.discipline}
+            >
+              <option value="">{copy.disciplineAuto}</option>
+              {disciplines.map(d => (
+                <option key={d.id} value={d.id}>{d.label}</option>
+              ))}
+            </select>
+            <select value={assignee} onChange={event => setAssignee(event.target.value)} aria-label={copy.assignee}>
+              <option value="">{copy.auto}</option>
+              {agents.filter(a => a.is_enabled !== false).map(a => (
+                <option key={a.id} value={a.id}>{a.name}</option>
+              ))}
+            </select>
+            <button type="button" disabled={!goal.trim() || busy === 'create'} onClick={() => void createTask(false)}>
+              {copy.toBacklog}
+            </button>
+            <button type="button" disabled={!goal.trim() || busy === 'create'} onClick={() => void createTask(true)}>
+              {copy.startNow}
+            </button>
+          </div>
         </section>
       )}
 
@@ -384,6 +433,11 @@ export function KanbanTab({ language, lastEvent, agents }: Props) {
                     )}
                     {run.status_reason && <p className="kanban-card-reason">{run.status_reason}</p>}
                     <div className="kanban-card-actions">
+                      {run.discipline && (
+                        <span className="kanban-discipline" title={copy.discipline}>
+                          {disciplineLabel(run.discipline)}
+                        </span>
+                      )}
                       {inChain && (
                         <span className="kanban-revision" title={copy.versions}>
                           {copy.revisionShort}{revision}

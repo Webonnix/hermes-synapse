@@ -139,6 +139,9 @@ export interface AgentModel {
   // fall back to, in priority order — backend/agent_provider_access.py.
   // Empty = unrestricted (legacy behavior).
   allowed_provider_ids?: string[];
+  // backend/disciplines.py ids this agent is qualified for. Empty = generalist:
+  // still assignable, but always outranked by a declared specialist.
+  disciplines?: string[];
   // When true, an exhausted budget degrades the agent to the free local
   // model instead of refusing the turn outright.
   budget_fallback_to_local?: boolean;
@@ -724,6 +727,8 @@ export interface DevRun {
   root_run_id?: string | null;
   /** Position in the chain, 1-based. */
   revision?: number;
+  /** backend/disciplines.py id — what kind of work this card is. */
+  discipline?: string | null;
   steps?: DevRunStep[];
 }
 
@@ -733,6 +738,12 @@ export interface DevRunRevision extends DevRun {
   is_live: boolean;
   /** False once the snapshot has been deleted — cannot be promoted. */
   has_snapshot: boolean;
+}
+
+/** One entry of GET /api/disciplines — the closed discipline vocabulary. */
+export interface Discipline {
+  id: string;
+  label: string;
 }
 
 /** One click-to-comment remark left on a published demo (dev_run_feedback). */
