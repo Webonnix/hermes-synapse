@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from backend import autonomy, control_plane, database, dev_runs, dev_sandbox, tools
+from backend import autonomy, control_plane, database, dev_runs, dev_sandbox, llm_client, tools
 
 
 @pytest.fixture()
@@ -210,3 +210,175 @@ def test_deleting_a_run_takes_its_audit_screenshots_with_it(site_env):
 
     dev_runs.delete_run(run["id"])
     assert not audits.exists()
+
+
+# ── Design critique: catching "renders fine but looks unfinished" ────────────
+# Discovered live 2026-08-18: a React landing page passed every mechanical
+# check (no console errors, no broken links, no overflow) and the owner still
+# rejected it on sight — empty placeholder boxes where icons belonged, dead
+# whitespace, generic unstyled defaults. The mechanical audit cannot see any
+# of that; only a vision pass judging the actual screenshot against the brief
+# can. These cover the critique in isolation and its effect on the verdict.
+
+class _FakeAgent:
+    api_base = "http://ollama:11434"
+    api_key = ""
+    model = "test-vision-model"
+    provider = "ollama"
+    ollama_num_ctx = 8192
+    ollama_keep_alive = "5m"
+
+
+def _vision_response(content):
+    return llm_client.NormalizedLLMResponse(
+        status="success", provider="ollama", model="test-vision-model", content=content,
+        usage=llm_client.LLMUsage(cost=0.0),
+    )
+
+
+@pytest.fixture()
+def fake_agent(monkeypatch):
+    import backend.agent as agent_module
+    fake = _FakeAgent()
+    monkeypatch.setattr(agent_module, "agent_instance", fake)
+    return fake
+
+
+def test_design_critique_skipped_with_no_screenshots(fake_agent):
+    assert tools._design_critique("run-x", {}) == {"available": False}
+
+
+def test_design_critique_skipped_with_no_brief(fake_agent, monkeypatch):
+    monkeypatch.setattr(dev_runs, "get_run", lambda rid, *a, **kw: {"id": rid, "goal": ""})
+    assert tools._design_critique("run-x", {"desktop": "base64=="}) == {"available": False}
+
+
+def test_design_critique_parses_a_pass_verdict(fake_agent, monkeypatch):
+    monkeypatch.setattr(dev_runs, "get_run",
+                        lambda rid, *a, **kw: {"id": rid, "root_run_id": rid, "goal": "a clean landing page"})
+    async def fake_call(**kw):
+        return _vision_response('{"verdict": "pass", "issues": []}')
+    monkeypatch.setattr(llm_client, "call_llm_normalized", fake_call)
+    result = tools._design_critique("run-x", {"desktop": "base64=="})
+    assert result == {"available": True, "verdict": "pass", "issues": []}
+
+
+def test_design_critique_parses_a_fail_verdict_with_issues(fake_agent, monkeypatch):
+    monkeypatch.setattr(dev_runs, "get_run",
+                        lambda rid, *a, **kw: {"id": rid, "root_run_id": rid, "goal": "a premium DeFi landing page"})
+    async def fake_call(**kw):
+        return _vision_response(
+            '{"verdict": "fail", "issues": ["The three node boxes are empty outlines with no icons", '
+            '"Huge dead whitespace in the top-right quadrant"]}'
+        )
+    monkeypatch.setattr(llm_client, "call_llm_normalized", fake_call)
+    result = tools._design_critique("run-x", {"desktop": "base64=="})
+    assert result["available"] and result["verdict"] == "fail"
+    assert len(result["issues"]) == 2
+    assert "empty outlines" in result["issues"][0]
+
+
+def test_design_critique_uses_the_root_goal_not_a_continuations_diff_instruction(fake_agent, monkeypatch):
+    """A continuation's own goal is often just 'make the header sticky' — the
+    design has to be judged against what the PRODUCT is supposed to be."""
+    captured = {}
+    def fake_get_run(rid, *a, **kw):
+        if rid == "run-child":
+            return {"id": "run-child", "root_run_id": "run-root", "goal": "make the header sticky"}
+        return {"id": "run-root", "root_run_id": "run-root", "goal": "a premium DeFi landing page called LUMEN"}
+    monkeypatch.setattr(dev_runs, "get_run", fake_get_run)
+    async def fake_call(**kwargs):
+        captured["prompt"] = kwargs["messages"][0]["content"]
+        return _vision_response('{"verdict": "pass", "issues": []}')
+    monkeypatch.setattr(llm_client, "call_llm_normalized", fake_call)
+    tools._design_critique("run-child", {"desktop": "base64=="})
+    assert "LUMEN" in captured["prompt"]
+    assert "sticky" not in captured["prompt"]
+
+
+def test_design_critique_disables_thinking(fake_agent, monkeypatch):
+    """A 20,000+ token runaway 'thinking' generation was observed live for
+    this exact model family under a much smaller prompt than the executor's
+    own context — a one-paragraph critique must never be allowed to do that."""
+    captured = {}
+    async def fake_call(**kwargs):
+        captured.update(kwargs)
+        return _vision_response('{"verdict": "pass", "issues": []}')
+    monkeypatch.setattr(dev_runs, "get_run",
+                        lambda rid, *a, **kw: {"id": rid, "root_run_id": rid, "goal": "a landing page"})
+    monkeypatch.setattr(llm_client, "call_llm_normalized", fake_call)
+    tools._design_critique("run-x", {"desktop": "base64=="})
+    assert captured["provider_options"]["think"] is False
+    assert captured["messages"][0]["images"] == ["base64=="]
+
+
+def test_design_critique_survives_unparseable_output(fake_agent, monkeypatch):
+    monkeypatch.setattr(dev_runs, "get_run",
+                        lambda rid, *a, **kw: {"id": rid, "root_run_id": rid, "goal": "a landing page"})
+    async def fake_call(**kw):
+        return _vision_response("Sure! This looks great, no notes.")
+    monkeypatch.setattr(llm_client, "call_llm_normalized", fake_call)
+    result = tools._design_critique("run-x", {"desktop": "base64=="})
+    assert result["available"] is False
+
+
+def test_design_critique_survives_a_failed_llm_call(fake_agent, monkeypatch):
+    monkeypatch.setattr(dev_runs, "get_run",
+                        lambda rid, *a, **kw: {"id": rid, "root_run_id": rid, "goal": "a landing page"})
+    async def fake_call(**kw):
+        return llm_client.NormalizedLLMResponse(
+            status="provider_error", provider="ollama", model="test-vision-model",
+            error_message="connection refused", usage=llm_client.LLMUsage(cost=0.0),
+        )
+    monkeypatch.setattr(llm_client, "call_llm_normalized", fake_call)
+    result = tools._design_critique("run-x", {"desktop": "base64=="})
+    assert result["available"] is False
+
+
+# ── Wired into review_published_demo ──────────────────────────────────────────
+
+def test_a_technically_broken_page_never_reaches_the_design_critique(site_env, monkeypatch):
+    """No point judging the taste of a page that does not even render — and
+    it saves a model round-trip on a build the executor already knows to fix."""
+    _publish(site_env, "run-000000000001")
+    _stub_audit(monkeypatch, {"pages": [_audit_page(console_errors=["error: boom"])]})
+    called = []
+    monkeypatch.setattr(tools, "_design_critique", lambda *a, **kw: called.append(1) or {"available": False})
+    review = tools.review_published_demo("run-000000000001")
+    assert review["verdict"] == "fail"
+    assert called == []
+
+
+def test_a_technically_clean_but_ugly_page_fails_review(site_env, monkeypatch):
+    _publish(site_env, "run-000000000001")
+    _stub_audit(monkeypatch, {"pages": [_audit_page()]})
+    monkeypatch.setattr(tools, "_design_critique", lambda *a, **kw: {
+        "available": True, "verdict": "fail",
+        "issues": ["Three empty bordered boxes with no icons inside them"],
+    })
+    review = tools.review_published_demo("run-000000000001")
+    assert review["verdict"] == "fail"
+    assert any("[design]" in p and "empty bordered boxes" in p for p in review["problems"])
+    assert review["design_reviewed"] is True
+
+
+def test_a_technically_clean_and_well_designed_page_passes(site_env, monkeypatch):
+    _publish(site_env, "run-000000000001")
+    _stub_audit(monkeypatch, {"pages": [_audit_page()]})
+    monkeypatch.setattr(tools, "_design_critique",
+                        lambda *a, **kw: {"available": True, "verdict": "pass", "issues": []})
+    review = tools.review_published_demo("run-000000000001")
+    assert review["verdict"] == "pass"
+    assert review["design_reviewed"] is True
+
+
+def test_an_unavailable_design_critique_does_not_fail_an_otherwise_clean_page(site_env, monkeypatch):
+    """The vision model being down/misconfigured must not block every site
+    review the way an actual design defect does — fail open, same principle
+    as the audit sidecar being unreachable."""
+    _publish(site_env, "run-000000000001")
+    _stub_audit(monkeypatch, {"pages": [_audit_page()]})
+    monkeypatch.setattr(tools, "_design_critique", lambda *a, **kw: {"available": False})
+    review = tools.review_published_demo("run-000000000001")
+    assert review["verdict"] == "pass"
+    assert review["design_reviewed"] is False

@@ -2590,10 +2590,103 @@ def _persist_audit_screenshots(run_id: str, pages: List[Dict[str, Any]]) -> Dict
     return urls
 
 
+def _design_critique(run_id: str, screenshots_b64: Dict[str, str]) -> Dict[str, Any]:
+    """Vision-LLM pass judging whether the published UI looks like professional
+    work and matches the run's brief.
+
+    The mechanical audit above cannot see this at all — a page can render with
+    zero console errors, zero broken links, zero overflow, and still look like
+    an unfinished wireframe (empty placeholder boxes where icons belong, dead
+    whitespace, generic unstyled defaults). That gap is exactly what let a
+    technically-clean LŪMEN//ÍNDEX build through review with a "pass" verdict
+    while the owner rejected it on sight (2026-08-18).
+
+    Reuses whichever model agent.py is already configured with — Ollama's
+    Qwen3.6/Qwen3.8 checkpoints here carry a CLIP vision projector already, so
+    this needs no separate model, no extra VRAM, no new pull. `think` is
+    forced off: the same "thinking-only, no visible answer" failure mode
+    documented in dev_runs.py's EXECUTOR_SYSTEM_PROMPT context showed up as a
+    20,000+ token runaway reasoning chain during testing — a one-paragraph
+    critique has no business taking that long, and forcing it off keeps this
+    call fast and bounded regardless of what the executor's own config uses."""
+    from backend.agent import agent_instance
+    from backend.llm_client import call_llm_normalized
+
+    image = screenshots_b64.get("desktop") or next(iter(screenshots_b64.values()), None)
+    if not image:
+        return {"available": False}
+
+    try:
+        from backend import dev_runs
+        run = dev_runs.get_run(run_id) or {}
+        root = dev_runs.get_run(run.get("root_run_id") or run_id) or run
+    except Exception:
+        root = {}
+    brief = (root.get("goal") or "").strip()[:1500]
+    if not brief:
+        return {"available": False}
+
+    prompt = (
+        "You are a senior product designer reviewing a colleague's work before it ships. "
+        "Judge the attached screenshot ONLY on what a paying client would actually notice: "
+        "does it look finished and professional, or does it look like a rough AI-generated "
+        "first draft? Concretely check for: empty/placeholder boxes where real content, icons "
+        "or images belong; dead or badly-distributed whitespace; generic unstyled defaults "
+        "(plain outlined boxes, default button styles); weak visual hierarchy; and whether the "
+        "overall aesthetic actually matches what was asked for below. Ignore things a browser "
+        "console already catches (broken links, JS errors) — this is a design review, not a "
+        "QA pass.\n\n"
+        f"What was asked for:\n{brief}\n\n"
+        "Reply with ONLY a JSON object, no other text: "
+        '{"verdict": "pass" or "fail", "issues": ["...", ...]}. '
+        '"issues" must be concrete and actionable (name the element and what is wrong with '
+        'it), empty if verdict is "pass". Fail if the result looks unfinished or generic — '
+        "a working page is not the same thing as a good one."
+    )
+    response = None
+    try:
+        response = asyncio.run(call_llm_normalized(
+            api_base=agent_instance.api_base,
+            api_key=agent_instance.api_key,
+            model=agent_instance.model,
+            messages=[{"role": "user", "content": prompt, "images": [image]}],
+            temperature=0.2,
+            max_tokens=800,
+            provider_options={
+                "provider": agent_instance.provider,
+                "num_ctx": agent_instance.ollama_num_ctx,
+                "keep_alive": agent_instance.ollama_keep_alive,
+                "think": False,
+            },
+        ))
+    except RuntimeError:
+        # review_published_demo already runs inside a worker thread (see its
+        # call sites: dev_runs._site_review does `asyncio.to_thread(...)`),
+        # so there is no running loop here to conflict with asyncio.run — this
+        # only guards a direct call from an already-async context in tests.
+        logger.warning("Design critique skipped for %s: no usable event loop", run_id)
+    if response is None or not response.is_success:
+        return {"available": False,
+               "error": getattr(response, "error_message", None) or "design critique call failed"}
+
+    try:
+        parsed = json.loads((response.content or "").strip())
+        verdict = parsed.get("verdict")
+        issues = [str(i)[:300] for i in (parsed.get("issues") or []) if str(i).strip()]
+        if verdict not in ("pass", "fail"):
+            raise ValueError(f"unexpected verdict {verdict!r}")
+    except (ValueError, TypeError, AttributeError) as exc:
+        logger.warning("Design critique for %s returned unparseable output: %s", run_id, exc)
+        return {"available": False, "error": "design critique returned unparseable output"}
+
+    return {"available": True, "verdict": verdict, "issues": issues[:10]}
+
+
 def review_published_demo(run_id: str) -> Dict[str, Any]:
     """Renders a published demo at phone/tablet/desktop and reports what is
-    broken. Returns a structured verdict; shared by the dev_review_demo tool
-    and dev_runs' verification gate."""
+    broken, AND judges whether it looks like finished, professional work.
+    Returns a structured verdict; shared by the dev_review_demo tool and
+    dev_runs' verification gate."""
     audit = _browser_runner_audit(run_id)
     if audit.get("error"):
         return {"verdict": "unavailable", "error": audit["error"]}
@@ -2602,6 +2695,8 @@ def review_published_demo(run_id: str) -> Dict[str, Any]:
     if not pages:
         return {"verdict": "unavailable", "error": "The audit returned no pages."}
 
+    screenshots_b64 = {str(p.get("viewport") or "view"): p["screenshot_b64"]
+                       for p in pages if p.get("screenshot_b64")}
     screenshots = _persist_audit_screenshots(run_id, pages)
     problems: List[str] = []
     warnings: List[str] = []
@@ -2645,12 +2740,25 @@ def review_published_demo(run_id: str) -> Dict[str, Any]:
     for href in _broken_internal_links(run_id, links):
         problems.append(f"[links] '{href}' points at a page that was not published")
 
+    # Design critique last, and only when the mechanical checks already found
+    # nothing: a page that does not even render correctly is not ready for a
+    # taste judgment yet, and skipping the vision call in that case saves a
+    # model round-trip on a build the executor already has concrete work to do.
+    design_verdict = None
+    if not problems:
+        critique = _design_critique(run_id, screenshots_b64)
+        if critique.get("available"):
+            design_verdict = critique["verdict"]
+            for issue in critique.get("issues", []):
+                problems.append(f"[design] {issue}")
+
     return {
         "verdict": "fail" if problems else "pass",
         "problems": problems[:30],
         "warnings": warnings[:10],
         "viewports": summaries,
         "screenshots": screenshots,
+        "design_reviewed": design_verdict is not None,
     }
 
 
