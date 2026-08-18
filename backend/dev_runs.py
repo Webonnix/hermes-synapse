@@ -996,7 +996,16 @@ def _fingerprint(tool_name: str, arguments: Dict[str, Any]) -> str:
     """Stable hash of an action (tool + arguments), for duplicate detection."""
     import hashlib
 
-    canonical = json.dumps([tool_name, arguments], ensure_ascii=False, sort_keys=True, default=str)
+    fingerprint_args = arguments
+    if tool_name == "dev_exec" and isinstance(arguments, dict):
+        # timeout_s is a dial the model turns when retrying a command that
+        # just timed out (120 -> 180 -> 300 -> 600...) — the command (argv) is
+        # what makes two calls "the same action" for loop-detection purposes.
+        # Without this, a doomed command (e.g. `npm install` with no network
+        # route to the registry) never repeats the same fingerprint and can
+        # retry forever, since every retry differs only by this one field.
+        fingerprint_args = {k: v for k, v in arguments.items() if k != "timeout_s"}
+    canonical = json.dumps([tool_name, fingerprint_args], ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
 
 
@@ -1129,6 +1138,31 @@ async def _call_executor_llm(run: Dict[str, Any], config: Dict[str, Any]) -> Any
     return response
 
 
+def _tool_result_indicates_failure(tool_name: str, result: Any) -> bool:
+    """Some tools report failure inside a well-formed JSON body instead of a
+    top-level "error" key — dev_exec returns {"exit_code": 1, ...} for a
+    failing command and {"timed_out": true, ...} for one that ran out of
+    time, both with HTTP 200 and no "error" field, because the *call itself*
+    succeeded even though what it ran did not.
+
+    Without this, such a step is recorded "done" — indistinguishable from
+    real progress — so _consecutive_failures never trips and the duplicate-
+    action window keeps resetting: a run stuck retrying a doomed command
+    (e.g. `npm install` with no route to the registry) can burn its entire
+    iteration budget without ever hitting a circuit breaker, which is exactly
+    what happened in production before this existed (dev-run run-2638e2ec5767,
+    2026-08-18: 20+ consecutive dev_exec timeouts, none of them counted)."""
+    if not isinstance(result, dict):
+        return False
+    if result.get("timed_out"):
+        return True
+    if tool_name in ("dev_exec", "dev_run_tests"):
+        exit_code = result.get("exit_code")
+        if isinstance(exit_code, int) and exit_code != 0:
+            return True
+    return False
+
+
 async def _execute_tool_call(run: Dict[str, Any], call: Any) -> tuple[Dict[str, Any], bool]:
     """Runs one model-issued tool call through every gate.
 
@@ -1199,7 +1233,8 @@ async def _execute_tool_call(run: Dict[str, Any], call: Any) -> tuple[Dict[str, 
 
     error = result.get("error") if isinstance(result, dict) else None
     summary = str(error) if error else json.dumps(result, ensure_ascii=False)[:400]
-    add_step(run["id"], "act", tool_name, summary[:400], "failed" if error else "done",
+    failed = bool(error) or _tool_result_indicates_failure(tool_name, result)
+    add_step(run["id"], "act", tool_name, summary[:400], "failed" if failed else "done",
              result=str(result_raw), fingerprint=fingerprint)
     return get_run(run["id"]), False  # type: ignore[return-value]
 

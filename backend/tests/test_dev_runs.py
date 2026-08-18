@@ -1293,3 +1293,85 @@ def test_deleting_one_revision_keeps_the_chains_feedback(runs_db):
     dev_runs.add_feedback(root["id"], comment="still valid")
     dev_runs.delete_run(second["id"])
     assert [f["comment"] for f in dev_runs.list_feedback(root["id"])] == ["still valid"]
+
+
+# ── Failure detection blind spot: a "successful" call that reports failure ───
+# Discovered live in production 2026-08-18: dev_exec calls that time out come
+# back as HTTP 200 with {"timed_out": true} in the body, no top-level "error"
+# key. A run kept retrying npm install with a growing timeout for over an
+# hour, 20+ times in a row, because every one of those steps was recorded
+# "done" — the circuit breakers that exist specifically to catch this pattern
+# never saw a single failure.
+
+def test_tool_result_recognizes_a_timed_out_call_as_a_failure():
+    assert dev_runs._tool_result_indicates_failure(
+        "dev_exec", {"exit_code": -1, "stdout": "", "stderr": "Timed out after 600s", "timed_out": True}
+    ) is True
+
+
+def test_tool_result_recognizes_a_nonzero_exit_code_as_a_failure():
+    assert dev_runs._tool_result_indicates_failure(
+        "dev_exec", {"exit_code": 1, "stdout": "", "stderr": "npm ERR!"}
+    ) is True
+    assert dev_runs._tool_result_indicates_failure(
+        "dev_run_tests", {"exit_code": 1, "runner": "pytest"}
+    ) is True
+
+
+def test_tool_result_treats_a_clean_exit_as_success():
+    assert dev_runs._tool_result_indicates_failure(
+        "dev_exec", {"exit_code": 0, "stdout": "v20.19.2\n", "stderr": ""}
+    ) is False
+
+
+def test_tool_result_ignores_exit_code_on_tools_where_it_is_not_meaningful():
+    """Only dev_exec/dev_run_tests actually run a shell command with a real
+    exit code; other tools must not be second-guessed by this heuristic."""
+    assert dev_runs._tool_result_indicates_failure(
+        "dev_publish_demo", {"exit_code": "not-a-real-field", "demo_url": "/demo/x/"}
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_a_timed_out_dev_exec_trips_the_consecutive_failure_gate(runs_db, template_plan, governed_ok, monkeypatch):
+    """The whole point of the fix: a run that keeps retrying a doomed shell
+    command now actually stops instead of burning its budget silently."""
+    scripted = {"n": 0}
+
+    async def fake_call(**kwargs):
+        scripted["n"] += 1
+        if scripted["n"] > 20:
+            return _llm_text("DONE: gave up")
+        return _llm_tool("dev_exec", {"argv": ["npm", "install"], "timeout_s": 60 + scripted["n"]})
+
+    monkeypatch.setattr(dev_runs, "call_llm_normalized", fake_call)
+    monkeypatch.setattr(dev_runs, "execute_governed_tool",
+                        lambda *a, **kw: json.dumps({"exit_code": -1, "stderr": "Timed out after 60s",
+                                                     "timed_out": True}))
+    run = dev_runs.create_run("build something that needs npm install")
+    result = await dev_runs.process_run(run["id"])
+    assert result["status"] == "failed"
+    assert scripted["n"] < 20  # stopped well before the script ran out
+
+
+def test_dev_exec_fingerprint_ignores_the_retried_timeout():
+    """A retry that only raises timeout_s is still the same action — that is
+    what lets duplicate-detection (and therefore the failure gate above) see
+    it as a repeat instead of 20 unrelated 'new' calls."""
+    a = dev_runs._fingerprint("dev_exec", {"argv": ["npm", "install"], "timeout_s": 120})
+    b = dev_runs._fingerprint("dev_exec", {"argv": ["npm", "install"], "timeout_s": 600})
+    assert a == b
+
+
+def test_dev_exec_fingerprint_still_distinguishes_different_commands():
+    a = dev_runs._fingerprint("dev_exec", {"argv": ["npm", "install"], "timeout_s": 120})
+    b = dev_runs._fingerprint("dev_exec", {"argv": ["npm", "test"], "timeout_s": 120})
+    assert a != b
+
+
+def test_other_tools_fingerprint_on_every_argument_as_before():
+    """The timeout_s carve-out is dev_exec-specific — a tool that happens to
+    take a same-named argument must not silently lose it from the hash."""
+    a = dev_runs._fingerprint("dev_run_tests", {"runner": "auto", "timeout_s": 30})
+    b = dev_runs._fingerprint("dev_run_tests", {"runner": "auto", "timeout_s": 90})
+    assert a != b
