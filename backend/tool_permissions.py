@@ -61,6 +61,7 @@ SERVER_ACTION_TOOLS: Set[str] = {
     "dev_exec",
     "dev_run_tests",
     "dev_publish_demo",
+    "dev_review_demo",
     "git_status",
     "git_diff",
     "git_commit",

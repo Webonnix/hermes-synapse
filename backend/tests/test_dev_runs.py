@@ -1157,3 +1157,139 @@ def test_a_continuation_waits_for_the_revision_it_continues(runs_db):
     dev_runs.update_run(root["id"], status="done")
     assert selectable() == [child["id"]]
     assert dev_runs.waits_for_parent(dev_runs.get_run(child["id"])) is False
+
+
+# ── Click-to-comment feedback ─────────────────────────────────────────────────
+# The overlay on a published demo lets the owner comment on a live element
+# instead of writing a fresh brief from memory; these cover the backend half:
+# collecting comments across a whole product chain and folding them into one
+# continuation rather than one card per remark.
+
+def test_feedback_is_recorded_against_the_run_it_was_left_on(runs_db):
+    run = dev_runs.create_run("build a landing page")
+    item = dev_runs.add_feedback(run["id"], comment="make this button bigger",
+                                 page_path="/pricing.html", selector="#cta",
+                                 element_text="Buy now", viewport="mobile")
+    assert item["run_id"] == run["id"]
+    assert item["root_run_id"] == run["id"]
+    assert item["status"] == "open"
+    assert item["comment"] == "make this button bigger"
+
+
+def test_feedback_requires_nonempty_comment(runs_db):
+    run = dev_runs.create_run("build a landing page")
+    with pytest.raises(ValueError):
+        dev_runs.add_feedback(run["id"], comment="   ")
+
+
+def test_feedback_on_a_missing_run_is_refused(runs_db):
+    with pytest.raises(KeyError):
+        dev_runs.add_feedback("run-doesnotexist", comment="hi")
+
+
+def test_listing_feedback_spans_the_whole_chain(runs_db):
+    """An owner may still be commenting on an older build after a newer
+    revision shipped — the comment must not be lost off in a side table only
+    the old card can see."""
+    root = dev_runs.create_run("build a landing page")
+    second = dev_runs.create_run("refine it", parent_run_id=root["id"])
+    dev_runs.add_feedback(root["id"], comment="old comment")
+    dev_runs.add_feedback(second["id"], comment="new comment")
+
+    from_root = [f["comment"] for f in dev_runs.list_feedback(root["id"])]
+    from_child = [f["comment"] for f in dev_runs.list_feedback(second["id"])]
+    assert from_root == from_child == ["old comment", "new comment"]
+
+
+def test_dismissed_feedback_is_excluded_by_default(runs_db):
+    run = dev_runs.create_run("build a landing page")
+    item = dev_runs.add_feedback(run["id"], comment="skip me")
+    dev_runs.dismiss_feedback(item["id"])
+    assert dev_runs.list_feedback(run["id"]) == []
+    assert [f["status"] for f in dev_runs.list_feedback(run["id"], status="dismissed")] == ["dismissed"]
+    assert dev_runs.list_feedback(run["id"], status=None)[0]["status"] == "dismissed"
+
+
+def test_dismissing_twice_is_refused(runs_db):
+    run = dev_runs.create_run("build a landing page")
+    item = dev_runs.add_feedback(run["id"], comment="skip me")
+    dev_runs.dismiss_feedback(item["id"])
+    with pytest.raises(KeyError):
+        dev_runs.dismiss_feedback(item["id"])
+
+
+def test_consuming_feedback_folds_every_open_comment_into_one_card(runs_db):
+    run = dev_runs.create_run("build a landing page")
+    dev_runs.add_feedback(run["id"], comment="make the header sticky",
+                          page_path="/", selector="header", element_text="Nav")
+    dev_runs.add_feedback(run["id"], comment="fix the footer color",
+                          page_path="/", selector="footer")
+    dev_runs.add_feedback(run["id"], comment="typo on pricing page",
+                          page_path="/pricing.html")
+
+    child = dev_runs.consume_feedback(run["id"])
+    assert child["parent_run_id"] == run["id"]  # only revision, so it's the live one
+    assert "make the header sticky" in child["goal"]
+    assert "fix the footer color" in child["goal"]
+    assert "typo on pricing page" in child["goal"]
+    assert "build a landing page" in child["goal"]  # product context carried along
+
+    # All three are now applied, attributed to the new card, and gone from
+    # the open queue — not one card per remark.
+    applied = dev_runs.list_feedback(run["id"], status="applied")
+    assert len(applied) == 3
+    assert all(item["consumed_by_run_id"] == child["id"] for item in applied)
+    assert dev_runs.list_feedback(run["id"]) == []
+
+
+def test_consuming_feedback_continues_the_live_revision_not_the_commented_one(runs_db, monkeypatch):
+    """A comment left on an old build should refine what is live NOW, not
+    resurrect a stale checkout."""
+    from backend import dev_sandbox
+
+    root = dev_runs.create_run("build a landing page")
+    second = dev_runs.create_run("refine it", parent_run_id=root["id"])
+    dev_runs.add_feedback(root["id"], comment="old-build remark")
+
+    monkeypatch.setattr(dev_sandbox, "current_site_revision", lambda root_id: second["id"])
+    child = dev_runs.consume_feedback(root["id"])
+    assert child["parent_run_id"] == second["id"]
+
+
+def test_consuming_feedback_falls_back_to_root_when_nothing_is_live(runs_db, monkeypatch):
+    from backend import dev_sandbox
+
+    root = dev_runs.create_run("build a landing page")
+    dev_runs.add_feedback(root["id"], comment="never published yet")
+    monkeypatch.setattr(dev_sandbox, "current_site_revision", lambda root_id: None)
+    child = dev_runs.consume_feedback(root["id"])
+    assert child["parent_run_id"] == root["id"]
+
+
+def test_consuming_with_no_open_feedback_is_refused(runs_db):
+    run = dev_runs.create_run("build a landing page")
+    with pytest.raises(ValueError):
+        dev_runs.consume_feedback(run["id"])
+
+
+def test_deleting_the_only_revision_clears_its_unreachable_feedback(runs_db):
+    """Once nothing survives to consume it into, dangling feedback would
+    otherwise sit invisible forever."""
+    run = dev_runs.create_run("build a landing page")
+    dev_runs.add_feedback(run["id"], comment="orphan me")
+    dev_runs.delete_run(run["id"])
+
+    import sqlite3
+    conn = sqlite3.connect(runs_db)
+    count = conn.execute("SELECT COUNT(*) FROM dev_run_feedback WHERE root_run_id = ?",
+                         (run["id"],)).fetchone()[0]
+    conn.close()
+    assert count == 0
+
+
+def test_deleting_one_revision_keeps_the_chains_feedback(runs_db):
+    root = dev_runs.create_run("build a landing page")
+    second = dev_runs.create_run("refine it", parent_run_id=root["id"])
+    dev_runs.add_feedback(root["id"], comment="still valid")
+    dev_runs.delete_run(second["id"])
+    assert [f["comment"] for f in dev_runs.list_feedback(root["id"])] == ["still valid"]

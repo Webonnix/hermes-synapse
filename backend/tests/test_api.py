@@ -172,3 +172,20 @@ def test_dev_runs_metrics_endpoint():
     for key in ("task_success_rate", "autonomous_completion_rate",
                 "human_intervention_rate", "tool_error_rate", "by_status"):
         assert key in data
+
+
+def test_dev_run_feedback_endpoints_reject_bad_input_without_touching_state():
+    """Full CRUD is covered against an isolated DB in test_dev_runs.py; this
+    only checks the thin API wrappers translate errors correctly — no writes
+    against this shared test database."""
+    missing = client.post("/api/dev-runs/run-doesnotexist/feedback", json={"comment": "hi"})
+    assert missing.status_code == 404
+
+    empty = client.post("/api/dev-runs/run-doesnotexist/feedback", json={"comment": "   "})
+    assert empty.status_code == 400
+
+    dismiss_missing = client.post("/api/dev-runs/feedback/fb-doesnotexist/dismiss")
+    assert dismiss_missing.status_code == 404
+
+    apply_missing = client.post("/api/dev-runs/run-doesnotexist/feedback/apply", json={})
+    assert apply_missing.status_code == 404

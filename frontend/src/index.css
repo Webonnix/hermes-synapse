@@ -1429,6 +1429,17 @@ body::after {
 .kanban-revision-head .kanban-card-time { margin-left: auto; }
 .kanban-revision-live { display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px; border-radius: 8px; color: var(--success); background: rgba(95,240,191,.12); font: 700 .55rem var(--font-sans); text-transform: uppercase; letter-spacing: .04em; }
 .kanban-revision-gone { color: var(--text-dim); font: 600 .6rem var(--font-sans); }
+.kanban-drawer-feedback { display: grid; align-content: start; gap: 8px; margin-top: 4px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,.08); }
+.kanban-drawer-feedback-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--text-primary); font: 700 .68rem var(--font-sans); }
+.kanban-drawer-feedback-head > span:first-child { display: inline-flex; align-items: center; gap: 6px; }
+.kanban-feedback-row { display: grid; gap: 5px; padding: 8px 9px; border: 1px solid rgba(255,150,72,.22); border-radius: 5px; background: rgba(255,150,72,.05); }
+.kanban-feedback-head { display: flex; align-items: center; gap: 7px; color: var(--text-dim); font: 600 .58rem var(--font-mono); }
+.kanban-feedback-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kanban-feedback-head .kanban-card-time { margin-left: auto; }
+.kanban-feedback-dismiss { display: inline-grid; place-items: center; padding: 2px; border: 0; border-radius: 3px; color: var(--text-dim); background: transparent; cursor: pointer; }
+.kanban-feedback-dismiss:hover { color: #ff8bae; }
+.kanban-feedback-target { margin: 0; color: var(--text-dim); font: 500 .62rem var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kanban-feedback-comment { margin: 0; color: var(--text-primary); font-size: .68rem; line-height: 1.4; }
 @media (max-width: 700px) { .kanban-board { grid-auto-flow: row; grid-auto-columns: unset; } .kanban-page { padding: 10px; } .kanban-drawer { width: 100%; border-left: 0; } }
 
 /* ── Unified diff viewer ────────────────────────────────────────────────── */

@@ -35,6 +35,7 @@ function stubFetch(runs: DevRun[], lineage: DevRunRevision[] = []) {
     const path = String(input);
     if (path.startsWith('/api/dev-runs?')) return { ok: true, json: async () => runs };
     if (path.endsWith('/lineage')) return { ok: true, json: async () => lineage };
+    if (path.includes('/feedback?status=open')) return { ok: true, json: async () => [] };
     return { ok: true, json: async () => ({}) };
   });
   vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
@@ -119,6 +120,7 @@ describe('KanbanTab — product revisions', () => {
       const path = String(input);
       if (path.startsWith('/api/dev-runs?')) return { ok: true, json: async () => [makeRun()] };
       if (path.endsWith('/lineage')) return { ok: false, status: 500, json: async () => ({}) };
+      if (path.includes('/feedback?status=open')) return { ok: true, json: async () => [] };
       return { ok: true, json: async () => ({}) };
     });
     vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);

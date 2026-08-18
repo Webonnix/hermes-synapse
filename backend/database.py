@@ -786,6 +786,33 @@ def _init_sqlite_schema():
         CREATE INDEX IF NOT EXISTS idx_dev_runs_root
         ON dev_runs (root_run_id, revision)
     """)
+    # Click-to-comment feedback left on a published demo (see the review
+    # overlay injected by tools.dev_publish_demo). Rows accumulate against the
+    # revision they were left on and are then consumed together into a single
+    # continuation card, so ten small remarks produce one task rather than ten.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS dev_run_feedback (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            root_run_id TEXT NOT NULL,
+            page_path TEXT NOT NULL DEFAULT '',
+            selector TEXT NOT NULL DEFAULT '',
+            element_text TEXT NOT NULL DEFAULT '',
+            viewport TEXT NOT NULL DEFAULT '',
+            comment TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            consumed_by_run_id TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    # Indexed by root_run_id, not run_id: feedback is collected across a
+    # product's whole chain (an owner may still be commenting on an older
+    # revision after a newer one shipped), and root_run_id stays valid even
+    # if the specific revision row it was left on is later deleted.
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_dev_run_feedback_root
+        ON dev_run_feedback (root_run_id, status, created_at)
+    """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS dev_run_steps (
             id TEXT PRIMARY KEY,

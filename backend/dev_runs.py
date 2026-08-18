@@ -44,7 +44,7 @@ ASSIGNED_BUSY_STATUSES = ACTIVE_STATUSES + ("paused", "awaiting_approval")
 # Tools the executor loop may use. All are R1/R2 sandbox- or dev-repo-scoped.
 DEV_RUN_TOOLS = (
     "dev_read_file", "dev_write_file", "dev_patch", "dev_list_dir",
-    "dev_exec", "dev_run_tests", "dev_publish_demo",
+    "dev_exec", "dev_run_tests", "dev_publish_demo", "dev_review_demo",
     "git_status", "git_diff", "git_commit", "git_push",
 )
 
@@ -99,7 +99,12 @@ EXECUTOR_SYSTEM_PROMPT = (
     "inspect them. If the goal involves a website, app, or anything with a visual "
     "result, build it as a static site (or a static export/build step) and call "
     "dev_publish_demo with the build output directory before finishing, so the "
-    "requester gets a live demo link.\n\n"
+    "requester gets a live demo link. Then call dev_review_demo: it opens what "
+    "you published in a real browser at phone, tablet and desktop widths and "
+    "reports the JavaScript errors, failed requests, unrendered images, "
+    "sideways-scrolling layouts, empty pages and dead links that the file "
+    "contents alone never show. Fix everything it reports, republish and review "
+    "again — a site you have never looked at is not finished.\n\n"
     "Work autonomously end to end: decide implementation details yourself instead "
     "of stopping to ask, make the best-reasoned assumption when information is "
     "slightly incomplete, and do not stop after the first working result. After "
@@ -225,6 +230,113 @@ def create_run(
              parent["id"] if parent else None, root_run_id, revision),
         )
     return get_run(run_id)  # type: ignore[return-value]
+
+
+# ── Click-to-comment feedback ────────────────────────────────────────────────
+# The overlay tools.py injects into every published page posts here directly
+# (same-origin through nginx's /api/ proxy, real dashboard auth — see
+# main.py's feedback endpoints). Comments accumulate against the product,
+# not any one revision, and get folded into a single continuation card on
+# demand instead of one card per remark.
+
+FEEDBACK_STATUSES = ("open", "applied", "dismissed")
+
+
+def add_feedback(run_id: str, *, comment: str, page_path: str = "", selector: str = "",
+                 element_text: str = "", viewport: str = "") -> Dict[str, Any]:
+    run = get_run(run_id)
+    if not run:
+        raise KeyError(run_id)
+    comment = (comment or "").strip()
+    if not comment:
+        raise ValueError("Feedback comment must not be empty")
+    feedback_id = f"fb-{uuid.uuid4().hex[:12]}"
+    with _connect() as conn:
+        conn.execute(
+            """INSERT INTO dev_run_feedback
+               (id, run_id, root_run_id, page_path, selector, element_text, viewport,
+                comment, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)""",
+            (feedback_id, run_id, run["root_run_id"] or run["id"], page_path[:500],
+             selector[:500], element_text[:300], viewport[:20], comment[:2000], _now()),
+        )
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM dev_run_feedback WHERE id = ?", (feedback_id,)).fetchone()
+    return dict(row)
+
+
+def list_feedback(run_id: str, status: Optional[str] = "open") -> List[Dict[str, Any]]:
+    """Every comment left anywhere on this product's chain, not just this
+    revision — an owner may still be commenting on an older build after a
+    newer one shipped."""
+    run = get_run(run_id)
+    if not run:
+        raise KeyError(run_id)
+    root_run_id = run["root_run_id"] or run["id"]
+    query = "SELECT * FROM dev_run_feedback WHERE root_run_id = ?"
+    params: List[Any] = [root_run_id]
+    if status:
+        query += " AND status = ?"
+        params.append(status)
+    query += " ORDER BY created_at"
+    with _connect() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [dict(row) for row in rows]
+
+
+def dismiss_feedback(feedback_id: str) -> Dict[str, Any]:
+    with _connect() as conn:
+        cursor = conn.execute(
+            "UPDATE dev_run_feedback SET status = 'dismissed' WHERE id = ? AND status = 'open'",
+            (feedback_id,),
+        )
+        if cursor.rowcount == 0:
+            raise KeyError(feedback_id)
+        row = conn.execute("SELECT * FROM dev_run_feedback WHERE id = ?", (feedback_id,)).fetchone()
+    return dict(row)
+
+
+def _feedback_goal(root: Dict[str, Any], items: List[Dict[str, Any]]) -> str:
+    lines = [f"Apply this owner feedback on \"{root['goal'][:200]}\":"]
+    for item in items:
+        where = item["page_path"] or "/"
+        what = f' on "{item["element_text"][:80]}"' if item["element_text"] else ""
+        lines.append(f"- [{where}{' @ ' + item['viewport'] if item['viewport'] else ''}]{what}: "
+                     f"{item['comment']}"
+                     + (f" (selector: {item['selector']})" if item["selector"] else ""))
+    return "\n".join(lines)
+
+
+def consume_feedback(run_id: str, *, assignee_agent_id: Optional[str] = None,
+                     start: bool = True) -> Dict[str, Any]:
+    """Folds every open comment on this product into one continuation card.
+
+    Continues the currently LIVE revision (the working tree an owner is
+    actually looking at), not necessarily `run_id` itself — a comment left on
+    an older build should still refine what is live now, not resurrect a
+    stale checkout. Falls back to the chain root if nothing is live yet."""
+    from backend import dev_sandbox
+
+    run = get_run(run_id)
+    if not run:
+        raise KeyError(run_id)
+    root_run_id = run["root_run_id"] or run["id"]
+    items = list_feedback(run_id, status="open")
+    if not items:
+        raise ValueError("No open feedback to apply for this product.")
+
+    live_id = dev_sandbox.current_site_revision(root_run_id)
+    parent_id = live_id if (live_id and get_run(live_id)) else root_run_id
+    goal = _feedback_goal(get_run(root_run_id) or run, items)
+    child = create_run(goal, parent_run_id=parent_id, assignee_agent_id=assignee_agent_id, start=start)
+
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.executemany(
+            "UPDATE dev_run_feedback SET status = 'applied', consumed_by_run_id = ? WHERE id = ?",
+            [(child["id"], item["id"]) for item in items],
+        )
+    return child
 
 
 def lineage(run_id: str) -> List[Dict[str, Any]]:
@@ -477,7 +589,7 @@ def delete_run(run_id: str) -> bool:
     children are re-parented onto its own parent, and the chain's stable URL
     falls back to another revision if it was serving this one."""
     import shutil
-    from backend import dev_sandbox
+    from backend import dev_sandbox, tools
 
     run = get_run(run_id)
     if not run:
@@ -491,8 +603,17 @@ def delete_run(run_id: str) -> bool:
         cursor = conn.execute("DELETE FROM dev_runs WHERE id = ?", (run_id,))
         if cursor.rowcount == 0:
             return False
+        remaining = conn.execute(
+            "SELECT COUNT(*) AS n FROM dev_runs WHERE id = ? OR root_run_id = ?",
+            (root_run_id, root_run_id),
+        ).fetchone()["n"]
+        if remaining == 0:
+            # Nothing left to consume this feedback into — it would otherwise
+            # sit unreachable forever (consume_feedback needs a real run row).
+            conn.execute("DELETE FROM dev_run_feedback WHERE root_run_id = ?", (root_run_id,))
 
     shutil.rmtree(dev_sandbox.PREVIEWS_ROOT / run_id, ignore_errors=True)
+    shutil.rmtree(dev_sandbox.PREVIEWS_ROOT / tools.AUDIT_SUBDIR / run_id, ignore_errors=True)
     shutil.rmtree(dev_sandbox.repo_run_path(run_id), ignore_errors=True)
     _reseat_site_alias(root_run_id)
     return True
@@ -673,6 +794,32 @@ def _has_unverified_changes(run_id: str) -> bool:
     return False
 
 
+async def _site_review(run: Dict[str, Any]) -> tuple[Optional[bool], str, str]:
+    """Renders this run's published demo and judges it.
+
+    Returns (ok, detail, raw). `ok` is None when there is nothing to judge — no
+    demo was published, or the reviewer sidecar is down. Neither is the run's
+    fault, so neither may block a completion: a broken reviewer must not make
+    every site run permanently unfinishable."""
+    from backend import dev_sandbox, tools
+
+    if not (dev_sandbox.PREVIEWS_ROOT / run["id"]).is_dir():
+        return None, "", ""
+    review = await asyncio.to_thread(tools.review_published_demo, run["id"])
+    raw = json.dumps(review, ensure_ascii=False)
+    verdict = review.get("verdict")
+    if verdict == "unavailable":
+        add_step(run["id"], "verify", "dev_review_demo",
+                 f"Site review unavailable, completion not blocked: {review.get('error')}"[:400],
+                 result=raw)
+        logger.warning("Dev-run %s: site review unavailable (%s)", run["id"], review.get("error"))
+        return None, "", raw
+    if verdict == "pass":
+        return True, "", raw
+    problems = review.get("problems") or ["unspecified rendering problems"]
+    return False, "The published site does not render correctly:\n- " + "\n- ".join(problems), raw
+
+
 async def _verification_gate(run: Dict[str, Any], *, trigger: str) -> tuple[bool, Dict[str, Any]]:
     """Mandatory dev_run_tests before a push or a claimed completion.
 
@@ -704,29 +851,39 @@ async def _verification_gate(run: Dict[str, Any], *, trigger: str) -> tuple[bool
     except (TypeError, ValueError):
         result = {"error": str(result_raw)[:300]}
     failed = bool(result.get("error")) or result.get("exit_code") not in (0, None) or result.get("timed_out")
+    failing_tool = "dev_run_tests"
+    detail = ""
+    if failed:
+        detail = (result.get("error") or result.get("stderr") or result.get("stdout") or "unknown failure")
+    elif trigger != "push":
+        # A passing pytest/npm run says nothing about whether a static site
+        # renders, which for a site-building run is the only thing that
+        # matters. Completion therefore also has to survive a real render.
+        site_ok, site_detail, site_raw = await _site_review(run)
+        if site_ok is False:
+            failed, failing_tool, detail, result_raw = True, "dev_review_demo", site_detail, site_raw
     if not failed:
         add_step(run["id"], "verify", "dev_run_tests", f"Verification passed; {label} permitted.",
                  result=str(result_raw))
         _remember_verification(run, "passed", f"Test runner: {result.get('runner', 'auto')}.")
         await _emit_event(run["id"], run["status"], f"Verification passed; {label}.", "phase_done")
         return True, run
-
-    detail = (result.get("error") or result.get("stderr") or result.get("stdout") or "unknown failure")
     attempts = _verify_attempts(run["id"]) + 1
-    add_step(run["id"], "verify", "dev_run_tests",
+    add_step(run["id"], "verify", failing_tool,
              f"Verification failed (attempt {attempts}/{MAX_VERIFY_ATTEMPTS}), {label} refused: {detail}"[:1000],
              "failed", result=str(result_raw))
     if attempts >= MAX_VERIFY_ATTEMPTS:
         from backend.control_plane import create_review_task
+        what = "tests" if failing_tool == "dev_run_tests" else "the published site"
         review = create_review_task(
-            goal=f"Dev-run {run['id']}: tests still failing after {attempts} fix attempts — owner override required for {label}",
+            goal=f"Dev-run {run['id']}: {what} still failing after {attempts} fix attempts — owner override required for {label}",
             arguments={"run_id": run["id"], "goal": run["goal"][:300], "last_failure": str(detail)[:500]},
             risk_class="R3",
             acceptance=[f"Owner reviewed the failing tests and explicitly accepts the {label} anyway"],
             rollback="Reject this task and let the run keep fixing tests, or cancel the run.",
             requester=f"dev-run:{run['id']}",
         )
-        add_step(run["id"], "verify", "dev_run_tests",
+        add_step(run["id"], "verify", failing_tool,
                  f"Escalated to Control Plane. {_OVERRIDE_MARK} {review['id']}", "escalated")
         _remember_verification(run, "escalated",
                               f"3 verification attempts failed; override task {review['id']} created. "
@@ -734,7 +891,8 @@ async def _verification_gate(run: Dict[str, Any], *, trigger: str) -> tuple[bool
         run = update_run(run["id"], status="awaiting_approval",
                          status_reason=f"Verification failed {attempts}x; owner override task {review['id']}")
         await _emit_event(run["id"], "awaiting_approval",
-                          f"Tests failing after {attempts} attempts; override task {review['id']} awaits owner.",
+                          f"{what.capitalize()} failing after {attempts} attempts; "
+                          f"override task {review['id']} awaits owner.",
                           "awaiting_approval")
         return False, run
     return False, get_run(run["id"])  # type: ignore[return-value]

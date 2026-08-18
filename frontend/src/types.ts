@@ -735,6 +735,21 @@ export interface DevRunRevision extends DevRun {
   has_snapshot: boolean;
 }
 
+/** One click-to-comment remark left on a published demo (dev_run_feedback). */
+export interface DevRunFeedback {
+  id: string;
+  run_id: string;
+  root_run_id: string;
+  page_path: string;
+  selector: string;
+  element_text: string;
+  viewport: string;
+  comment: string;
+  status: 'open' | 'applied' | 'dismissed';
+  consumed_by_run_id: string | null;
+  created_at: string;
+}
+
 export interface DevRunEvent {
   type: 'dev_run_event';
   run_id: string;

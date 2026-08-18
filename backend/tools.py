@@ -7,6 +7,7 @@ import re
 import uuid
 import httpx
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger("hermes.tools")
@@ -1316,6 +1317,21 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "dev_review_demo",
+            "description": (
+                "Открывает опубликованное демо текущего dev-run в реальном браузере на телефоне (375px), "
+                "планшете (768px) и десктопе (1280px) и возвращает измеренные факты: ошибки JavaScript, "
+                "запросы, вернувшие 404, картинки, которые не отрисовались, горизонтальное переполнение, "
+                "пустые страницы и битые внутренние ссылки. Вызывайте ПОСЛЕ dev_publish_demo и до 'DONE:' — "
+                "это единственный способ увидеть, что вы на самом деле собрали. Если verdict = fail, "
+                "исправьте перечисленные проблемы, перепубликуйте и проверьте снова."
+            ),
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "browser_read",
             "description": (
                 "Открывает сайт в headless-браузере и читает/извлекает с него информацию (заголовки, текст, "
@@ -2120,6 +2136,211 @@ DEV_PUBLISH_MAX_BYTES = 200 * 1024 * 1024
 DEV_PUBLISH_MAX_FILES = 5000
 
 
+# ── Click-to-comment overlay ─────────────────────────────────────────────────
+# Injected into every published HTML page so the owner can leave feedback on a
+# live element instead of writing a fresh brief from memory. Self-contained
+# vanilla JS (no build step touches the published output) and inert for
+# anyone else: it reads the SAME localStorage key the dashboard SPA stores its
+# session token under (frontend/src/utils.tsx's 'jarvis_auth_token') — same
+# origin, since nginx serves both the dashboard and /demo/ — and renders
+# nothing at all when that key is absent, so a shared demo link shows a random
+# visitor a plain page, not internal review chrome. The POST itself is still
+# independently authenticated by the same Bearer-token middleware as every
+# other /api/ route (backend/main.py's auth_middleware) — the localStorage
+# check is a UI nicety, not the security boundary.
+_REVIEW_OVERLAY_JS = r"""
+<script>(function(){
+  try {
+    var token = window.localStorage.getItem('jarvis_auth_token');
+    if (!token) return;
+    var RUN_ID = "__HERMES_RUN_ID__";
+    var active = false, box = null, popup = null;
+
+    function cssPath(el){
+      if (el.id) return '#' + CSS.escape(el.id);
+      var parts = [], node = el, depth = 0;
+      while (node && node.nodeType === 1 && depth < 5) {
+        var seg = node.tagName.toLowerCase();
+        var cls = (typeof node.className === 'string' ? node.className : '').trim().split(/\s+/).filter(Boolean).slice(0, 2).join('.');
+        if (cls) seg += '.' + cls;
+        var parent = node.parentElement;
+        if (parent) {
+          var same = Array.prototype.filter.call(parent.children, function(c){ return c.tagName === node.tagName; });
+          if (same.length > 1) seg += ':nth-of-type(' + (same.indexOf(node) + 1) + ')';
+        }
+        parts.unshift(seg);
+        node = parent;
+        depth++;
+      }
+      return parts.join(' > ');
+    }
+    function viewportLabel(){
+      var w = window.innerWidth;
+      return w < 576 ? 'mobile' : w < 992 ? 'tablet' : 'desktop';
+    }
+    function elementText(el){
+      var t = (el.innerText || el.getAttribute('alt') || el.getAttribute('placeholder') || '').trim();
+      return t.slice(0, 200);
+    }
+
+    var style = document.createElement('style');
+    style.textContent =
+      '.hermes-fb-toggle{position:fixed;right:16px;bottom:16px;z-index:2147483000;width:44px;height:44px;' +
+      'border-radius:50%;border:none;background:#0af0ff;color:#04121a;font:600 18px system-ui;cursor:pointer;' +
+      'box-shadow:0 4px 16px rgba(0,0,0,.35);}' +
+      '.hermes-fb-toggle.is-active{background:#ff5d73;color:#fff;}' +
+      '.hermes-fb-box{position:absolute;z-index:2147482999;pointer-events:none;' +
+      'outline:2px solid #0af0ff;background:rgba(10,240,255,.12);border-radius:3px;}' +
+      '.hermes-fb-popup{position:fixed;z-index:2147483001;width:260px;padding:10px;border-radius:8px;' +
+      'background:#0e1220;color:#eef;box-shadow:0 8px 28px rgba(0,0,0,.5);font:13px/1.4 system-ui;}' +
+      '.hermes-fb-popup textarea{width:100%;min-height:64px;margin:6px 0;padding:6px;border-radius:5px;' +
+      'border:1px solid rgba(255,255,255,.2);background:#161b2c;color:#eef;font:inherit;resize:vertical;box-sizing:border-box;}' +
+      '.hermes-fb-popup .hermes-fb-target{font-size:11px;color:#9ad;word-break:break-all;margin-bottom:2px;}' +
+      '.hermes-fb-popup .hermes-fb-row{display:flex;gap:6px;justify-content:flex-end;}' +
+      '.hermes-fb-popup button{padding:5px 10px;border-radius:5px;border:1px solid rgba(255,255,255,.2);' +
+      'background:#1c2338;color:#eef;font:inherit;cursor:pointer;}' +
+      '.hermes-fb-popup button.hermes-fb-send{background:#0af0ff;color:#04121a;border-color:#0af0ff;font-weight:600;}' +
+      '.hermes-fb-toast{position:fixed;right:16px;bottom:68px;z-index:2147483002;padding:8px 12px;' +
+      'border-radius:6px;background:#1c2338;color:#eef;font:12px system-ui;box-shadow:0 4px 16px rgba(0,0,0,.35);}';
+    document.documentElement.appendChild(style);
+
+    var toggle = document.createElement('button');
+    toggle.className = 'hermes-fb-toggle';
+    toggle.type = 'button';
+    toggle.title = 'Оставить замечание по этой странице';
+    toggle.textContent = '\uD83D\uDCAC';
+    toggle.addEventListener('click', function(){
+      active = !active;
+      toggle.classList.toggle('is-active', active);
+      if (!active) closePopup();
+    });
+    document.documentElement.appendChild(toggle);
+
+    function closePopup(){
+      if (popup) { popup.remove(); popup = null; }
+      if (box) { box.remove(); box = null; }
+    }
+
+    function toast(text){
+      var el = document.createElement('div');
+      el.className = 'hermes-fb-toast';
+      el.textContent = text;
+      document.documentElement.appendChild(el);
+      setTimeout(function(){ el.remove(); }, 2500);
+    }
+
+    document.addEventListener('mouseover', function(ev){
+      if (!active || popup) return;
+      var el = ev.target;
+      if (el === toggle || (box && box.contains(el))) return;
+      var rect = el.getBoundingClientRect();
+      if (!box) {
+        box = document.createElement('div');
+        box.className = 'hermes-fb-box';
+        document.documentElement.appendChild(box);
+      }
+      box.style.left = (rect.left + window.scrollX) + 'px';
+      box.style.top = (rect.top + window.scrollY) + 'px';
+      box.style.width = rect.width + 'px';
+      box.style.height = rect.height + 'px';
+    }, true);
+
+    document.addEventListener('click', function(ev){
+      if (!active) return;
+      var el = ev.target;
+      if (el === toggle) return;
+      if (popup && popup.contains(el)) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (popup) { closePopup(); return; }
+
+      var selector = cssPath(el);
+      var text = elementText(el);
+      var viewport = viewportLabel();
+
+      popup = document.createElement('div');
+      popup.className = 'hermes-fb-popup';
+      var left = Math.min(ev.clientX, window.innerWidth - 280);
+      var top = Math.min(ev.clientY, window.innerHeight - 160);
+      popup.style.left = Math.max(8, left) + 'px';
+      popup.style.top = Math.max(8, top) + 'px';
+
+      var targetLine = document.createElement('div');
+      targetLine.className = 'hermes-fb-target';
+      targetLine.textContent = text ? ('"' + text.slice(0, 60) + '"') : selector;
+      popup.appendChild(targetLine);
+
+      var textarea = document.createElement('textarea');
+      textarea.placeholder = 'Что здесь поправить?';
+      popup.appendChild(textarea);
+
+      var row = document.createElement('div');
+      row.className = 'hermes-fb-row';
+      var cancel = document.createElement('button');
+      cancel.type = 'button'; cancel.textContent = 'Отмена';
+      cancel.addEventListener('click', closePopup);
+      var send = document.createElement('button');
+      send.type = 'button'; send.className = 'hermes-fb-send'; send.textContent = 'Отправить';
+      send.addEventListener('click', function(){
+        var comment = textarea.value.trim();
+        if (!comment) { textarea.focus(); return; }
+        send.disabled = true; send.textContent = '...';
+        fetch('/api/dev-runs/' + RUN_ID + '/feedback', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+          body: JSON.stringify({
+            comment: comment, page_path: location.pathname, selector: selector,
+            element_text: text, viewport: viewport,
+          }),
+        }).then(function(resp){
+          if (!resp.ok) throw new Error('HTTP ' + resp.status);
+          closePopup();
+          toast('Замечание отправлено');
+        }).catch(function(){
+          send.disabled = false; send.textContent = 'Отправить';
+          toast('Не удалось отправить — попробуйте ещё раз');
+        });
+      });
+      row.appendChild(cancel);
+      row.appendChild(send);
+      popup.appendChild(row);
+      document.documentElement.appendChild(popup);
+      textarea.focus();
+    }, true);
+
+    document.addEventListener('keydown', function(ev){
+      if (ev.key === 'Escape') closePopup();
+    });
+  } catch (err) {
+    // The published site must never break because the review overlay did —
+    // fail silently, the owner still has the dashboard's own feedback tools.
+  }
+})();</script>
+"""
+
+
+def _inject_review_overlay(dest: Path, run_id: str) -> int:
+    """Best-effort: appends the click-to-comment overlay before </body> in
+    every published HTML file. Never raises — a broken injection must not
+    fail a publish that otherwise succeeded."""
+    script = _REVIEW_OVERLAY_JS.replace("__HERMES_RUN_ID__", run_id)
+    patched = 0
+    for path in dest.rglob("*.htm*"):
+        if not path.is_file():
+            continue
+        try:
+            html = path.read_text(encoding="utf-8", errors="ignore")
+            if "</body>" in html:
+                html = html.replace("</body>", script + "</body>", 1)
+            else:
+                html += script
+            path.write_text(html, encoding="utf-8")
+            patched += 1
+        except OSError as exc:
+            logger.warning("Review overlay injection skipped for %s: %s", path, exc)
+    return patched
+
+
 def dev_publish_demo(build_dir: str) -> str:
     """Publishes a built static site (e.g. `dist/`, `build/`) out of the current
     dev-run's own sandbox checkout.
@@ -2179,6 +2400,10 @@ def dev_publish_demo(build_dir: str) -> str:
         )
     except OSError as exc:
         return json.dumps({"error": f"Publish failed: {type(exc).__name__}: {exc}"}, ensure_ascii=False)
+    try:
+        _inject_review_overlay(dest, run_id)
+    except Exception as exc:  # noqa: BLE001 — a broken overlay must not cost a successful publish
+        logger.warning("Review overlay injection failed for %s: %s", run_id, exc)
 
     from backend import dev_runs
 
@@ -2261,6 +2486,186 @@ def browser_read(task: str, start_url: Optional[str] = None) -> str:
 def browser_task(task: str, allowed_domains: str = "") -> str:
     domains = [d.strip() for d in allowed_domains.split(",") if d.strip()] if allowed_domains else None
     return _browser_runner_request({"task": task, "mode": "interactive", "allowed_domains": domains}, timeout=300.0)
+
+
+# ── Site review: what the dev-run actually built ────────────────────────────
+# A dev-run could publish a site but never look at it: dev_run_tests runs
+# pytest/npm, which for a static site proves nothing, and the executor is a
+# text model that had no way to observe its own output. It therefore declared
+# "DONE" on pages that were blank, threw JS errors, 404'd every asset or
+# overflowed a phone screen. This closes that loop with measured facts rather
+# than an LLM's opinion — see browser_runner/server.py's /audit.
+
+AUDIT_SUBDIR = "_audits"
+# Text shorter than this is not a page anyone would call finished; it is the
+# usual shape of a build that produced an empty shell.
+MIN_MEANINGFUL_TEXT = 50
+
+
+def _browser_runner_audit(run_id: str, timeout: float = 180.0) -> Dict[str, Any]:
+    """Calls the sidecar's deterministic audit. Deliberately not gated on
+    BROWSER_AGENT_ENABLED: that flag guards driving an LLM agent around the
+    open internet, while this renders one locally-served static snapshot and
+    never leaves the container."""
+    token = os.getenv("BROWSER_RUNNER_TOKEN", "")
+    if not token:
+        return {"error": "BROWSER_RUNNER_TOKEN is not configured on the backend."}
+    try:
+        response = httpx.post(
+            f"{BROWSER_RUNNER_URL}/audit",
+            json={"run_id": run_id},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=timeout,
+        )
+    except httpx.HTTPError as exc:
+        return {"error": f"Browser runner is unreachable ({type(exc).__name__}). "
+                         "The site could not be reviewed; start the browser-runner service."}
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("detail", "")
+        except Exception:
+            detail = response.text[:300]
+        return {"error": f"Audit rejected ({response.status_code}): {detail}"}
+    return response.json()
+
+
+def _broken_internal_links(run_id: str, links: List[str]) -> List[str]:
+    """Which in-site hrefs point at something that is not in the snapshot.
+
+    Checked against the published files rather than by fetching, so a link
+    into a page that exists but happens to be slow is never reported, and
+    external/mailto/anchor links are ignored — they are not this run's to
+    guarantee."""
+    from backend import dev_sandbox
+
+    root = (dev_sandbox.PREVIEWS_ROOT / run_id).resolve()
+    broken: List[str] = []
+    for href in dict.fromkeys(links):  # de-duplicate, keep order
+        if not href or href.startswith(("http://", "https://", "//", "mailto:", "tel:", "#", "javascript:")):
+            continue
+        target = href.split("#", 1)[0].split("?", 1)[0]
+        if not target:
+            continue
+        try:
+            candidate = (root / target.lstrip("/")).resolve()
+            candidate.relative_to(root)
+        except (ValueError, OSError):
+            continue  # escapes the snapshot — not a link we can judge
+        if candidate.is_dir():
+            candidate = candidate / "index.html"
+        if not candidate.exists():
+            broken.append(href)
+        if len(broken) >= 20:
+            break
+    return broken
+
+
+def _persist_audit_screenshots(run_id: str, pages: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Writes each viewport's screenshot next to (not inside) the snapshot.
+
+    Inside would mean the next publish wipes them and that they count against
+    the publish size limits; a sibling _audits/ directory is served by the same
+    nginx /demo/ location, so the owner can just open the URL."""
+    import base64
+
+    from backend import dev_sandbox
+
+    urls: Dict[str, str] = {}
+    target_dir = dev_sandbox.PREVIEWS_ROOT / AUDIT_SUBDIR / run_id
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning("Could not create audit dir for %s: %s", run_id, exc)
+        return urls
+    for page in pages:
+        blob = page.pop("screenshot_b64", None)
+        label = str(page.get("viewport") or "view")
+        if not blob or not label.isalnum():
+            continue
+        try:
+            (target_dir / f"{label}.jpg").write_bytes(base64.b64decode(blob))
+            urls[label] = f"/demo/{AUDIT_SUBDIR}/{run_id}/{label}.jpg"
+        except (OSError, ValueError) as exc:
+            logger.warning("Could not store %s screenshot for %s: %s", label, run_id, exc)
+    return urls
+
+
+def review_published_demo(run_id: str) -> Dict[str, Any]:
+    """Renders a published demo at phone/tablet/desktop and reports what is
+    broken. Returns a structured verdict; shared by the dev_review_demo tool
+    and dev_runs' verification gate."""
+    audit = _browser_runner_audit(run_id)
+    if audit.get("error"):
+        return {"verdict": "unavailable", "error": audit["error"]}
+
+    pages = audit.get("pages") or []
+    if not pages:
+        return {"verdict": "unavailable", "error": "The audit returned no pages."}
+
+    screenshots = _persist_audit_screenshots(run_id, pages)
+    problems: List[str] = []
+    warnings: List[str] = []
+    summaries: List[Dict[str, Any]] = []
+
+    for page in pages:
+        where = page.get("viewport", "?")
+        if page.get("load_error"):
+            problems.append(f"[{where}] the page did not load: {page['load_error']}")
+            continue
+        errors = [e for e in page.get("console_errors", []) if e.startswith(("error", "pageerror"))]
+        page_warnings = [e for e in page.get("console_errors", []) if e.startswith("warning")]
+        for item in errors[:5]:
+            problems.append(f"[{where}] JavaScript {item}")
+        for item in page_warnings[:3]:
+            warnings.append(f"[{where}] console {item}")
+        for item in page.get("failed_requests", [])[:5]:
+            problems.append(f"[{where}] request failed: {item}")
+        for item in page.get("broken_images", [])[:5]:
+            problems.append(f"[{where}] image does not render: {item}")
+        if page.get("horizontal_overflow_px"):
+            problems.append(
+                f"[{where}] the page is {page['horizontal_overflow_px']}px wider than the screen — "
+                "it scrolls sideways, which is a layout bug at this size")
+        if int(page.get("text_length") or 0) < MIN_MEANINGFUL_TEXT:
+            problems.append(f"[{where}] the rendered page is essentially empty "
+                            f"({page.get('text_length')} characters of text)")
+        if not page.get("title"):
+            warnings.append(f"[{where}] the page has no <title>")
+        if not page.get("headings"):
+            warnings.append(f"[{where}] the page has no h1/h2 heading")
+        summaries.append({
+            "viewport": where, "size": page.get("size"), "title": page.get("title"),
+            "text_length": page.get("text_length"),
+            "console_errors": len(errors), "failed_requests": len(page.get("failed_requests", [])),
+            "horizontal_overflow_px": page.get("horizontal_overflow_px", 0),
+        })
+
+    # Links are the same on every viewport; check the widest one that loaded.
+    links: List[str] = next((p.get("links") or [] for p in reversed(pages) if p.get("links")), [])
+    for href in _broken_internal_links(run_id, links):
+        problems.append(f"[links] '{href}' points at a page that was not published")
+
+    return {
+        "verdict": "fail" if problems else "pass",
+        "problems": problems[:30],
+        "warnings": warnings[:10],
+        "viewports": summaries,
+        "screenshots": screenshots,
+    }
+
+
+def dev_review_demo() -> str:
+    """Tool entry point: reviews the demo the current dev-run published."""
+    run_id = CURRENT_DEV_RUN_ID.get()
+    if not run_id:
+        return json.dumps({"error": "dev_review_demo can only be called from within a dev-run."},
+                          ensure_ascii=False)
+    from backend import dev_sandbox
+
+    if not (dev_sandbox.PREVIEWS_ROOT / run_id).is_dir():
+        return json.dumps({"error": "Nothing published yet — call dev_publish_demo first."},
+                          ensure_ascii=False)
+    return json.dumps(review_published_demo(run_id), ensure_ascii=False)
 
 
 def get_browser_live_frame() -> Dict[str, Any]:
@@ -2568,6 +2973,9 @@ def execute_tool(name: str, arguments: Dict[str, Any], chat_id: str = "default")
 
     elif name == "dev_publish_demo":
         return dev_publish_demo(arguments.get("build_dir", ""))
+
+    elif name == "dev_review_demo":
+        return dev_review_demo()
 
     elif name == "browser_read":
         return browser_read(arguments.get("task", ""), arguments.get("start_url"))

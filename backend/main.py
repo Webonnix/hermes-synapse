@@ -1180,6 +1180,69 @@ async def promote_dev_run_revision_api(run_id: str):
     except FileNotFoundError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
+class DevRunFeedbackCreateRequest(BaseModel):
+    comment: str
+    page_path: str = ""
+    selector: str = ""
+    element_text: str = ""
+    viewport: str = ""
+
+@app.post("/api/dev-runs/{run_id}/feedback")
+async def add_dev_run_feedback_api(run_id: str, request: DevRunFeedbackCreateRequest):
+    """Records one click-to-comment remark left on a published demo. The
+    overlay tools.py injects into every published page posts here, same-origin
+    through nginx — see backend/dev_runs.add_feedback."""
+    from backend import dev_runs
+    if not request.comment.strip():
+        raise HTTPException(status_code=400, detail="Comment is required")
+    try:
+        return await asyncio.to_thread(
+            dev_runs.add_feedback, run_id, comment=request.comment,
+            page_path=request.page_path, selector=request.selector,
+            element_text=request.element_text, viewport=request.viewport,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Dev-run not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+@app.get("/api/dev-runs/{run_id}/feedback")
+async def list_dev_run_feedback_api(run_id: str, status: str | None = "open"):
+    """Every comment on this product's whole chain, not just this revision —
+    see dev_runs.list_feedback."""
+    from backend import dev_runs
+    try:
+        return await asyncio.to_thread(dev_runs.list_feedback, run_id, status)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Dev-run not found")
+
+@app.post("/api/dev-runs/feedback/{feedback_id}/dismiss")
+async def dismiss_dev_run_feedback_api(feedback_id: str):
+    from backend import dev_runs
+    try:
+        return await asyncio.to_thread(dev_runs.dismiss_feedback, feedback_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Feedback not found or already resolved")
+
+class DevRunFeedbackApplyRequest(BaseModel):
+    assignee_agent_id: str | None = None
+    start: bool = True
+
+@app.post("/api/dev-runs/{run_id}/feedback/apply")
+async def apply_dev_run_feedback_api(run_id: str, request: DevRunFeedbackApplyRequest):
+    """Folds every open comment on this product into one continuation card —
+    see dev_runs.consume_feedback."""
+    from backend import dev_runs
+    try:
+        return await asyncio.to_thread(
+            dev_runs.consume_feedback, run_id,
+            assignee_agent_id=request.assignee_agent_id, start=request.start,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Dev-run not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
 @app.post("/api/dev-runs/{run_id}/pause")
 async def pause_dev_run_api(run_id: str):
     from backend import dev_runs

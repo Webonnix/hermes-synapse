@@ -66,6 +66,10 @@ TOOL_RISKS = {
     # a write with an externally-visible effect (a new /demo/ URL becomes
     # reachable), so it matches dev_write_file's R2 rather than the R1 reads.
     "dev_publish_demo": "R2",
+    # Renders an already-published snapshot in a local headless browser and
+    # reports what is broken. Touches nothing and reaches nothing — a read of
+    # the run's own output, so R1 alongside dev_list_dir.
+    "dev_review_demo": "R1",
     # Narrow, reversible operations scoped to backend/data/dev-repo (a dedicated
     # Gitea-backed clone) rather than the raw shell — read-only ops match
     # get_system_stats/web_search's R0/R1 tier; the two that actually write

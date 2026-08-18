@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Check, ExternalLink, GitBranch, History, Plus, RefreshCw, Rocket, ShieldAlert, User, X } from 'lucide-react';
-import type { AgentModel, DevRun, DevRunEvent, DevRunRevision, DevRunStatus } from '../types';
+import { Check, ExternalLink, GitBranch, History, MessageSquare, Plus, RefreshCw, Rocket, ShieldAlert, Trash2, User, X } from 'lucide-react';
+import type { AgentModel, DevRun, DevRunEvent, DevRunFeedback, DevRunRevision, DevRunStatus } from '../types';
 
 type Props = {
   language: 'ru' | 'en';
@@ -29,6 +29,9 @@ const COPY = {
     noRevisions: 'У этой задачи ещё нет версий.',
     liveUrlHint: 'Постоянная ссылка на продукт — всегда показывает текущую версию.',
     revisionShort: 'v', waitingFor: 'Ждёт завершения',
+    feedbackTitle: 'Замечания', feedbackEmpty: 'Замечаний нет — кликните 💬 на демо-странице, чтобы оставить.',
+    feedbackApply: 'Собрать в задачу', feedbackDismiss: 'Отклонить',
+    feedbackCount: (n: number) => `${n} ${n === 1 ? 'замечание' : n < 5 ? 'замечания' : 'замечаний'}`,
   },
   en: {
     title: 'Kanban — agent tasks', subtitle: 'Create tasks, assign agents, track progress and demos',
@@ -50,6 +53,9 @@ const COPY = {
     noRevisions: 'This task has no revisions yet.',
     liveUrlHint: 'Permanent product link — always serves the current revision.',
     revisionShort: 'v', waitingFor: 'Waiting for',
+    feedbackTitle: 'Feedback', feedbackEmpty: 'No feedback yet — click 💬 on the demo page to leave one.',
+    feedbackApply: 'Turn into a task', feedbackDismiss: 'Dismiss',
+    feedbackCount: (n: number) => `${n} comment${n === 1 ? '' : 's'}`,
   },
 } as const;
 
@@ -93,6 +99,8 @@ export function KanbanTab({ language, lastEvent, agents }: Props) {
   const [revisionsFor, setRevisionsFor] = useState<DevRun | null>(null);
   const [revisions, setRevisions] = useState<DevRunRevision[]>([]);
   const [revisionsLoading, setRevisionsLoading] = useState(false);
+  const [feedback, setFeedback] = useState<DevRunFeedback[]>([]);
+  const [feedbackLoading, setFeedbackLoading] = useState(false);
 
   const agentName = useCallback((id?: string | null) => {
     if (!id) return copy.unassigned;
@@ -215,6 +223,19 @@ export function KanbanTab({ language, lastEvent, agents }: Props) {
     setRevisionsFor(null);
   };
 
+  const loadFeedback = useCallback(async (run: DevRun) => {
+    setFeedbackLoading(true);
+    try {
+      const response = await fetch(`/api/dev-runs/${run.id}/feedback?status=open`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      setFeedback(await response.json() as DevRunFeedback[]);
+    } catch {
+      setFeedback([]);
+    } finally {
+      setFeedbackLoading(false);
+    }
+  }, []);
+
   const loadRevisions = useCallback(async (run: DevRun) => {
     setRevisionsFor(run);
     setRevisionsLoading(true);
@@ -229,11 +250,26 @@ export function KanbanTab({ language, lastEvent, agents }: Props) {
     } finally {
       setRevisionsLoading(false);
     }
-  }, []);
+    void loadFeedback(run);
+  }, [loadFeedback]);
 
   const promote = async (revision: DevRunRevision) => {
     const ok = await post(`/api/dev-runs/${revision.id}/promote`);
     if (ok && revisionsFor) await loadRevisions(revisionsFor);
+  };
+
+  const dismissFeedback = async (item: DevRunFeedback) => {
+    const ok = await post(`/api/dev-runs/feedback/${item.id}/dismiss`);
+    if (ok && revisionsFor) await loadFeedback(revisionsFor);
+  };
+
+  const applyFeedback = async () => {
+    if (!revisionsFor) return;
+    const ok = await post(`/api/dev-runs/${revisionsFor.id}/feedback/apply`, { start: true });
+    if (ok) {
+      await loadFeedback(revisionsFor);
+      await loadRevisions(revisionsFor);
+    }
   };
 
   const handleDrop = (column: ColumnKey) => {
@@ -420,6 +456,44 @@ export function KanbanTab({ language, lastEvent, agents }: Props) {
                     </button>
                   )}
                 </div>
+              </article>
+            ))}
+          </div>
+
+          <div className="kanban-drawer-feedback">
+            <header className="kanban-drawer-feedback-head">
+              <span><MessageSquare size={13} />{copy.feedbackTitle}</span>
+              {feedback.length > 0 && (
+                <button
+                  type="button"
+                  className="kanban-card-action"
+                  disabled={busy.endsWith('/feedback/apply')}
+                  onClick={() => void applyFeedback()}
+                >
+                  <GitBranch size={12} />{copy.feedbackApply} ({feedback.length})
+                </button>
+              )}
+            </header>
+            {feedbackLoading && <p className="kanban-empty">{copy.loadingRevisions}</p>}
+            {!feedbackLoading && !feedback.length && <p className="kanban-empty">{copy.feedbackEmpty}</p>}
+            {!feedbackLoading && feedback.map(item => (
+              <article key={item.id} className="kanban-feedback-row">
+                <div className="kanban-feedback-head">
+                  <span className="kanban-feedback-where">{item.page_path || '/'}</span>
+                  {item.viewport && <span className="kanban-revision">{item.viewport}</span>}
+                  <span className="kanban-card-time">{shortTime(item.created_at)}</span>
+                  <button
+                    type="button"
+                    className="kanban-feedback-dismiss"
+                    title={copy.feedbackDismiss}
+                    aria-label={copy.feedbackDismiss}
+                    onClick={() => void dismissFeedback(item)}
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+                {item.element_text && <p className="kanban-feedback-target">"{item.element_text}"</p>}
+                <p className="kanban-feedback-comment">{item.comment}</p>
               </article>
             ))}
           </div>

@@ -200,22 +200,28 @@ services:
     networks:
       - hermes-net
 
-  # Browser-automation agent (browser-use driving a headless Chromium session).
-  # Opt-in via `--profile browser` — a Chromium session is CPU/RAM-heavy and
-  # this host already runs dual-GPU Ollama + xtts, so it does not start with a
-  # plain `docker-compose up -d`. Also gated at the application layer by
-  # BROWSER_AGENT_ENABLED (backend/tools.py refuses to call out even if this
-  # container happens to be up). Needs egress to the internet (that's the
-  # point) and a route to `ollama`, so unlike dev-runner it cannot run on an
-  # egress-less network — see browser_runner/server.py's INTERNAL_HOSTS
-  # deny-list + block_ip_addresses for the actual containment control.
+  # Browser sidecar: a headless-Chromium container serving two different
+  # things behind one process.
+  #   /run   — an LLM-driven browser-use Agent (browser_read/browser_task),
+  #            interactive, open internet egress. Still gated at the
+  #            application layer by BROWSER_AGENT_ENABLED (backend/tools.py
+  #            refuses to call out even if this container is up) — set that
+  #            explicitly to opt in, this compose entry alone does not.
+  #   /audit — a deterministic, no-LLM render of a dev-run's own published
+  #            demo (tools.dev_review_demo / dev_runs' verification gate).
+  #            No egress needed and reaches nothing but its own read-only
+  #            /previews mount below, so this half is on by default: a
+  #            site-building dev-run cannot see what it built without it.
+  # No `profiles:` gate — the /audit half is core to the Kanban site-review
+  # loop, not an opt-in extra. If this host's memory ever gets tight, cap it
+  # with `docker compose stop browser-runner` rather than removing it, since
+  # that silently makes every site run finish unreviewed.
   browser-runner:
     build:
       context: .
       dockerfile: browser_runner/Dockerfile
     container_name: hermes-browser-runner
     restart: unless-stopped
-    profiles: ["browser"]
     environment:
       - BROWSER_RUNNER_TOKEN=${BROWSER_RUNNER_TOKEN:-}
       - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
@@ -226,6 +232,12 @@ services:
       - AGENT_MODEL_BROWSER=${AGENT_MODEL_BROWSER:-}
       - BROWSER_AGENT_MAX_STEPS=${BROWSER_AGENT_MAX_STEPS:-25}
       - BROWSER_AGENT_TIMEOUT_SECONDS=${BROWSER_AGENT_TIMEOUT_SECONDS:-240}
+      - AUDIT_TIMEOUT_SECONDS=${AUDIT_TIMEOUT_SECONDS:-120}
+    volumes:
+      # Same directory dev_publish_demo writes into and nginx's /demo/ serves
+      # (see the frontend service below) — read-only, matches server.py's
+      # DEV_PREVIEWS_ROOT default of /previews.
+      - ./backend/data/dev-previews:/previews:ro
     mem_limit: 2g
     cpus: 2
     logging: *default-logging

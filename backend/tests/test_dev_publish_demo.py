@@ -48,10 +48,10 @@ def test_publish_copies_visible_files(publish_env):
     assert recorded == {"demo_url": f"/demo/site-{run_id}/",
                         "demo_snapshot_url": f"/demo/{run_id}/"}
     published = previews_root / run_id
-    assert (published / "index.html").read_text() == "<html>hi</html>"
+    assert (published / "index.html").read_text().startswith("<html>hi</html>")
     assert (published / "assets" / "app.js").exists()
     # The stable URL is a pointer at the snapshot, not a second copy.
-    assert (previews_root / f"site-{run_id}" / "index.html").read_text() == "<html>hi</html>"
+    assert (previews_root / f"site-{run_id}" / "index.html").read_text().startswith("<html>hi</html>")
 
 
 def test_publish_never_ships_git_directory(publish_env):
@@ -119,8 +119,8 @@ def test_publish_replaces_a_prior_publish(publish_env):
     _write(checkout / "index.html", "v2")
     (checkout / "old-page.html").unlink(missing_ok=True)
     tools.dev_publish_demo(".")
-    assert (previews_root / run_id / "index.html").read_text() == "v2"
-    assert (previews_root / f"site-{run_id}" / "index.html").read_text() == "v2"
+    assert (previews_root / run_id / "index.html").read_text().startswith("v2")
+    assert (previews_root / f"site-{run_id}" / "index.html").read_text().startswith("v2")
 
 
 def test_a_continuation_republishes_the_same_stable_url(publish_env, monkeypatch):
@@ -143,8 +143,8 @@ def test_a_continuation_republishes_the_same_stable_url(publish_env, monkeypatch
 
     assert result["demo_url"] == f"/demo/site-{root_id}/"       # unchanged link
     assert result["snapshot_url"] == f"/demo/{child_id}/"
-    assert (previews_root / f"site-{root_id}" / "index.html").read_text() == "v2"
-    assert (previews_root / root_id / "index.html").read_text() == "v1"
+    assert (previews_root / f"site-{root_id}" / "index.html").read_text().startswith("v2")
+    assert (previews_root / root_id / "index.html").read_text().startswith("v1")
 
 
 def test_publish_survives_a_missing_run_row(publish_env, monkeypatch):
@@ -160,4 +160,55 @@ def test_publish_survives_a_missing_run_row(publish_env, monkeypatch):
     monkeypatch.setattr(dev_runs, "update_run", boom)
     result = json.loads(tools.dev_publish_demo("."))
     assert result["files_published"] == 1
-    assert (previews_root / run_id / "index.html").read_text() == "built"
+    assert (previews_root / run_id / "index.html").read_text().startswith("built")
+
+
+# ── Click-to-comment overlay injection ────────────────────────────────────────
+# The overlay is what lets an owner leave feedback on a live element instead of
+# writing a fresh brief; these cover that it lands in what actually gets
+# served, is wired to the right run id, and never breaks a publish that would
+# otherwise have succeeded.
+
+def test_publish_injects_the_review_overlay_before_closing_body(publish_env):
+    run_id, checkout, previews_root, _ = publish_env
+    _write(checkout / "index.html", "<html><body><h1>hi</h1></body></html>")
+    tools.dev_publish_demo(".")
+    published = (previews_root / run_id / "index.html").read_text()
+    assert "hermes-fb-toggle" in published
+    assert published.index("hermes-fb-toggle") < published.index("</body>")
+    assert f'"{run_id}"' in published  # the concrete revision, not the site alias
+
+
+def test_overlay_lands_on_every_html_file_not_just_index(publish_env):
+    run_id, checkout, previews_root, _ = publish_env
+    _write(checkout / "index.html", "<html><body></body></html>")
+    _write(checkout / "pricing.html", "<html><body></body></html>")
+    _write(checkout / "assets" / "app.js", "console.log(1)")
+    tools.dev_publish_demo(".")
+    assert "hermes-fb-toggle" in (previews_root / run_id / "index.html").read_text()
+    assert "hermes-fb-toggle" in (previews_root / run_id / "pricing.html").read_text()
+    assert "hermes-fb-toggle" not in (previews_root / run_id / "assets" / "app.js").read_text()
+
+
+def test_overlay_still_lands_in_a_page_with_no_body_tag(publish_env):
+    """A malformed or fragment-only build must not lose the overlay entirely —
+    appended at the end is still reachable."""
+    run_id, checkout, previews_root, _ = publish_env
+    _write(checkout / "index.html", "<h1>fragment, no html/body wrapper</h1>")
+    tools.dev_publish_demo(".")
+    assert "hermes-fb-toggle" in (previews_root / run_id / "index.html").read_text()
+
+
+def test_a_broken_html_file_does_not_fail_the_publish(publish_env, monkeypatch):
+    """Injection is best-effort: one unreadable file must not cost the owner
+    the whole publish."""
+    run_id, checkout, previews_root, _ = publish_env
+    _write(checkout / "index.html", "<html><body></body></html>")
+
+    def boom(dest, run_id):
+        raise OSError("simulated failure inside injection")
+    monkeypatch.setattr(tools, "_inject_review_overlay", boom)
+
+    result = json.loads(tools.dev_publish_demo("."))
+    assert result["files_published"] == 1
+    assert "error" not in result
