@@ -10,6 +10,13 @@ logger = logging.getLogger("hermes.auth")
 active_sessions: Set[str] = set()
 # Map session ID to username / meta if needed, or just set of active tokens.
 
+# Role attached to a session token, consumed by backend/permissions.py. The
+# dashboard has had exactly one principal (the owner) since it shipped, so an
+# absent entry means owner and nothing about existing logins changes. The map
+# exists so a narrower role can be issued — that is what makes the clients
+# module's RBAC checks testable and, later, real.
+session_roles: Dict[str, str] = {}
+
 # Store details of the active OTP code
 # Structure: {"code": "123456", "expires_at": 1718900000}
 current_otp: Dict[str, Any] = {}
@@ -48,10 +55,11 @@ def verify_otp(code: str) -> bool:
     logger.warning("OTP verification failed: Incorrect code.")
     return False
 
-def create_session() -> str:
+def create_session(role: str = "owner") -> str:
     """Generates a secure session token and adds it to the active sessions set."""
     token = secrets.token_hex(32)
     active_sessions.add(token)
+    session_roles[token] = role
     logger.info(f"New session created. Total active sessions: {len(active_sessions)}")
     return token
 
@@ -59,10 +67,19 @@ def validate_session(token: str) -> bool:
     """Checks if a session token is valid."""
     return token in active_sessions
 
+
+def role_for_session(token: Optional[str]) -> str:
+    """Role bound to a session token; 'owner' for any token issued before roles
+    existed (or issued without one)."""
+    if not token:
+        return "owner"
+    return session_roles.get(token, "owner")
+
 def destroy_session(token: str):
     """Removes a session token from active sessions."""
     if token in active_sessions:
         active_sessions.remove(token)
+        session_roles.pop(token, None)
         logger.info(f"Session destroyed. Total active sessions: {len(active_sessions)}")
 
 # ─── USERNAME / PASSWORD LOGIN ─────────────────────────────────────────────
