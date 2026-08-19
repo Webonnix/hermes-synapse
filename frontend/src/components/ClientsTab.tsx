@@ -86,23 +86,17 @@ function exportCsv(clients: Client[], displayCurrency: string) {
 }
 
 export function ClientsTab({
-  onOpenAgent, pane: controlledPane, onPaneChange,
+  onOpenAgent, pane = 'clients',
 }: {
   onOpenAgent?: (agentId: string) => void;
-  /** Sidebar-controlled pane. Omit to let the component manage its own
-   *  (defaults to 'clients') — used by every test and by any future embed
-   *  that has no sidebar of its own. */
+  /** Which of the four panes to show — set by the sidebar (App.tsx), which
+   *  owns navigation for this section entirely; this component has no
+   *  internal way to change it. Defaults to 'clients' so it stays usable
+   *  standalone (every test renders it with no `pane` prop at all). */
   pane?: Pane;
-  onPaneChange?: (pane: Pane) => void;
 }) {
   const { settings, loading: currencyLoading } = useCurrencySettings();
 
-  const [internalPane, setInternalPane] = useState<Pane>('clients');
-  const pane = controlledPane ?? internalPane;
-  const setPane = useCallback((next: Pane) => {
-    setInternalPane(next);
-    onPaneChange?.(next);
-  }, [onPaneChange]);
   const [filters, setFilters] = useState<ClientFilters>({ ...EMPTY_FILTERS });
   const [page, setPage] = useState(1);
   const [limit, setLimit] = useState(50);

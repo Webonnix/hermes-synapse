@@ -240,7 +240,7 @@ describe('ClientsTab', () => {
     // clients.financials.view can still be routed here via `pane` — the
     // component must say why it's empty, not render nothing.
     stubFetch({ dashboardForbidden: true });
-    render(<ClientsTab pane="invoices" onPaneChange={() => {}} />);
+    render(<ClientsTab pane="invoices" />);
     expect(await screen.findByText('Недостаточно прав для просмотра счетов.')).toBeInTheDocument();
   });
 
@@ -251,7 +251,7 @@ describe('ClientsTab', () => {
     // clients list — this is what keeps it usable outside App.tsx's sidebar.
     expect(await screen.findByText('Midot Project')).toBeInTheDocument();
 
-    rerender(<ClientsTab pane="connections" onPaneChange={() => {}} />);
+    rerender(<ClientsTab pane="connections" />);
     await waitFor(() => {
       expect(screen.queryByText('Midot Project')).not.toBeInTheDocument();
     });

@@ -2682,7 +2682,6 @@ export default function App() {
           <ClientsTab
             onOpenAgent={() => { setActiveTab('agents'); }}
             pane={clientsPane}
-            onPaneChange={setClientsPane}
           />
         )}
 
