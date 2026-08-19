@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Bot, Download, FileText, Plus, Users, Wallet } from 'lucide-react';
+import { Download, Plus, Users } from 'lucide-react';
 import { styles } from '../styles';
 import { api } from './currency/currencyApi';
 import { useCurrencySettings } from './currency/useCurrencySettings';
@@ -19,13 +19,20 @@ import type {
 /**
  * «Клиенты» — the commercial section (§3).
  *
- * Four panes behind one sub-nav: the client book, agent connections, invoices
- * and payments. State that every pane depends on (currency settings, the agent
- * and service pickers) is loaded once here and passed down, so switching tabs
- * does not re-fetch the world.
+ * Four panes: the client book, agent connections, invoices and payments.
+ * Navigation between them lives in the left sidebar (App.tsx), not on this
+ * page — the sidebar owns the "which pane" question and passes it down as
+ * `pane`/`onPaneChange`, the same controlled-with-fallback shape as any
+ * externally-driven tab state. The fallback (internal state, defaulting to
+ * 'clients') keeps this component fully usable standalone — every existing
+ * test renders it with zero nav props and still gets a working clients list.
+ *
+ * State that every pane depends on (currency settings, the agent and service
+ * pickers) is loaded once here and passed down, so switching panes does not
+ * re-fetch the world.
  */
 
-type Pane = 'clients' | 'connections' | 'invoices' | 'payments';
+export type Pane = 'clients' | 'connections' | 'invoices' | 'payments';
 
 /** Turns the filter/sort/page state into the query the backend understands.
  *  Filtering happens server-side across the whole book — see §38. */
@@ -78,10 +85,24 @@ function exportCsv(clients: Client[], displayCurrency: string) {
   URL.revokeObjectURL(url);
 }
 
-export function ClientsTab({ onOpenAgent }: { onOpenAgent?: (agentId: string) => void }) {
+export function ClientsTab({
+  onOpenAgent, pane: controlledPane, onPaneChange,
+}: {
+  onOpenAgent?: (agentId: string) => void;
+  /** Sidebar-controlled pane. Omit to let the component manage its own
+   *  (defaults to 'clients') — used by every test and by any future embed
+   *  that has no sidebar of its own. */
+  pane?: Pane;
+  onPaneChange?: (pane: Pane) => void;
+}) {
   const { settings, loading: currencyLoading } = useCurrencySettings();
 
-  const [pane, setPane] = useState<Pane>('clients');
+  const [internalPane, setInternalPane] = useState<Pane>('clients');
+  const pane = controlledPane ?? internalPane;
+  const setPane = useCallback((next: Pane) => {
+    setInternalPane(next);
+    onPaneChange?.(next);
+  }, [onPaneChange]);
   const [filters, setFilters] = useState<ClientFilters>({ ...EMPTY_FILTERS });
   const [page, setPage] = useState(1);
   const [limit, setLimit] = useState(50);
@@ -359,26 +380,6 @@ export function ClientsTab({ onOpenAgent }: { onOpenAgent?: (agentId: string) =>
         </div>
       </div>
 
-      <nav className="admin-subnav">
-        <button type="button" className={pane === 'clients' ? 'is-active' : ''} onClick={() => setPane('clients')}>
-          <Users size={15} /><span>Клиенты</span>
-          {result && <em className="admin-subnav-count">{result.total}</em>}
-        </button>
-        <button type="button" className={pane === 'connections' ? 'is-active' : ''} onClick={() => setPane('connections')}>
-          <Bot size={15} /><span>Подключения агентов</span>
-        </button>
-        {canSeeFinancials && (
-          <button type="button" className={pane === 'invoices' ? 'is-active' : ''} onClick={() => setPane('invoices')}>
-            <FileText size={15} /><span>Счета</span>
-          </button>
-        )}
-        {canSeeFinancials && (
-          <button type="button" className={pane === 'payments' ? 'is-active' : ''} onClick={() => setPane('payments')}>
-            <Wallet size={15} /><span>Платежи</span>
-          </button>
-        )}
-      </nav>
-
       {toast && <div className="cl-toast" role="status">{toast}</div>}
 
       {pane === 'clients' && (
@@ -452,6 +453,11 @@ export function ClientsTab({ onOpenAgent }: { onOpenAgent?: (agentId: string) =>
         />
       )}
 
+      {pane === 'invoices' && !canSeeFinancials && (
+        <div className="admin-empty-cta">
+          <span>Недостаточно прав для просмотра счетов.</span>
+        </div>
+      )}
       {pane === 'invoices' && canSeeFinancials && (
         <ClientInvoicesPane
           invoices={invoices}
@@ -465,6 +471,11 @@ export function ClientsTab({ onOpenAgent }: { onOpenAgent?: (agentId: string) =>
         />
       )}
 
+      {pane === 'payments' && !canSeeFinancials && (
+        <div className="admin-empty-cta">
+          <span>Недостаточно прав для просмотра платежей.</span>
+        </div>
+      )}
       {pane === 'payments' && canSeeFinancials && (
         <ClientPaymentsPane
           payments={payments}

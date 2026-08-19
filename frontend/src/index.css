@@ -2298,3 +2298,48 @@ main.simple-chat-page { min-width: 0; padding: 0 !important; overflow: hidden !i
   .cl-select-wrap, .cl-select-wrap .form-input { width: 100%; }
   .cl-price-row { grid-template-columns: 1fr; }
 }
+
+/* ── sidebar submenu (Клиенты → Список клиентов/Подключения/Счета/Платежи) ──
+   Nested navigation inside the left rail, distinct from .navBtn (App.tsx
+   inline styles) since it's a new pattern this sidebar didn't have before —
+   every other section navigates via an in-page tab bar instead. Indented and
+   quieter than the parent item so the hierarchy reads at a glance. */
+.sidebar-submenu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 4px 14px;
+  padding-left: 12px;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.sidebar-submenu button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 32px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  font: 600 0.72rem var(--font-sans);
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.sidebar-submenu button:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.sidebar-submenu button.is-active {
+  color: var(--accent-cyan);
+  background: rgba(115, 217, 255, 0.1);
+  border-color: rgba(115, 217, 255, 0.22);
+}
+
+.sidebar-submenu button svg {
+  flex-shrink: 0;
+}

@@ -22,7 +22,12 @@ import {
   MessageCircle,
   Trello,
   Briefcase,
-  Coins
+  Coins,
+  ChevronDown,
+  Users,
+  Bot,
+  FileText,
+  Wallet
 } from 'lucide-react';
 
 import type { AppSettings, ChatMessage, ChatSession, DecisionLog, ActivityLog, SystemConfig, AgentModel, Project, SystemStats } from './types';
@@ -62,7 +67,7 @@ import { VexaCommandCenter } from './components/VexaCommandCenter';
 import type { DashboardRoute } from './components/vexa/vexaDashboardTypes';
 import { DevRunsTab } from './components/DevRunsTab';
 import { KanbanTab } from './components/KanbanTab';
-import { ClientsTab } from './components/ClientsTab';
+import { ClientsTab, type Pane as ClientsPane } from './components/ClientsTab';
 import { CurrencySettingsTab } from './components/CurrencySettingsTab';
 import { AppHeader } from './components/AppHeader';
 import type { DevRunEvent } from './types';
@@ -95,6 +100,9 @@ export default function App() {
     const savedTab = localStorage.getItem('jarvis_active_tab');
     return (savedTab && legacySettingsTabs.includes(savedTab) ? savedTab : 'config') as any;
   });
+  /** Which pane of the Клиенты section is open — set from the sidebar's
+   *  submenu, read back there to highlight the active item. */
+  const [clientsPane, setClientsPane] = useState<ClientsPane>('clients');
   const [vexaTranscriptOpen, setVexaTranscriptOpen] = useState(false);
   /** Which bottom-nav destination is open as a floating window over the Vexa dashboard. */
   const [vexaFloatingPanel, setVexaFloatingPanel] = useState<Exclude<DashboardRoute, 'terminal'> | null>(null);
@@ -2351,10 +2359,57 @@ export default function App() {
             style={navStyle('clients')}
             onClick={() => { setActiveTab('clients'); setSidebarOpen(false); }}
             title={t('navClients')}
+            aria-expanded={activeTab === 'clients'}
           >
             <Briefcase size={18} />
             <span>{t('navClients')}</span>
+            {!isSidebarCollapsed && (
+              <ChevronDown
+                size={14}
+                style={{
+                  marginLeft: 'auto', flexShrink: 0, transition: 'transform 0.15s ease',
+                  transform: activeTab === 'clients' ? 'rotate(0deg)' : 'rotate(-90deg)',
+                }}
+              />
+            )}
           </button>
+
+          {/* Sub-navigation for the Клиенты section — the four panes that
+              used to be an in-page tab bar now live here, so the sidebar is
+              the one place a client's data is found (matches the reference
+              layout instead of a second nav row inside the content area). */}
+          {activeTab === 'clients' && !isSidebarCollapsed && (
+            <div className="sidebar-submenu" role="group" aria-label={t('navClients')}>
+              <button
+                type="button"
+                className={clientsPane === 'clients' ? 'is-active' : ''}
+                onClick={() => { setClientsPane('clients'); setSidebarOpen(false); }}
+              >
+                <Users size={14} /><span>Список клиентов</span>
+              </button>
+              <button
+                type="button"
+                className={clientsPane === 'connections' ? 'is-active' : ''}
+                onClick={() => { setClientsPane('connections'); setSidebarOpen(false); }}
+              >
+                <Bot size={14} /><span>Подключения агентов</span>
+              </button>
+              <button
+                type="button"
+                className={clientsPane === 'invoices' ? 'is-active' : ''}
+                onClick={() => { setClientsPane('invoices'); setSidebarOpen(false); }}
+              >
+                <FileText size={14} /><span>Счета</span>
+              </button>
+              <button
+                type="button"
+                className={clientsPane === 'payments' ? 'is-active' : ''}
+                onClick={() => { setClientsPane('payments'); setSidebarOpen(false); }}
+              >
+                <Wallet size={14} /><span>Платежи</span>
+              </button>
+            </div>
+          )}
 
           <button
             style={navStyle('agents')}
@@ -2624,7 +2679,11 @@ export default function App() {
         )}
 
         {activeTab === 'clients' && (
-          <ClientsTab onOpenAgent={() => { setActiveTab('agents'); }} />
+          <ClientsTab
+            onOpenAgent={() => { setActiveTab('agents'); }}
+            pane={clientsPane}
+            onPaneChange={setClientsPane}
+          />
         )}
 
         {activeTab === 'agents' && (

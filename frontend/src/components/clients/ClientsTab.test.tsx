@@ -233,8 +233,28 @@ describe('ClientsTab', () => {
     expect(await screen.findByText('Midot Project')).toBeInTheDocument();
     expect(screen.queryByText('MRR')).not.toBeInTheDocument();
     expect(screen.queryByText('Стоимость')).not.toBeInTheDocument();
-    expect(screen.queryByText('Счета')).not.toBeInTheDocument();
-    expect(screen.queryByText('Платежи')).not.toBeInTheDocument();
+  });
+
+  it('shows a permission message rather than a blank page when the sidebar forces an invoices/payments pane the role cannot see', async () => {
+    // Pane navigation now lives in the sidebar (App.tsx), so a role without
+    // clients.financials.view can still be routed here via `pane` — the
+    // component must say why it's empty, not render nothing.
+    stubFetch({ dashboardForbidden: true });
+    render(<ClientsTab pane="invoices" onPaneChange={() => {}} />);
+    expect(await screen.findByText('Недостаточно прав для просмотра счетов.')).toBeInTheDocument();
+  });
+
+  it('starts on the clients pane by default and switches when the sidebar drives it', async () => {
+    stubFetch();
+    const { rerender } = render(<ClientsTab />);
+    // No `pane` prop: the component manages its own state, defaulting to the
+    // clients list — this is what keeps it usable outside App.tsx's sidebar.
+    expect(await screen.findByText('Midot Project')).toBeInTheDocument();
+
+    rerender(<ClientsTab pane="connections" onPaneChange={() => {}} />);
+    await waitFor(() => {
+      expect(screen.queryByText('Midot Project')).not.toBeInTheDocument();
+    });
   });
 
   it('shows the total count, not the page size', async () => {
