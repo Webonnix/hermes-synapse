@@ -303,6 +303,14 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(3600)
     asyncio.create_task(_subscription_expiry_task())
 
+    # Recurring client invoices + overdue ageing. Idempotent per (услуга,
+    # период), so an hourly sweep is safe and a missed run (backend restart)
+    # simply catches up on the next tick — see backend/client_billing.py.
+    client_billing_task = None
+    if os.getenv("CLIENT_BILLING_SCHEDULER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
+        from backend import client_billing
+        client_billing_task = asyncio.create_task(client_billing.scheduler_loop())
+
     # Proactively probe every active messenger channel's stored credential so a
     # dead Matrix/Telegram/Discord/Slack/email token surfaces as a visible
     # "Ошибка" in the dashboard within minutes, not whenever someone happens to
@@ -319,6 +327,13 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_channel_health_check_task())
 
     yield
+    if client_billing_task is not None:
+        client_billing_task.cancel()
+        try:
+            await client_billing_task
+        except asyncio.CancelledError:
+            pass
+
     # Shutdown: stop the dev-runs worker first so no new tool calls start.
     if dev_runs_worker_task is not None:
         dev_runs_worker_task.cancel()
@@ -3408,6 +3423,591 @@ async def obsidian_delete_note(path: str):
     delete_document(doc_id)
     
     return {"status": "success", "message": f"Note {path} deleted successfully."}
+
+# ── Commercial clients: клиенты, услуги, подключения агентов, счета, платежи ──
+# The revenue side of the house. Deliberately separate from the agent billing
+# block above: that one answers "what does running this agent cost us", this one
+# answers "what does this client pay us". Both stay queryable side by side so a
+# gross-margin view can subtract one from the other later.
+#
+# Every route here is permission-checked (backend/permissions.py) rather than
+# relying on the session alone, because the clients module is the first part of
+# the dashboard where "logged in" and "allowed to see the money" are different
+# questions.
+
+class CurrencySettingsRequest(BaseModel):
+    displayCurrency: Optional[str] = None
+    rates: Optional[Dict[str, Any]] = None
+
+
+class ClientRequest(BaseModel):
+    # Free-form on purpose: the create drawer submits a client plus optional
+    # nested contact / service / billing / agent in one payload, and
+    # backend/clients.py owns the validation of each nested shape.
+    model_config = {"extra": "allow"}
+
+
+class ClientServiceRequest(BaseModel):
+    model_config = {"extra": "allow"}
+
+
+class AgentConnectionRequest(BaseModel):
+    agentId: str
+    clientServiceId: Optional[str] = None
+    connectionType: str = "INTERNAL"
+    channel: str = ""
+
+
+class ClientInvoiceRequest(BaseModel):
+    clientId: str
+    amount: Any
+    sourceCurrency: str = "USD"
+    clientServiceId: Optional[str] = None
+    invoiceDate: Optional[str] = None
+    dueDate: Optional[str] = None
+    billingPeriod: Optional[str] = None
+    status: str = "PLANNED"
+    comment: str = ""
+
+
+class ClientPaymentRequest(BaseModel):
+    clientId: str
+    amount: Any
+    currency: str = "USD"
+    invoiceId: Optional[str] = None
+    paymentDate: Optional[str] = None
+    paymentMethod: str = ""
+    reference: str = ""
+    comment: str = ""
+
+
+def _client_error(exc: Exception) -> HTTPException:
+    """Maps the modules' domain errors onto status codes. Bad input is 400 and
+    a missing row is 404 — neither is a server fault, and returning 500 for them
+    would bury a typo in a stack trace."""
+    from backend.currency import CurrencyError
+    if isinstance(exc, KeyError):
+        return HTTPException(status_code=404, detail=f"Не найдено: {exc.args[0] if exc.args else ''}")
+    if isinstance(exc, (CurrencyError, ValueError)):
+        return HTTPException(status_code=400, detail=str(exc))
+    logger.exception("Clients API failure")
+    return HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
+
+
+def _strip_financials(payload: Any) -> Any:
+    """Removes every money-bearing field from a client payload (§63).
+
+    Applied server-side, after the query, for roles without
+    `clients.financials.view`: the response must not carry the number at all,
+    since a frontend that merely hides it still shipped it to the browser.
+    """
+    money_keys = {
+        "amount", "primaryAmountUsd", "primaryAmountDisplay", "paymentStatus",
+        "sourceAmount", "normalizedUsdAmount", "displayAmount", "outstandingAmount",
+        "paidAmount", "exchangeRateSnapshot",
+    }
+    if isinstance(payload, list):
+        return [_strip_financials(item) for item in payload]
+    if isinstance(payload, dict):
+        return {
+            key: _strip_financials(value)
+            for key, value in payload.items()
+            if key not in money_keys
+        }
+    return payload
+
+
+# ── currency settings ────────────────────────────────────────────────────────
+
+@app.get("/api/settings/currency")
+async def get_currency_settings_api(request: Request):
+    """Base currency, current rates and the display currency in one payload —
+    the frontend caches this and never fetches a rate per table row."""
+    from backend import currency, permissions
+    permissions.require(request, permissions.SETTINGS_CURRENCY_VIEW)
+    return await asyncio.to_thread(currency.get_settings)
+
+
+@app.patch("/api/settings/currency")
+async def update_currency_settings_api(payload: CurrencySettingsRequest, request: Request):
+    from backend import currency, permissions
+    actor = permissions.require(request, permissions.SETTINGS_CURRENCY_EDIT)
+    try:
+        return await asyncio.to_thread(
+            currency.update_settings,
+            display_currency=payload.displayCurrency,
+            rates=payload.rates,
+            actor_id=actor,
+        )
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.get("/api/settings/currency/history")
+async def currency_rate_history_api(request: Request, currency_code: Optional[str] = None, limit: int = 100):
+    from backend import currency, permissions
+    permissions.require(request, permissions.SETTINGS_CURRENCY_VIEW)
+    try:
+        return await asyncio.to_thread(currency.rate_history, currency_code, limit)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+# ── clients ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/clients/dashboard")
+async def clients_dashboard_api(request: Request, displayCurrency: Optional[str] = None):
+    """KPI row. Returns each figure in both USD and the display currency, so the
+    frontend renders numbers instead of computing them."""
+    from backend import client_billing, permissions
+    role = permissions.require(request, permissions.CLIENTS_VIEW)
+    if not permissions.can_view_financials(role):
+        raise HTTPException(status_code=403, detail="Недостаточно прав: требуется «clients.financials.view»")
+    try:
+        return await asyncio.to_thread(client_billing.dashboard, displayCurrency)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.get("/api/clients")
+async def list_clients_api(
+    request: Request,
+    search: str = "",
+    status: Optional[str] = None,
+    serviceType: Optional[str] = None,
+    serviceId: Optional[str] = None,
+    agentStatus: Optional[str] = None,
+    agentId: Optional[str] = None,
+    billingFrom: Optional[str] = None,
+    billingTo: Optional[str] = None,
+    paymentStatus: Optional[str] = None,
+    responsibleUserId: Optional[str] = None,
+    includeArchived: bool = False,
+    page: int = 1,
+    limit: int = 50,
+    sort: str = "name",
+    order: str = "asc",
+    displayCurrency: Optional[str] = None,
+):
+    from backend import clients, permissions
+    role = permissions.require(request, permissions.CLIENTS_VIEW)
+    try:
+        result = await asyncio.to_thread(
+            clients.list_clients,
+            search=search, status=status, service_type=serviceType, service_id=serviceId,
+            agent_status=agentStatus, agent_id=agentId, billing_from=billingFrom,
+            billing_to=billingTo, payment_status=paymentStatus,
+            responsible_user_id=responsibleUserId, include_archived=includeArchived,
+            page=page, limit=limit, sort=sort, order=order, display_currency=displayCurrency,
+        )
+    except Exception as exc:
+        raise _client_error(exc)
+    if not permissions.can_view_financials(role):
+        result["items"] = _strip_financials(result["items"])
+    return result
+
+
+@app.post("/api/clients")
+async def create_client_api(payload: ClientRequest, request: Request):
+    from backend import clients, permissions
+    actor = permissions.require(request, permissions.CLIENTS_CREATE)
+    try:
+        return await asyncio.to_thread(clients.create_client, payload.model_dump(), actor)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.get("/api/clients/agents")
+async def clients_agent_picker_api(request: Request):
+    """Existing VEXA agents available to link. This module never creates
+    agents — the agent admin remains the only place they are born."""
+    from backend import clients, permissions
+    permissions.require(request, permissions.CLIENTS_AGENTS_VIEW)
+    return await asyncio.to_thread(clients.list_agents_for_picker)
+
+
+@app.get("/api/clients/services")
+async def list_services_api(request: Request):
+    from backend import clients, permissions
+    permissions.require(request, permissions.CLIENTS_VIEW)
+    return await asyncio.to_thread(clients.list_services)
+
+
+@app.post("/api/clients/services")
+async def create_service_api(payload: ClientServiceRequest, request: Request):
+    from backend import clients, permissions
+    permissions.require(request, permissions.CLIENTS_CREATE)
+    data = payload.model_dump()
+    try:
+        return await asyncio.to_thread(
+            clients.create_service, data.get("name", ""), data.get("description", ""),
+            bool(data.get("isActive", True)),
+        )
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.get("/api/clients/{client_id}")
+async def get_client_api(client_id: str, request: Request):
+    from backend import clients, permissions
+    role = permissions.require(request, permissions.CLIENTS_VIEW)
+    client = await asyncio.to_thread(clients.get_client, client_id)
+    if not client:
+        raise HTTPException(status_code=404, detail="Клиент не найден")
+    if not permissions.can_view_financials(role):
+        return _strip_financials(client)
+    return client
+
+
+@app.patch("/api/clients/{client_id}")
+async def update_client_api(client_id: str, payload: ClientRequest, request: Request):
+    from backend import clients, permissions
+    actor = permissions.require(request, permissions.CLIENTS_EDIT)
+    try:
+        return await asyncio.to_thread(clients.update_client, client_id, payload.model_dump(), actor)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.delete("/api/clients/{client_id}")
+async def archive_client_api(client_id: str, request: Request):
+    """Archive, not delete: invoices and payments point at this row and are
+    financial records that must not be orphaned."""
+    from backend import clients, permissions
+    actor = permissions.require(request, permissions.CLIENTS_ARCHIVE)
+    try:
+        return await asyncio.to_thread(clients.archive_client, client_id, actor)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.get("/api/clients/{client_id}/activity")
+async def client_activity_api(client_id: str, request: Request, limit: int = 100):
+    from backend import client_activity, permissions
+    permissions.require(request, permissions.CLIENTS_VIEW)
+    return await asyncio.to_thread(client_activity.list_events, client_id=client_id, limit=limit)
+
+
+@app.get("/api/clients/{client_id}/billing")
+async def client_billing_summary_api(client_id: str, request: Request, displayCurrency: Optional[str] = None):
+    from backend import client_billing, permissions
+    permissions.require(
+        request, permissions.CLIENTS_BILLING_VIEW, permissions.CLIENTS_FINANCIALS_VIEW
+    )
+    try:
+        return await asyncio.to_thread(client_billing.client_billing_summary, client_id, displayCurrency)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+# ── client services ──────────────────────────────────────────────────────────
+
+@app.post("/api/clients/{client_id}/services")
+async def add_client_service_api(client_id: str, payload: ClientServiceRequest, request: Request):
+    from backend import clients, permissions
+    actor = permissions.require(request, permissions.CLIENTS_EDIT, permissions.CLIENTS_BILLING_EDIT)
+    try:
+        return await asyncio.to_thread(clients.add_client_service, client_id, payload.model_dump(), actor)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.patch("/api/client-services/{client_service_id}")
+async def update_client_service_api(client_service_id: str, payload: ClientServiceRequest, request: Request):
+    from backend import clients, permissions
+    actor = permissions.require(request, permissions.CLIENTS_EDIT, permissions.CLIENTS_BILLING_EDIT)
+    try:
+        return await asyncio.to_thread(
+            clients.update_client_service, client_service_id, payload.model_dump(), actor
+        )
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+# ── contacts ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/clients/{client_id}/contacts")
+async def list_contacts_api(client_id: str, request: Request):
+    from backend import clients, permissions
+    permissions.require(request, permissions.CLIENTS_VIEW)
+    return await asyncio.to_thread(clients.list_contacts, client_id)
+
+
+@app.post("/api/clients/{client_id}/contacts")
+async def add_contact_api(client_id: str, payload: ClientServiceRequest, request: Request):
+    from backend import clients, permissions
+    actor = permissions.require(request, permissions.CLIENTS_EDIT)
+    try:
+        return await asyncio.to_thread(clients.add_contact, client_id, payload.model_dump(), actor)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.patch("/api/client-contacts/{contact_id}")
+async def update_contact_api(contact_id: str, payload: ClientServiceRequest, request: Request):
+    from backend import clients, permissions
+    actor = permissions.require(request, permissions.CLIENTS_EDIT)
+    try:
+        return await asyncio.to_thread(clients.update_contact, contact_id, payload.model_dump(), actor)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.delete("/api/client-contacts/{contact_id}")
+async def delete_contact_api(contact_id: str, request: Request):
+    from backend import clients, permissions
+    permissions.require(request, permissions.CLIENTS_EDIT)
+    removed = await asyncio.to_thread(clients.delete_contact, contact_id)
+    return {"status": "ok" if removed else "not_found"}
+
+
+# ── agent connections ────────────────────────────────────────────────────────
+
+@app.get("/api/client-agent-connections")
+async def list_agent_connections_api(
+    request: Request, clientId: Optional[str] = None, agentId: Optional[str] = None,
+    status: Optional[str] = None,
+):
+    from backend import clients, permissions
+    permissions.require(request, permissions.CLIENTS_AGENTS_VIEW)
+    try:
+        return await asyncio.to_thread(
+            clients.list_connections, client_id=clientId, agent_id=agentId, status=status
+        )
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.get("/api/clients/{client_id}/agents")
+async def list_client_agents_api(client_id: str, request: Request):
+    from backend import clients, permissions
+    permissions.require(request, permissions.CLIENTS_AGENTS_VIEW)
+    return await asyncio.to_thread(clients.list_connections, client_id=client_id)
+
+
+@app.post("/api/clients/{client_id}/agents")
+async def connect_client_agent_api(client_id: str, payload: AgentConnectionRequest, request: Request):
+    from backend import clients, permissions
+    actor = permissions.require(request, permissions.CLIENTS_AGENTS_CONNECT)
+    try:
+        return await asyncio.to_thread(
+            clients.connect_agent, client_id, payload.agentId,
+            client_service_id=payload.clientServiceId, connection_type=payload.connectionType,
+            channel=payload.channel, actor_id=actor,
+        )
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.patch("/api/client-agent-connections/{connection_id}")
+async def update_agent_connection_api(connection_id: str, payload: ClientServiceRequest, request: Request):
+    from backend import clients, permissions
+    actor = permissions.require(request, permissions.CLIENTS_AGENTS_CONNECT)
+    try:
+        return await asyncio.to_thread(
+            clients.update_connection, connection_id, payload.model_dump(), actor
+        )
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.delete("/api/client-agent-connections/{connection_id}")
+async def delete_agent_connection_api(connection_id: str, request: Request):
+    from backend import clients, permissions
+    actor = permissions.require(request, permissions.CLIENTS_AGENTS_DISCONNECT)
+    removed = await asyncio.to_thread(clients.delete_connection, connection_id, actor)
+    return {"status": "ok" if removed else "not_found"}
+
+
+@app.post("/api/client-agent-connections/{connection_id}/check")
+async def health_check_agent_connection_api(connection_id: str, request: Request):
+    """Re-probes the linked agent and re-derives the status. The backend stays
+    the only thing that decides whether a connection is healthy (§29)."""
+    from backend import clients, permissions
+    actor = permissions.require(request, permissions.CLIENTS_AGENTS_VIEW)
+    try:
+        return await asyncio.to_thread(clients.health_check, connection_id, actor)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.post("/api/client-agent-connections/{connection_id}/reconnect")
+async def reconnect_agent_connection_api(connection_id: str, request: Request):
+    from backend import clients, permissions
+    actor = permissions.require(request, permissions.CLIENTS_AGENTS_CONNECT)
+    try:
+        return await asyncio.to_thread(clients.reconnect_agent, connection_id, actor)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.post("/api/client-agent-connections/{connection_id}/disconnect")
+async def disconnect_agent_connection_api(connection_id: str, request: Request):
+    from backend import clients, permissions
+    actor = permissions.require(request, permissions.CLIENTS_AGENTS_DISCONNECT)
+    try:
+        return await asyncio.to_thread(clients.disconnect_agent, connection_id, actor)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+# ── client invoices ──────────────────────────────────────────────────────────
+
+@app.get("/api/client-invoices")
+async def list_client_invoices_api(
+    request: Request, clientId: Optional[str] = None, clientServiceId: Optional[str] = None,
+    status: Optional[str] = None, dateFrom: Optional[str] = None, dateTo: Optional[str] = None,
+    limit: int = 200,
+):
+    from backend import client_billing, permissions
+    permissions.require(
+        request, permissions.CLIENTS_INVOICES_VIEW, permissions.CLIENTS_FINANCIALS_VIEW
+    )
+    try:
+        return await asyncio.to_thread(
+            client_billing.list_invoices, client_id=clientId, client_service_id=clientServiceId,
+            status=status, date_from=dateFrom, date_to=dateTo, limit=limit,
+        )
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.post("/api/client-invoices")
+async def create_client_invoice_api(payload: ClientInvoiceRequest, request: Request):
+    from backend import client_billing, permissions
+    actor = permissions.require(request, permissions.CLIENTS_INVOICES_CREATE)
+    try:
+        return await asyncio.to_thread(
+            client_billing.create_invoice,
+            client_id=payload.clientId, amount=payload.amount,
+            source_currency=payload.sourceCurrency, client_service_id=payload.clientServiceId,
+            invoice_date=payload.invoiceDate, due_date=payload.dueDate,
+            billing_period=payload.billingPeriod, status=payload.status,
+            comment=payload.comment, actor_id=actor,
+        )
+    except client_billing.DuplicateInvoice as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.get("/api/client-invoices/{invoice_id}")
+async def get_client_invoice_api(invoice_id: str, request: Request):
+    from backend import client_billing, permissions
+    permissions.require(
+        request, permissions.CLIENTS_INVOICES_VIEW, permissions.CLIENTS_FINANCIALS_VIEW
+    )
+    invoice = await asyncio.to_thread(client_billing.get_invoice, invoice_id)
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Счёт не найден")
+    return invoice
+
+
+@app.patch("/api/client-invoices/{invoice_id}")
+async def update_client_invoice_api(invoice_id: str, payload: ClientServiceRequest, request: Request):
+    from backend import client_billing, permissions
+    actor = permissions.require(request, permissions.CLIENTS_INVOICES_EDIT)
+    try:
+        return await asyncio.to_thread(
+            client_billing.update_invoice, invoice_id, payload.model_dump(), actor
+        )
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.post("/api/client-invoices/{invoice_id}/issue")
+async def issue_client_invoice_api(invoice_id: str, request: Request):
+    from backend import client_billing, permissions
+    actor = permissions.require(request, permissions.CLIENTS_INVOICES_EDIT)
+    try:
+        return await asyncio.to_thread(client_billing.issue_invoice, invoice_id, actor)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.post("/api/client-invoices/{invoice_id}/mark-paid")
+async def mark_client_invoice_paid_api(invoice_id: str, payload: ClientServiceRequest, request: Request):
+    from backend import client_billing, permissions
+    actor = permissions.require(request, permissions.CLIENTS_INVOICES_MARK_PAID)
+    data = payload.model_dump()
+    try:
+        return await asyncio.to_thread(
+            client_billing.mark_invoice_paid, invoice_id,
+            payment_method=data.get("paymentMethod", ""), reference=data.get("reference", ""),
+            comment=data.get("comment", ""), actor_id=actor,
+        )
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.post("/api/client-invoices/{invoice_id}/cancel")
+async def cancel_client_invoice_api(invoice_id: str, request: Request):
+    from backend import client_billing, permissions
+    actor = permissions.require(request, permissions.CLIENTS_INVOICES_EDIT)
+    try:
+        return await asyncio.to_thread(client_billing.cancel_invoice, invoice_id, actor)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+# ── client payments ──────────────────────────────────────────────────────────
+
+@app.get("/api/client-payments")
+async def list_client_payments_api(
+    request: Request, clientId: Optional[str] = None, invoiceId: Optional[str] = None,
+    dateFrom: Optional[str] = None, dateTo: Optional[str] = None, limit: int = 200,
+):
+    from backend import client_billing, permissions
+    permissions.require(
+        request, permissions.CLIENTS_PAYMENTS_VIEW, permissions.CLIENTS_FINANCIALS_VIEW
+    )
+    try:
+        return await asyncio.to_thread(
+            client_billing.list_payments, client_id=clientId, invoice_id=invoiceId,
+            date_from=dateFrom, date_to=dateTo, limit=limit,
+        )
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.post("/api/client-payments")
+async def create_client_payment_api(payload: ClientPaymentRequest, request: Request):
+    from backend import client_billing, permissions
+    actor = permissions.require(request, permissions.CLIENTS_PAYMENTS_CREATE)
+    try:
+        return await asyncio.to_thread(
+            client_billing.create_payment,
+            client_id=payload.clientId, amount=payload.amount,
+            payment_currency=payload.currency, invoice_id=payload.invoiceId,
+            payment_date=payload.paymentDate, payment_method=payload.paymentMethod,
+            reference=payload.reference, comment=payload.comment, actor_id=actor,
+        )
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.get("/api/client-payments/{payment_id}")
+async def get_client_payment_api(payment_id: str, request: Request):
+    from backend import client_billing, permissions
+    permissions.require(
+        request, permissions.CLIENTS_PAYMENTS_VIEW, permissions.CLIENTS_FINANCIALS_VIEW
+    )
+    payment = await asyncio.to_thread(client_billing.get_payment, payment_id)
+    if not payment:
+        raise HTTPException(status_code=404, detail="Платёж не найден")
+    return payment
+
+
+@app.post("/api/client-billing/run-scheduler")
+async def run_client_billing_scheduler_api(request: Request):
+    """Manual trigger for the recurring-invoice sweep. Safe to press twice: the
+    sweep is idempotent per (услуга, период)."""
+    from backend import client_billing, permissions
+    permissions.require(request, permissions.CLIENTS_INVOICES_CREATE)
+    generated = await asyncio.to_thread(client_billing.generate_due_invoices)
+    aged = await asyncio.to_thread(client_billing.sweep_overdue_invoices)
+    return {**generated, "markedOverdue": aged}
+
 
 @app.websocket("/api/ws")
 async def websocket_endpoint(websocket: WebSocket):
