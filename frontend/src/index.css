@@ -1546,3 +1546,755 @@ main.simple-chat-page { min-width: 0; padding: 0 !important; overflow: hidden !i
   .simple-chat-sidebar { display: none; }
   .simple-chat-message, .simple-chat-attachment, .simple-chat-composer { max-width: 100%; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   КЛИЕНТЫ — commercial section (components/ClientsTab.tsx).
+   Built on the existing admin vocabulary (.glass-panel, .admin-table,
+   .admin-status-chip, .admin-subnav) so it reads as the same product; only the
+   genuinely new shapes — the money cell, the agent badge, the create drawer —
+   get their own rules.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.cl-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cl-kpi-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 16px 0 4px;
+}
+
+/* ── toolbar ─────────────────────────────────────────────────────────────── */
+.cl-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 0 12px;
+}
+
+.cl-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1 1 280px;
+  min-width: 220px;
+}
+
+.cl-search svg {
+  position: absolute;
+  left: 11px;
+  color: var(--text-dim);
+  pointer-events: none;
+}
+
+.cl-search .form-input {
+  padding-left: 34px;
+}
+
+.cl-select-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.cl-select-wrap .form-input {
+  appearance: none;
+  padding-right: 30px;
+  min-width: 150px;
+}
+
+.cl-select-wrap > svg {
+  position: absolute;
+  right: 10px;
+  color: var(--text-dim);
+  pointer-events: none;
+}
+
+/* ── table cells ─────────────────────────────────────────────────────────── */
+.cl-table td {
+  vertical-align: top;
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+
+.cl-sort-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+
+.cl-sort-btn:hover,
+.cl-sort-btn.is-active {
+  color: var(--accent-cyan);
+}
+
+.cl-client-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cl-client-cell:hover .cl-client-names strong {
+  color: var(--accent-cyan);
+}
+
+.cl-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  flex-shrink: 0;
+  background: rgba(155, 136, 255, 0.16);
+  color: #d8d1ff;
+  font: 700 0.8rem var(--font-sans);
+}
+
+.cl-avatar.is-large {
+  width: 38px;
+  height: 38px;
+}
+
+.cl-client-names,
+.cl-contact-cell,
+.cl-service-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.cl-client-names strong,
+.cl-contact-cell strong {
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  transition: color 0.15s ease;
+}
+
+.cl-client-names small,
+.cl-contact-cell small,
+.cl-service-cell small {
+  color: var(--text-dim);
+  font-size: 0.7rem;
+}
+
+.cl-service-chip {
+  display: inline-flex;
+  align-self: flex-start;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(155, 136, 255, 0.12);
+  border: 1px solid rgba(155, 136, 255, 0.22);
+  color: #d8d1ff;
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.cl-type-chip {
+  display: inline-flex;
+  padding: 2px 9px;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+
+.cl-type-chip.is-recurring {
+  background: rgba(95, 240, 191, 0.1);
+  border-color: rgba(95, 240, 191, 0.28);
+  color: var(--success);
+}
+
+.cl-type-chip.is-onetime {
+  background: rgba(115, 217, 255, 0.1);
+  border-color: rgba(115, 217, 255, 0.28);
+  color: var(--accent-cyan);
+}
+
+.cl-frequency {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.cl-muted {
+  color: var(--text-dim);
+}
+
+.cl-outstanding {
+  color: var(--warning);
+  font-weight: 600;
+}
+
+.cl-origin-chip {
+  display: block;
+  margin-top: 3px;
+  font-size: 0.62rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* ── the money cell (components/currency/CurrencyAmount.tsx) ──────────────── */
+.cl-amount {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.cl-amount-main {
+  color: var(--text-primary);
+  font-size: 0.84rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* The source amount, kept visible whenever it differs from what is shown —
+   the client agreed to *this* number, and the converted one moves with the
+   rate. */
+.cl-amount-original {
+  color: var(--text-dim);
+  font-size: 0.7rem;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+/* ── agent connection badge ──────────────────────────────────────────────── */
+.cl-agent-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.cl-agent-badge .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-dim);
+}
+
+.cl-agent-badge.is-active .dot { background: var(--success); box-shadow: 0 0 8px rgba(95, 240, 191, 0.6); }
+.cl-agent-badge.is-pending .dot { background: var(--warning); }
+.cl-agent-badge.is-revoked .dot { background: var(--danger); box-shadow: 0 0 8px rgba(255, 93, 143, 0.5); }
+.cl-agent-badge.is-inactive .dot { background: var(--text-dim); }
+
+.cl-agent-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.cl-agent-name {
+  color: var(--text-primary);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.cl-agent-body small {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+}
+
+.cl-agent-badge.is-active .cl-agent-body small { color: var(--success); }
+.cl-agent-badge.is-revoked .cl-agent-body small { color: var(--danger); }
+.cl-agent-badge.is-pending .cl-agent-body small { color: var(--warning); }
+
+.cl-error-note {
+  margin-top: 4px;
+  font-size: 0.7rem;
+  color: var(--danger);
+  max-width: 260px;
+}
+
+.cl-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.cl-status-filter {
+  margin-bottom: 14px;
+}
+
+/* ── pagination ──────────────────────────────────────────────────────────── */
+.cl-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 4px 2px 18px;
+  font-size: 0.78rem;
+}
+
+.cl-pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cl-page-indicator {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+/* ── feedback ────────────────────────────────────────────────────────────── */
+.cl-error-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  margin: 12px 0;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 93, 143, 0.28);
+  background: rgba(255, 93, 143, 0.08);
+  color: #ffb3c6;
+  font-size: 0.82rem;
+}
+
+.cl-toast {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 60;
+  padding: 11px 16px;
+  border-radius: 10px;
+  border: 1px solid rgba(95, 240, 191, 0.3);
+  background: rgba(16, 32, 30, 0.96);
+  color: var(--success);
+  font-size: 0.82rem;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+}
+
+.cl-hint {
+  margin-top: 10px;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  max-width: 720px;
+}
+
+/* Skeletons: an empty shape while loading, never a "0" that reads as real
+   data the moment before it is replaced (§73). */
+.cl-skeleton {
+  border-radius: 8px;
+  background: linear-gradient(90deg, rgba(255,255,255,.04) 25%, rgba(255,255,255,.08) 37%, rgba(255,255,255,.04) 63%);
+  background-size: 400% 100%;
+  animation: cl-shimmer 1.4s ease infinite;
+}
+
+@keyframes cl-shimmer {
+  0% { background-position: 100% 50%; }
+  100% { background-position: 0 50%; }
+}
+
+.cl-skeleton-row { height: 34px; margin-bottom: 8px; }
+.cl-skeleton-line { height: 12px; width: 100%; }
+.cl-skeleton-line.is-short { width: 55%; }
+.cl-skeleton-icon { width: 34px; height: 34px; border-radius: 9px; flex-shrink: 0; }
+.cl-skeleton-card { height: 150px; }
+
+.cl-skeleton-grid {
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cl-skeleton { animation: none; }
+}
+
+/* ── create/edit drawer (§51) ────────────────────────────────────────────── */
+.cl-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  background: rgba(4, 5, 12, 0.6);
+  backdrop-filter: blur(2px);
+}
+
+.cl-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 46;
+  display: flex;
+  flex-direction: column;
+  width: min(460px, 96vw);
+  height: 100%;
+  border-left: 1px solid rgba(155, 136, 255, 0.22);
+  background: rgba(10, 11, 20, 0.98);
+  backdrop-filter: blur(8px);
+  box-shadow: -18px 0 46px rgba(0, 0, 0, 0.5);
+}
+
+.cl-drawer > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+  font: 700 0.86rem var(--font-sans);
+}
+
+.cl-drawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 16px 16px;
+}
+
+.cl-drawer-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.cl-drawer-section:last-of-type {
+  border-bottom: 0;
+}
+
+.cl-drawer-section h4 {
+  margin: 0;
+  color: var(--accent-cyan);
+  font: 700 0.68rem var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.cl-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.cl-field-label {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+
+.cl-price-row {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: 10px;
+}
+
+.cl-drawer-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 13px 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* ── settings: валюта и курсы (§58) ──────────────────────────────────────── */
+.cl-settings-block {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+  max-width: 860px;
+}
+
+.cl-settings-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cl-settings-head h3 {
+  margin: 0;
+  flex: 1;
+  color: var(--text-primary);
+  font: 700 0.88rem var(--font-sans);
+}
+
+.cl-settings-head svg {
+  color: var(--accent-violet);
+}
+
+.cl-link-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-cyan);
+  font: 600 0.76rem var(--font-sans);
+  cursor: pointer;
+}
+
+.cl-link-btn:hover {
+  text-decoration: underline;
+}
+
+.cl-base-currency {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.cl-base-currency strong {
+  font: 700 1.4rem var(--font-mono);
+  color: var(--accent-cyan);
+  text-shadow: var(--glow-cyan);
+}
+
+.cl-base-currency span {
+  color: var(--text-dim);
+  font-size: 0.8rem;
+}
+
+.cl-rate-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.cl-rate-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.cl-rate-card.is-invalid {
+  border-color: rgba(255, 93, 143, 0.4);
+}
+
+.cl-rate-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cl-rate-head strong {
+  color: var(--text-primary);
+  font-size: 0.82rem;
+}
+
+.cl-rate-code {
+  font: 700 0.68rem var(--font-mono);
+  color: var(--text-dim);
+}
+
+.cl-rate-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.cl-rate-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  text-align: right;
+}
+
+.cl-rate-error {
+  color: var(--danger);
+  font-size: 0.72rem;
+}
+
+.cl-display-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* ── client card ─────────────────────────────────────────────────────────── */
+.cl-details {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+
+.cl-details-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.cl-details-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+
+.cl-details-title h3 {
+  margin: 0;
+  color: var(--text-primary);
+  font: 700 1.05rem var(--font-sans);
+}
+
+.cl-details-title small {
+  color: var(--text-dim);
+  font-size: 0.76rem;
+}
+
+.cl-info-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 7px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 0.8rem;
+}
+
+.cl-info-row:last-child {
+  border-bottom: 0;
+}
+
+.cl-info-row > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+}
+
+.cl-info-row > strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-primary);
+  font-weight: 600;
+  text-align: right;
+}
+
+.cl-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 14px;
+}
+
+.cl-service-card,
+.cl-agent-card,
+.cl-contact-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+}
+
+.cl-service-card > header,
+.cl-agent-card > header,
+.cl-contact-card > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.cl-service-card > header strong,
+.cl-agent-card > header strong,
+.cl-contact-card > header strong {
+  color: var(--text-primary);
+  font-size: 0.88rem;
+}
+
+.cl-service-price {
+  font-size: 1.05rem;
+  margin-bottom: 4px;
+}
+
+.cl-service-agent {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.cl-agent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.cl-billing-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 14px;
+}
+
+.cl-billing-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.cl-billing-metric > span {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+
+.cl-billing-metric > strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-primary);
+  font-size: 1.16rem;
+  font-weight: 700;
+}
+
+.cl-billing-metric > small {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+}
+
+.cl-pane-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 10px;
+}
+
+@media (max-width: 900px) {
+  .cl-toolbar { flex-direction: column; align-items: stretch; }
+  .cl-select-wrap, .cl-select-wrap .form-input { width: 100%; }
+  .cl-price-row { grid-template-columns: 1fr; }
+}

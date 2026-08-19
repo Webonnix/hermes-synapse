@@ -20,7 +20,9 @@ import {
   AudioWaveform,
   KeyRound,
   MessageCircle,
-  Trello
+  Trello,
+  Briefcase,
+  Coins
 } from 'lucide-react';
 
 import type { AppSettings, ChatMessage, ChatSession, DecisionLog, ActivityLog, SystemConfig, AgentModel, Project, SystemStats } from './types';
@@ -60,6 +62,8 @@ import { VexaCommandCenter } from './components/VexaCommandCenter';
 import type { DashboardRoute } from './components/vexa/vexaDashboardTypes';
 import { DevRunsTab } from './components/DevRunsTab';
 import { KanbanTab } from './components/KanbanTab';
+import { ClientsTab } from './components/ClientsTab';
+import { CurrencySettingsTab } from './components/CurrencySettingsTab';
 import { AppHeader } from './components/AppHeader';
 import type { DevRunEvent } from './types';
 
@@ -79,15 +83,15 @@ const TTS_PENDING_TIMEOUT_MS = 25000;
 
 export default function App() {
   const legacySettingsTabs = ['config', 'logs', 'activity', 'memory', 'tools', 'subagents', 'obsidian', 'mcp'];
-  const [activeTab, setActiveTab] = useState<'vexa' | 'processes' | 'devruns' | 'kanban' | 'agents' | 'schedule' | 'settings' | 'network' | 'metrics'>(() => {
+  const [activeTab, setActiveTab] = useState<'vexa' | 'processes' | 'devruns' | 'kanban' | 'clients' | 'agents' | 'schedule' | 'settings' | 'network' | 'metrics'>(() => {
     const saved = localStorage.getItem('jarvis_active_tab');
     if (saved === 'chat') return 'vexa';
     if (saved === 'settings' || (saved && legacySettingsTabs.includes(saved))) return 'settings';
     return (saved as any) || 'vexa';
   });
-  const [settingsSection, setSettingsSection] = useState<'config' | 'tools' | 'subagents' | 'mcp' | 'obsidian' | 'memory' | 'logs' | 'activity' | 'keys' | 'channels'>(() => {
+  const [settingsSection, setSettingsSection] = useState<'config' | 'currency' | 'tools' | 'subagents' | 'mcp' | 'obsidian' | 'memory' | 'logs' | 'activity' | 'keys' | 'channels'>(() => {
     const savedSection = localStorage.getItem('jarvis_settings_section');
-    if (savedSection && [...legacySettingsTabs, 'keys', 'channels'].includes(savedSection)) return savedSection as any;
+    if (savedSection && [...legacySettingsTabs, 'keys', 'channels', 'currency'].includes(savedSection)) return savedSection as any;
     const savedTab = localStorage.getItem('jarvis_active_tab');
     return (savedTab && legacySettingsTabs.includes(savedTab) ? savedTab : 'config') as any;
   });
@@ -2344,6 +2348,15 @@ export default function App() {
           </button>
 
           <button
+            style={navStyle('clients')}
+            onClick={() => { setActiveTab('clients'); setSidebarOpen(false); }}
+            title={t('navClients')}
+          >
+            <Briefcase size={18} />
+            <span>{t('navClients')}</span>
+          </button>
+
+          <button
             style={navStyle('agents')}
             onClick={() => { setActiveTab('agents'); setSidebarOpen(false); }}
             title={t('navAgents')}
@@ -2610,6 +2623,10 @@ export default function App() {
           <KanbanTab language={language} lastEvent={lastDevRunEvent} agents={subagents} />
         )}
 
+        {activeTab === 'clients' && (
+          <ClientsTab onOpenAgent={() => { setActiveTab('agents'); }} />
+        )}
+
         {activeTab === 'agents' && (
           <AgentsAdminTab
             agents={subagents}
@@ -2646,6 +2663,10 @@ export default function App() {
               <button type="button" className={settingsSection === 'config' ? 'is-active' : ''} onClick={() => setSettingsSection('config')}>
                 <Settings size={15} />
                 <span>{t('navConfig')}</span>
+              </button>
+              <button type="button" className={settingsSection === 'currency' ? 'is-active' : ''} onClick={() => setSettingsSection('currency')}>
+                <Coins size={15} />
+                <span>{t('navCurrency')}</span>
               </button>
               <button type="button" className={settingsSection === 'keys' ? 'is-active' : ''} onClick={() => setSettingsSection('keys')}>
                 <KeyRound size={15} />
@@ -2711,6 +2732,8 @@ export default function App() {
                 }}
               />
             )}
+
+            {settingsSection === 'currency' && <CurrencySettingsTab />}
 
             {settingsSection === 'keys' && <ApiKeysTab />}
 
