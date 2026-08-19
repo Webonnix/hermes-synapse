@@ -53,6 +53,9 @@ DEV_RUN_TOOLS = (
 # truncated real multi-page specs mid-sentence, and the executor never knew
 # the rest existed.
 GOAL_MAX_CHARS = int(os.getenv("DEV_RUNS_GOAL_MAX_CHARS", "60000"))
+# The card label. Long enough for a real product name, short enough that the
+# board stays scannable — the brief lives in `goal`.
+TITLE_MAX_CHARS = 120
 
 # 0 = unlimited (see _check_gates / _crossed_80_percent, both already treat a
 # falsy/<=0 budget as "no cap"). Owners who want a hard stop still set an
@@ -231,6 +234,7 @@ def create_run(
     start: bool = True,
     parent_run_id: Optional[str] = None,
     discipline: Optional[str] = None,
+    title: str = "",
 ) -> Dict[str, Any]:
     """Creates a Kanban card. With `parent_run_id` it is a *continuation*: the
     next revision of the product that run built, sharing its chain root, its
@@ -245,6 +249,7 @@ def create_run(
     goal = (goal or "").strip()
     if not goal:
         raise ValueError("Dev-run goal must not be empty")
+    title = (title or "").strip()[:TITLE_MAX_CHARS]
     parent = get_run(parent_run_id) if parent_run_id else None
     if parent_run_id and not parent:
         raise KeyError(parent_run_id)
@@ -268,6 +273,8 @@ def create_run(
         # Same product, same kind of work — a "make the header sticky" follow-up
         # must not be re-classified off the strength of its own short wording.
         discipline = discipline or parent["discipline"]
+        # Revisions of one product share its name unless renamed deliberately.
+        title = title or (parent["title"] or "")
     discipline = discipline or disciplines_module.detect_discipline(goal)
     if not assignee_agent_id:
         assignee_agent_id = auto_assign_agent(discipline)
@@ -290,11 +297,11 @@ def create_run(
             """INSERT INTO dev_runs
                (id, goal, status, trace_id, iter_used, iter_budget, cost_used,
                 cost_budget, wall_deadline, created_at, updated_at, assignee_agent_id,
-                parent_run_id, root_run_id, revision, discipline)
-               VALUES (?, ?, ?, ?, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                parent_run_id, root_run_id, revision, discipline, title)
+               VALUES (?, ?, ?, ?, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (run_id, goal[:GOAL_MAX_CHARS], initial_status, trace_id, max(0, int(iter_budget)),
              cost_budget, deadline, now, now, assignee_agent_id,
-             parent["id"] if parent else None, root_run_id, revision, discipline),
+             parent["id"] if parent else None, root_run_id, revision, discipline, title),
         )
     return get_run(run_id)  # type: ignore[return-value]
 
@@ -507,8 +514,27 @@ def list_runs(limit: int = 50) -> List[Dict[str, Any]]:
 _UPDATABLE_FIELDS = {
     "status", "plan_id", "iter_used", "cost_used", "checkpoint_step", "status_reason",
     "demo_url", "demo_snapshot_url", "sandbox_container",
-    "discipline", "progress_digest", "digest_through_seq",
+    "discipline", "progress_digest", "digest_through_seq", "title",
 }
+
+
+def rename_chain(run_id: str, title: str) -> int:
+    """Renames the whole product, not one card.
+
+    A name describes the product, and every revision in a chain IS that
+    product — renaming only the card you happened to click would leave the
+    board showing two names for one thing."""
+    run = get_run(run_id)
+    if not run:
+        raise KeyError(run_id)
+    title = (title or "").strip()[:TITLE_MAX_CHARS]
+    root_run_id = run["root_run_id"] or run["id"]
+    with _connect() as conn:
+        cursor = conn.execute(
+            "UPDATE dev_runs SET title = ?, updated_at = ? WHERE root_run_id = ? OR id = ?",
+            (title, _now(), root_run_id, root_run_id),
+        )
+    return cursor.rowcount
 
 
 def update_run(run_id: str, **fields: Any) -> Dict[str, Any]:
@@ -1110,6 +1136,41 @@ async def _compact_history(run: Dict[str, Any], *, force: bool = False) -> Dict[
     return update_run(run["id"], progress_digest=digest, digest_through_seq=through)
 
 
+def _completion_nudge(run: Dict[str, Any], steps: List[Dict[str, Any]]) -> str:
+    """Tells a run that has demonstrably finished that it has finished.
+
+    A real run (2026-08-19) published a working site, got a passing
+    dev_review_demo, and then re-read the same files for another ~150 steps
+    without ever emitting DONE. Nothing in its context distinguished "I have
+    already succeeded" from "I have not started", because the ledger reads the
+    same either way. This makes that state explicit and unmissable."""
+    published_at = None
+    review_passed_at = None
+    for step in steps:
+        if step["tool"] == "dev_publish_demo" and step["status"] == "done":
+            published_at = step["seq"]
+        elif step["tool"] == "dev_review_demo" and step["status"] == "done":
+            if '"verdict": "pass"' in (step.get("result") or step["summary"]):
+                review_passed_at = step["seq"]
+    if not (published_at and review_passed_at):
+        return ""
+    changed_since = any(
+        step["seq"] > review_passed_at and step["status"] == "done" and step["tool"] in WRITE_TOOLS
+        for step in steps
+    )
+    if changed_since:
+        return ""
+    return (
+        f"STOP AND READ: you already published this site (step {published_at}) and "
+        f"dev_review_demo already returned a PASSING verdict on it (step {review_passed_at}). "
+        "Nothing has been modified since. The work is finished — reply now with plain text "
+        "starting with 'DONE:' and a one-paragraph summary. Do NOT re-read files you have "
+        "already read, do not re-run the build, and do not re-publish: none of that can "
+        "improve an already-passing result, and repeating it is the single way this run "
+        "can still fail."
+    )
+
+
 def _build_messages(run: Dict[str, Any]) -> List[Dict[str, Any]]:
     from backend import disciplines as disciplines_module
 
@@ -1145,6 +1206,9 @@ def _build_messages(run: Dict[str, Any]) -> List[Dict[str, Any]]:
         + f"Iterations used: {budget}.\n"
         "Decide the single next action and call the corresponding tool, or finish "
         "with 'DONE:'/'BLOCKED:' as instructed."
+        # Last, so it is the final thing read before the model answers — this
+        # is the one instruction that must not get lost mid-context.
+        + (f"\n\n{nudge}" if (nudge := _completion_nudge(run, get_steps(run["id"]))) else "")
     )
     return [
         {"role": "system", "content": EXECUTOR_SYSTEM_PROMPT},
@@ -1174,10 +1238,17 @@ def _duplicate_count(steps: List[Dict[str, Any]], fingerprint: str) -> int:
 
     Counting every occurrence in a window would punish legitimate rhythms like
     write → test → write → test, where the identical dev_run_tests call is
-    exactly the right next action. So the count stops at the first *successful*
-    different action: that one changed the world, and repeating an earlier call
-    can now genuinely return something new. A run of identical calls with only
-    failures in between still counts as a loop.
+    exactly the right next action. So the count stops at an intervening action
+    that actually changed the world, because repeating an earlier call can now
+    genuinely return something new.
+
+    "Changed the world" means a SUCCESSFUL WRITE, not merely a successful call.
+    Any successful step used to reset this, which a real run (2026-08-19)
+    exploited into 238 identical failing `npm run build` calls and 417
+    identical reads of one file: the model alternated read (succeeds, resets
+    the counter) with build (fails), so the breaker never once fired across
+    1438 iterations. Reading a file it has already read cannot make a failing
+    command start working, so it must not buy another attempt.
     """
     if not fingerprint:
         return 0
@@ -1185,9 +1256,26 @@ def _duplicate_count(steps: List[Dict[str, Any]], fingerprint: str) -> int:
     for step in reversed(steps[-DUPLICATE_WINDOW:]):
         if step.get("fingerprint") == fingerprint:
             count += 1
-        elif step.get("fingerprint") and step["status"] == "done":
+        elif step["status"] == "done" and step["tool"] in WRITE_TOOLS:
             break
     return count
+
+
+# ── Stagnation ───────────────────────────────────────────────────────────────
+# The duplicate breaker above only catches an action repeated *verbatim*. A run
+# can still spin forever by rotating between several actions that each change
+# nothing — read A, read B, git_status, read A… The only honest test of whether
+# a coding run is progressing is whether it has changed anything lately.
+STAGNATION_WINDOW = int(os.getenv("DEV_RUNS_STAGNATION_WINDOW", "40"))
+
+
+def _steps_since_progress(steps: List[Dict[str, Any]]) -> int:
+    """Steps executed since the run last actually changed something."""
+    progress_tools = WRITE_TOOLS | {"dev_publish_demo", "git_commit"}
+    for index, step in enumerate(reversed(steps)):
+        if step["status"] == "done" and step["tool"] in progress_tools:
+            return index
+    return len(steps)
 
 
 def _consecutive_failures(steps: List[Dict[str, Any]]) -> int:
@@ -1212,6 +1300,11 @@ def _check_gates(run: Dict[str, Any]) -> Optional[str]:
         return f"Iteration budget exhausted ({run['iter_used']}/{run['iter_budget']})"
     if run["cost_budget"] is not None and run["cost_used"] >= run["cost_budget"]:
         return f"Cost budget exhausted (${run['cost_used']:.4f}/${run['cost_budget']:.4f})"
+    stalled = _steps_since_progress(get_steps(run["id"]))
+    if stalled >= STAGNATION_WINDOW:
+        return (f"No progress in {stalled} steps — nothing written, built or published in that "
+                "time. The run is looping rather than working: review the goal, then resume "
+                "or split it into something smaller.")
     if run["wall_deadline"]:
         try:
             deadline = datetime.fromisoformat(run["wall_deadline"])

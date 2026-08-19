@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Check, ExternalLink, GitBranch, History, MessageSquare, Plus, RefreshCw, Rocket, ShieldAlert, Trash2, User, X } from 'lucide-react';
+import { Check, ExternalLink, GitBranch, History, MessageSquare, Pencil, Plus, RefreshCw, Rocket, ShieldAlert, Trash2, User, X } from 'lucide-react';
 import type { AgentModel, DevRun, DevRunEvent, DevRunFeedback, DevRunRevision, DevRunStatus, Discipline } from '../types';
 
 type Props = {
@@ -35,6 +35,8 @@ const COPY = {
     discipline: 'Отрасль', disciplineAuto: 'Определить автоматически',
     goalLabel: 'Техническое задание', refineLabel: 'Что доработать',
     goalHint: 'Можно вставить большое ТЗ целиком — Enter переносит строку, задачу запускают кнопки ниже.',
+    titleLabel: 'Название проекта', titlePlaceholder: 'Название проекта, например: LUMEN (необязательно)',
+    rename: 'Переименовать', renamePrompt: 'Название проекта:',
   },
   en: {
     title: 'Kanban — agent tasks', subtitle: 'Create tasks, assign agents, track progress and demos',
@@ -62,6 +64,8 @@ const COPY = {
     discipline: 'Field', disciplineAuto: 'Detect automatically',
     goalLabel: 'Brief', refineLabel: 'What to refine',
     goalHint: 'Paste a full brief here — Enter adds a line, the buttons below start the task.',
+    titleLabel: 'Project name', titlePlaceholder: 'Project name, e.g. LUMEN (optional)',
+    rename: 'Rename', renamePrompt: 'Project name:',
   },
 } as const;
 
@@ -99,6 +103,7 @@ export function KanbanTab({ language, lastEvent, agents }: Props) {
   const [busy, setBusy] = useState('');
   const [showNew, setShowNew] = useState(false);
   const [goal, setGoal] = useState('');
+  const [title, setTitle] = useState('');
   const [assignee, setAssignee] = useState('');
   const [dragId, setDragId] = useState('');
   const [parent, setParent] = useState<DevRun | null>(null);
@@ -220,6 +225,7 @@ export function KanbanTab({ language, lastEvent, agents }: Props) {
           start,
           parent_run_id: parent?.id || null,
           discipline: discipline || null,
+          title: title.trim(),
         }),
       });
       if (!response.ok) {
@@ -227,6 +233,7 @@ export function KanbanTab({ language, lastEvent, agents }: Props) {
         throw new Error(payload.detail || `HTTP ${response.status}`);
       }
       setGoal('');
+      setTitle('');
       setAssignee('');
       setDiscipline('');
       setParent(null);
@@ -239,9 +246,17 @@ export function KanbanTab({ language, lastEvent, agents }: Props) {
     }
   };
 
+  const rename = async (run: DevRun) => {
+    const next = window.prompt(copy.renamePrompt, run.title || '');
+    if (next === null) return;                       // cancelled, not cleared
+    await post(`/api/dev-runs/${run.id}/rename`, { title: next.trim() });
+  };
+
   const startRefine = (run: DevRun) => {
     setParent(run);
     setGoal('');
+    // Inherited server-side too; prefilling keeps the form honest about it.
+    setTitle(run.title || '');
     // A follow-up is the same kind of work as what it continues; the backend
     // inherits it too, this just keeps the picker honest about what will happen.
     setDiscipline(run.discipline || '');
@@ -352,6 +367,14 @@ export function KanbanTab({ language, lastEvent, agents }: Props) {
               requirements and acceptance criteria, and a one-line field made
               people compress that into a sentence the executor then had to
               guess the rest of. */}
+          <input
+            className="kanban-title-input"
+            value={title}
+            onChange={event => setTitle(event.target.value)}
+            placeholder={copy.titlePlaceholder}
+            aria-label={copy.titleLabel}
+            maxLength={120}
+          />
           <textarea
             className="kanban-goal-input"
             value={goal}
@@ -420,7 +443,12 @@ export function KanbanTab({ language, lastEvent, agents }: Props) {
                     onDragStart={() => setDragId(run.id)}
                     onDragEnd={() => setDragId('')}
                   >
-                    <p className="kanban-card-goal">{run.goal}</p>
+                    {run.title && <p className="kanban-card-title">{run.title}</p>}
+                    {/* The goal is a full brief now, so it is the subtitle when
+                        the product has a name and the label when it does not. */}
+                    <p className={run.title ? 'kanban-card-goal is-subtitle' : 'kanban-card-goal'}>
+                      {run.goal}
+                    </p>
                     <div className="kanban-card-meta">
                       <span className="kanban-card-assignee"><User size={11} />{agentName(run.assignee_agent_id)}</span>
                       <span className="kanban-card-time">{shortTime(run.created_at)}</span>
@@ -458,6 +486,15 @@ export function KanbanTab({ language, lastEvent, agents }: Props) {
                           <History size={12} />{copy.versions}
                         </button>
                       )}
+                      <button
+                        type="button"
+                        className="kanban-card-action"
+                        title={copy.rename}
+                        aria-label={copy.rename}
+                        onClick={() => void rename(run)}
+                      >
+                        <Pencil size={12} />
+                      </button>
                     </div>
                   </article>
                 );

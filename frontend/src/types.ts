@@ -729,6 +729,8 @@ export interface DevRun {
   revision?: number;
   /** backend/disciplines.py id — what kind of work this card is. */
   discipline?: string | null;
+  /** Product name shown on the card; empty means fall back to the goal text. */
+  title?: string;
   steps?: DevRunStep[];
 }
 

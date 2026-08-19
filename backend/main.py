@@ -1123,6 +1123,9 @@ class DevRunCreateRequest(BaseModel):
     parent_run_id: str | None = None
     # backend/disciplines.py id, or None to infer it from the goal text.
     discipline: str | None = None
+    # Human-facing product name for the board. Empty = fall back to the first
+    # line of the goal, so naming stays optional.
+    title: str = ""
 
 @app.post("/api/dev-runs")
 async def create_dev_run_api(request: DevRunCreateRequest):
@@ -1130,7 +1133,8 @@ async def create_dev_run_api(request: DevRunCreateRequest):
     if not request.goal.strip():
         raise HTTPException(status_code=400, detail="Goal is required")
     kwargs: dict = {"assignee_agent_id": request.assignee_agent_id, "start": request.start,
-                    "parent_run_id": request.parent_run_id, "discipline": request.discipline}
+                    "parent_run_id": request.parent_run_id, "discipline": request.discipline,
+                    "title": request.title}
     if request.iter_budget is not None:
         kwargs["iter_budget"] = request.iter_budget
     if request.cost_budget is not None:
@@ -1141,6 +1145,20 @@ async def create_dev_run_api(request: DevRunCreateRequest):
         return await asyncio.to_thread(dev_runs.create_run, request.goal, **kwargs)
     except KeyError:
         raise HTTPException(status_code=404, detail="Parent dev-run not found")
+
+class DevRunRenameRequest(BaseModel):
+    title: str
+
+@app.post("/api/dev-runs/{run_id}/rename")
+async def rename_dev_run_api(run_id: str, request: DevRunRenameRequest):
+    """Renames the product — every revision in the chain, not just this card
+    (see dev_runs.rename_chain)."""
+    from backend import dev_runs
+    try:
+        renamed = await asyncio.to_thread(dev_runs.rename_chain, run_id, request.title)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Dev-run not found")
+    return {"status": "renamed", "cards_updated": renamed}
 
 @app.get("/api/disciplines")
 async def list_disciplines_api(language: str = "ru"):

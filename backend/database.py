@@ -807,6 +807,12 @@ def _init_sqlite_schema():
         # Highest step seq already folded into progress_digest, so compaction
         # only ever summarizes what is new.
         ("digest_through_seq", "INTEGER NOT NULL DEFAULT 0"),
+        # Human-facing project name. The goal is now a full brief (up to
+        # GOAL_MAX_CHARS), which is unusable as a card label and unusable as a
+        # way to tell two revisions of different products apart on the board.
+        # Empty string = never named; the board falls back to the goal's first
+        # line, so an unnamed card still reads sensibly.
+        ("title", "TEXT NOT NULL DEFAULT ''"),
     ]:
         try:
             cursor.execute(f"ALTER TABLE dev_runs ADD COLUMN {col} {definition}")

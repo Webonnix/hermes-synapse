@@ -1487,6 +1487,9 @@ async def test_an_empty_model_reply_compacts_and_retries_instead_of_pausing(runs
     run = dev_runs.create_run("long task")
     for i in range(40):
         dev_runs.add_step(run["id"], "act", "dev_read_file", f"read {i}")
+    # Real work in the recent window, so this exercises compaction rather than
+    # tripping the stagnation breaker (which 40 pure reads legitimately would).
+    dev_runs.add_step(run["id"], "act", "dev_write_file", "wrote the component")
 
     result = await dev_runs._iterate(dev_runs.get_run(run["id"]))
     assert result["status"] != "paused"           # kept going on its own
@@ -1518,3 +1521,144 @@ def test_a_long_brief_is_stored_whole(runs_db):
     # create_run strips surrounding whitespace; nothing in the middle is lost.
     assert run["goal"] == brief.strip()
     assert run["goal"].endswith("Requirement line with real detail.")
+
+
+# ── Loop breakers ─────────────────────────────────────────────────────────────
+# All three regressions below were observed in one real run (2026-08-19,
+# run-43264996d4ea): 1438 iterations, 238 identical failing builds, 417
+# identical reads of one file, a passing review at step 1577 — and zero
+# attempts to finish. Each breaker here closes one of the holes that allowed it.
+
+def test_a_successful_read_does_not_buy_another_failing_attempt(runs_db):
+    """The exact hole that let a run repeat one failing build 238 times: it
+    alternated read (succeeds) with build (fails), and any success used to
+    reset the duplicate counter."""
+    run = dev_runs.create_run("build a site")
+    for _ in range(3):
+        dev_runs.add_step(run["id"], "act", "dev_read_file", "read App.tsx",
+                          fingerprint="fp-read")
+        dev_runs.add_step(run["id"], "act", "dev_exec", "npm run build failed",
+                          "failed", fingerprint="fp-build")
+    steps = dev_runs.get_steps(run["id"])
+    assert dev_runs._duplicate_count(steps, "fp-build") >= dev_runs.DUPLICATE_ACTION_LIMIT
+
+
+def test_a_successful_write_still_earns_a_retry(runs_db):
+    """The legitimate rhythm the counter must never punish: fix the file, then
+    re-run the very same build."""
+    run = dev_runs.create_run("build a site")
+    dev_runs.add_step(run["id"], "act", "dev_exec", "build failed", "failed", fingerprint="fp-build")
+    dev_runs.add_step(run["id"], "act", "dev_write_file", "fixed the config", fingerprint="fp-write")
+    dev_runs.add_step(run["id"], "act", "dev_exec", "build failed again", "failed", fingerprint="fp-build")
+    steps = dev_runs.get_steps(run["id"])
+    assert dev_runs._duplicate_count(steps, "fp-build") == 1
+
+
+def test_a_run_that_changes_nothing_is_stopped(runs_db):
+    """Rotating between different read-only actions defeats the fingerprint
+    breaker entirely, so progress itself has to be the test."""
+    run = dev_runs.create_run("build a site")
+    for i in range(dev_runs.STAGNATION_WINDOW + 2):
+        tool = ["dev_read_file", "git_status", "dev_list_dir"][i % 3]
+        dev_runs.add_step(run["id"], "act", tool, f"looked at things ({i})",
+                          fingerprint=f"fp-{i}")
+    reason = dev_runs._check_gates(dev_runs.get_run(run["id"]))
+    assert reason and "No progress" in reason
+
+
+def test_writing_a_file_clears_the_stagnation_counter(runs_db):
+    run = dev_runs.create_run("build a site")
+    for i in range(dev_runs.STAGNATION_WINDOW + 2):
+        dev_runs.add_step(run["id"], "act", "dev_read_file", f"read ({i})", fingerprint=f"fp-{i}")
+    dev_runs.add_step(run["id"], "act", "dev_write_file", "actually changed something")
+    assert dev_runs._check_gates(dev_runs.get_run(run["id"])) is None
+
+
+def test_publishing_counts_as_progress(runs_db):
+    """A run that publishes and then tidies up is finishing, not stalling."""
+    run = dev_runs.create_run("build a site")
+    dev_runs.add_step(run["id"], "act", "dev_publish_demo", "published")
+    for i in range(dev_runs.STAGNATION_WINDOW - 2):
+        dev_runs.add_step(run["id"], "act", "dev_read_file", f"read ({i})", fingerprint=f"fp-{i}")
+    assert dev_runs._check_gates(dev_runs.get_run(run["id"])) is None
+
+
+def test_a_finished_run_is_told_in_no_uncertain_terms_that_it_is_finished(runs_db):
+    run = dev_runs.create_run("build a site")
+    dev_runs.add_step(run["id"], "act", "dev_publish_demo", "published 4 files")
+    dev_runs.add_step(run["id"], "act", "dev_review_demo", "reviewed",
+                      result='{"verdict": "pass", "problems": []}')
+    prompt = dev_runs._build_messages(dev_runs.get_run(run["id"]))[1]["content"]
+    assert "STOP AND READ" in prompt
+    assert "already published" in prompt
+    assert "DONE:" in prompt
+    # It must be the last thing the model reads, not buried mid-context.
+    assert prompt.rstrip().endswith("can still fail.")
+
+
+def test_no_completion_nudge_before_a_passing_review(runs_db):
+    run = dev_runs.create_run("build a site")
+    dev_runs.add_step(run["id"], "act", "dev_publish_demo", "published 4 files")
+    dev_runs.add_step(run["id"], "act", "dev_review_demo", "reviewed",
+                      result='{"verdict": "fail", "problems": ["empty boxes"]}')
+    assert "STOP AND READ" not in dev_runs._build_messages(dev_runs.get_run(run["id"]))[1]["content"]
+
+
+def test_editing_after_a_passing_review_withdraws_the_nudge(runs_db):
+    """Once the model changes a file, the passing verdict no longer describes
+    what is on disk — telling it to stop would be telling it to ship untested
+    edits."""
+    run = dev_runs.create_run("build a site")
+    dev_runs.add_step(run["id"], "act", "dev_publish_demo", "published")
+    dev_runs.add_step(run["id"], "act", "dev_review_demo", "reviewed",
+                      result='{"verdict": "pass", "problems": []}')
+    dev_runs.add_step(run["id"], "act", "dev_write_file", "one more tweak")
+    assert "STOP AND READ" not in dev_runs._build_messages(dev_runs.get_run(run["id"]))[1]["content"]
+
+
+# ── Project naming ────────────────────────────────────────────────────────────
+# The goal is a full brief now (up to GOAL_MAX_CHARS), which makes a useless
+# card label — the board needs a name for the product itself.
+
+def test_a_card_can_be_named(runs_db):
+    run = dev_runs.create_run("Build a 3D portfolio with React, TypeScript...", title="Jack Portfolio")
+    assert run["title"] == "Jack Portfolio"
+
+
+def test_naming_stays_optional(runs_db):
+    """An unnamed card is normal — the board falls back to the goal text."""
+    assert dev_runs.create_run("just do the thing")["title"] == ""
+
+
+def test_a_long_title_is_capped(runs_db):
+    run = dev_runs.create_run("goal", title="x" * 500)
+    assert len(run["title"]) == dev_runs.TITLE_MAX_CHARS
+
+
+def test_a_revision_inherits_the_product_name(runs_db):
+    root = dev_runs.create_run("build it", title="LUMEN")
+    child = dev_runs.create_run("make the header sticky", parent_run_id=root["id"])
+    assert child["title"] == "LUMEN"
+
+
+def test_a_revision_can_still_be_named_differently_on_purpose(runs_db):
+    root = dev_runs.create_run("build it", title="LUMEN")
+    child = dev_runs.create_run("fork it", parent_run_id=root["id"], title="LUMEN v2")
+    assert child["title"] == "LUMEN v2"
+
+
+def test_renaming_renames_the_whole_product_not_one_card(runs_db):
+    """Every revision IS the same product; renaming one card would leave the
+    board showing two names for one thing."""
+    root = dev_runs.create_run("build it", title="Old Name")
+    child = dev_runs.create_run("refine it", parent_run_id=root["id"])
+    grandchild = dev_runs.create_run("refine again", parent_run_id=child["id"])
+
+    assert dev_runs.rename_chain(child["id"], "New Name") == 3
+    for run_id in (root["id"], child["id"], grandchild["id"]):
+        assert dev_runs.get_run(run_id)["title"] == "New Name"
+
+
+def test_renaming_a_missing_run_is_refused(runs_db):
+    with pytest.raises(KeyError):
+        dev_runs.rename_chain("run-doesnotexist", "whatever")
