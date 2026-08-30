@@ -51,6 +51,12 @@ CLIENTS_TASKS_VIEW = "clients.tasks.view"
 CLIENTS_TASKS_EDIT = "clients.tasks.edit"
 CLIENTS_NOTES_VIEW = "clients.notes.view"
 CLIENTS_NOTES_EDIT = "clients.notes.edit"
+# Google Calendar is the owner's real, personal calendar — a step more
+# sensitive than a CRM task, so it gets its own permission rather than
+# riding along with CLIENTS_TASKS_EDIT: a support role can see what's on it
+# without being able to put things on it.
+CLIENTS_CALENDAR_VIEW = "clients.calendar.view"
+CLIENTS_CALENDAR_EDIT = "clients.calendar.edit"
 SETTINGS_CURRENCY_VIEW = "settings.currency.view"
 SETTINGS_CURRENCY_EDIT = "settings.currency.edit"
 
@@ -78,6 +84,7 @@ ALL_PERMISSIONS: tuple = (
     CLIENTS_DEALS_VIEW, CLIENTS_DEALS_EDIT,
     CLIENTS_TASKS_VIEW, CLIENTS_TASKS_EDIT,
     CLIENTS_NOTES_VIEW, CLIENTS_NOTES_EDIT,
+    CLIENTS_CALENDAR_VIEW, CLIENTS_CALENDAR_EDIT,
     SETTINGS_CURRENCY_VIEW, SETTINGS_CURRENCY_EDIT,
     CF_VIEW, CF_PIPELINE_EDIT, CF_RUN_START, CF_RUN_CANCEL, CF_CONTENT_REVIEW,
     CF_PUBLISH, CF_CHANNELS_MANAGE, CF_SETTINGS_EDIT,
@@ -102,6 +109,7 @@ BUILTIN_ROLES: Dict[str, tuple] = {
         CLIENTS_DEALS_VIEW, CLIENTS_DEALS_EDIT,
         CLIENTS_TASKS_VIEW, CLIENTS_TASKS_EDIT,
         CLIENTS_NOTES_VIEW, CLIENTS_NOTES_EDIT,
+        CLIENTS_CALENDAR_VIEW, CLIENTS_CALENDAR_EDIT,
         SETTINGS_CURRENCY_VIEW,
         # Runs the content operation end to end, including publishing to the
         # company's own channels; connecting new channels stays with the owner
@@ -116,13 +124,14 @@ BUILTIN_ROLES: Dict[str, tuple] = {
         CLIENTS_VIEW, CLIENTS_AGENTS_VIEW, CLIENTS_AGENTS_CONNECT,
         CLIENTS_AGENTS_DISCONNECT, SETTINGS_CURRENCY_VIEW,
         CLIENTS_TASKS_VIEW, CLIENTS_TASKS_EDIT, CLIENTS_NOTES_VIEW, CLIENTS_NOTES_EDIT,
+        CLIENTS_CALENDAR_VIEW,
         # The spec's REVIEWER (§81): may approve or reject a video, may not
         # edit the pipeline that produced it and may not publish it directly.
         CF_VIEW, CF_CONTENT_REVIEW, CF_RUN_START,
     ),
     "viewer": (
         CLIENTS_VIEW, CLIENTS_AGENTS_VIEW, CLIENTS_DEALS_VIEW, CLIENTS_TASKS_VIEW, CLIENTS_NOTES_VIEW,
-        SETTINGS_CURRENCY_VIEW, CF_VIEW,
+        CLIENTS_CALENDAR_VIEW, SETTINGS_CURRENCY_VIEW, CF_VIEW,
     ),
 }
 

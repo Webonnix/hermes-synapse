@@ -1,23 +1,33 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  AlertTriangle, Bell, Building2, Check, ChevronLeft, ChevronRight, ListChecks, Plus, Target,
+  AlertTriangle, Bell, Building2, Check, ChevronLeft, ChevronRight, ExternalLink, ListChecks,
+  Phone, Plus, Target, Users as MeetingIcon,
 } from 'lucide-react';
-import { formatDate } from './clientLabels';
-import type { ClientTask, Deal } from './clientTypes';
+import { api } from '../currency/currencyApi';
+import {
+  CALENDAR_STATUS_REASON_TEXT, EVENT_TYPE_COLOR, EVENT_TYPE_LABELS, EVENT_TYPE_ORDER, formatDate,
+} from './clientLabels';
+import { CalendarEventDrawer } from './CalendarEventDrawer';
+import type { CalendarEvent, CalendarEventType, CalendarStatus, ClientTask, Deal } from './clientTypes';
 
 /**
- * «Календарь» — everything with a date on it, in one month grid: an open
- * task's due date and an open deal's expected close date. Read-mostly by
- * design — it aggregates data the Сделки and Задачи panes already fetch
- * (no new endpoint), and the one write it offers, a quick-add task for the
- * day you clicked, goes through the same `onCreateTask` every other task
- * composer in this section uses.
+ * «Календарь» — everything with a date on it, in one month grid: real Google
+ * Calendar events, an open CRM task's due date, and an open deal's expected
+ * close date.
  *
- * "Напоминание" is not only visual: a task due today or overdue also drives
- * the daily Telegram digest the backend sends the owner
- * (`client_tasks.daily_digest_text`, wired into `main.py`'s lifespan) — this
- * page is where a person comes to see the same thing that message already
- * told them, with the context to act on it.
+ * The events layer is genuinely live, not a read-only mirror: creating,
+ * moving or deleting an event here goes straight to Google Calendar through
+ * `/api/calendar/*` (backend/main.py), which is a thin wrapper over the exact
+ * same functions the chat agent's `add_calendar_event`/`update_calendar_event`/
+ * `delete_calendar_event` tools call. An event added from a chat message
+ * ("напомни мне позвонить Ивану завтра в 15:00") shows up here with no
+ * separate sync step, because there is only the one calendar — the owner's
+ * real one — behind both surfaces.
+ *
+ * "Напоминание" has two forms: this page, and a daily Telegram digest of
+ * what's overdue/due today (`client_tasks.daily_digest_text`, wired into
+ * `main.py`'s lifespan) — an event itself still relies on Google's own
+ * per-event reminder, which already reaches the owner's phone.
  */
 
 const WEEKDAYS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
@@ -25,6 +35,10 @@ const MONTH_NAMES = [
   'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
   'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь',
 ];
+
+const EVENT_TYPE_ICON: Record<CalendarEventType, typeof Target> = {
+  MEETING: MeetingIcon, TASK: ListChecks, CALL: Phone, DEADLINE: AlertTriangle, TRAINING: Target, OTHER: Target,
+};
 
 function toIso(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -40,9 +54,17 @@ function buildMonthGrid(year: number, month: number): Date[] {
   return Array.from({ length: 42 }, (_, index) => new Date(start.getFullYear(), start.getMonth(), start.getDate() + index));
 }
 
+function eventTime(event: CalendarEvent): string {
+  if (event.allDay) return 'весь день';
+  const start = new Date(event.start);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(start.getHours())}:${pad(start.getMinutes())}`;
+}
+
 interface DayItems {
   tasks: ClientTask[];
   deals: Deal[];
+  events: CalendarEvent[];
 }
 
 export function ClientsCalendarPane({
@@ -61,11 +83,62 @@ export function ClientsCalendarPane({
   const [quickTitle, setQuickTitle] = useState('');
   const [adding, setAdding] = useState(false);
 
+  const [status, setStatus] = useState<CalendarStatus | null>(null);
+  const [events, setEvents] = useState<CalendarEvent[]>([]);
+  const [eventsLoading, setEventsLoading] = useState(false);
+  const [eventsError, setEventsError] = useState('');
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [editingEvent, setEditingEvent] = useState<CalendarEvent | null>(null);
+  const [toast, setToast] = useState('');
+
+  const grid = useMemo(() => buildMonthGrid(cursor.getFullYear(), cursor.getMonth()), [cursor]);
+  const gridStartIso = toIso(grid[0]);
+  const gridEndIso = toIso(grid[grid.length - 1]);
+
+  useEffect(() => {
+    if (!toast) return undefined;
+    const timer = setTimeout(() => setToast(''), 2600);
+    return () => clearTimeout(timer);
+  }, [toast]);
+
+  useEffect(() => {
+    api<CalendarStatus>('/api/calendar/status')
+      .then(setStatus)
+      .catch(exc => {
+        // A role holding clients.tasks.view without clients.calendar.view
+        // (only reachable through a hand-configured custom role — every
+        // built-in one grants both together) would otherwise see this as an
+        // ordinary "can't reach Google" failure, which is the wrong story.
+        const message = (exc as Error).message || '';
+        setStatus({
+          connected: false,
+          reason: message.includes('403') || message.toLowerCase().includes('прав') ? 'forbidden' : 'auth_error',
+        });
+      });
+  }, []);
+
+  const loadEvents = useCallback(async () => {
+    if (!status?.connected) return;
+    setEventsLoading(true);
+    setEventsError('');
+    try {
+      const params = new URLSearchParams({ dateFrom: gridStartIso, dateTo: gridEndIso });
+      const list = await api<CalendarEvent[]>(`/api/calendar/events?${params}`);
+      setEvents(Array.isArray(list) ? list : []);
+    } catch (exc) {
+      setEventsError((exc as Error).message);
+    } finally {
+      setEventsLoading(false);
+    }
+  }, [status?.connected, gridStartIso, gridEndIso]);
+
+  useEffect(() => { void loadEvents(); }, [loadEvents]);
+
   const itemsByDate = useMemo(() => {
     const map = new Map<string, DayItems>();
     const ensure = (iso: string) => {
       let entry = map.get(iso);
-      if (!entry) { entry = { tasks: [], deals: [] }; map.set(iso, entry); }
+      if (!entry) { entry = { tasks: [], deals: [], events: [] }; map.set(iso, entry); }
       return entry;
     };
     tasks.forEach(task => {
@@ -76,15 +149,32 @@ export function ClientsCalendarPane({
         ensure(deal.expectedCloseDate.slice(0, 10)).deals.push(deal);
       }
     });
+    events.forEach(event => {
+      if (event.start) ensure(event.start.slice(0, 10)).events.push(event);
+    });
     return map;
-  }, [tasks, deals]);
+  }, [tasks, deals, events]);
 
-  const grid = useMemo(() => buildMonthGrid(cursor.getFullYear(), cursor.getMonth()), [cursor]);
+  const upcomingEvents = useMemo(() => {
+    const todayIso = toIso(today);
+    return events
+      .filter(event => event.start.slice(0, 10) >= todayIso)
+      .sort((a, b) => a.start.localeCompare(b.start))
+      .slice(0, 6);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [events]);
+
   const todayIso = toIso(today);
   const selectedItems = itemsByDate.get(selected);
 
   const changeMonth = (delta: number) => {
     setCursor(current => new Date(current.getFullYear(), current.getMonth() + delta, 1));
+  };
+
+  const jumpTo = (iso: string) => {
+    const [year, month] = iso.split('-').map(Number);
+    setCursor(new Date(year, month - 1, 1));
+    setSelected(iso);
   };
 
   const addQuickTask = async () => {
@@ -98,18 +188,66 @@ export function ClientsCalendarPane({
     }
   };
 
+  const submitEvent = useCallback(async (payload: {
+    title: string; date: string; time: string; endTime: string; description: string;
+    eventType: CalendarEventType; location: string;
+  }, eventId?: string) => {
+    const body = {
+      title: payload.title, date: payload.date, time: payload.time,
+      endTime: payload.endTime || undefined, description: payload.description,
+      eventType: payload.eventType, location: payload.location,
+    };
+    if (eventId) {
+      await api(`/api/calendar/events/${eventId}`, { method: 'PATCH', body: JSON.stringify(body) });
+      setToast('Событие обновлено');
+    } else {
+      await api('/api/calendar/events', { method: 'POST', body: JSON.stringify(body) });
+      setToast('Событие добавлено в Google Календарь');
+    }
+    await loadEvents();
+  }, [loadEvents]);
+
+  const deleteEvent = useCallback(async (event: CalendarEvent) => {
+    await api(`/api/calendar/events/${event.id}`, { method: 'DELETE' });
+    setToast('Событие удалено');
+    await loadEvents();
+  }, [loadEvents]);
+
+  const openCreateDrawer = () => { setEditingEvent(null); setDrawerOpen(true); };
+  const openEditDrawer = (event: CalendarEvent) => { setEditingEvent(event); setDrawerOpen(true); };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {toast && <div className="cl-toast" role="status">{toast}</div>}
+
+      {status && !status.connected && (
+        <div className="glass-panel cl-cal-status-banner">
+          <AlertTriangle size={15} />
+          <div>
+            <strong>{status.reason === 'forbidden' ? 'Нет доступа к календарю Google.' : 'Google Календарь не подключен.'}</strong>
+            <p>
+              {CALENDAR_STATUS_REASON_TEXT[status.reason ?? 'auth_error']}
+              {status.reason !== 'forbidden' && (
+                <>
+                  {' '}Задачи и сделки на календаре видны по-прежнему; события Google появятся после того, как
+                  администратор один раз выполнит вход (<code>python backend/google_auth.py</code>).
+                </>
+              )}
+            </p>
+          </div>
+        </div>
+      )}
+
       <div className="glass-panel cl-cal-reminder-note">
         <Bell size={15} />
         <span>
-          Каждый день бот присылает в Telegram сводку по просроченным и сегодняшним задачам —
-          это тот же список, что показан здесь на выбранный день.
+          Каждый день бот присылает в Telegram сводку по просроченным и сегодняшним задачам, а
+          новое событие можно поставить прямо в чате — «напомни мне позвонить Ивану завтра в 15:00».
         </span>
       </div>
 
       <div className="cl-cal-layout">
-        <section className="glass-panel cl-cal-board" aria-busy={loading}>
+        <section className="glass-panel cl-cal-board" aria-busy={loading || eventsLoading}>
           <header className="cl-cal-header">
             <strong>{MONTH_NAMES[cursor.getMonth()]} {cursor.getFullYear()}</strong>
             <div className="cl-cal-nav">
@@ -123,23 +261,38 @@ export function ClientsCalendarPane({
                 <ChevronRight size={15} />
               </button>
             </div>
+            {status?.connected && (
+              <button type="button" className="btn-primary" style={{ marginLeft: 'auto' }} onClick={openCreateDrawer}>
+                <Plus size={14} /><span>Создать событие</span>
+              </button>
+            )}
           </header>
+
+          {eventsError && (
+            <p className="cl-cal-status-banner is-inline">
+              <AlertTriangle size={13} /><span>Не удалось загрузить события: {eventsError}</span>
+            </p>
+          )}
 
           <div className="cl-cal-weekdays" aria-hidden="true">
             {WEEKDAYS.map(day => <span key={day}>{day}</span>)}
           </div>
 
-          <div className="cl-cal-grid" role="grid" aria-label="Календарь задач и сделок">
+          <div className="cl-cal-grid" role="grid" aria-label="Календарь событий, задач и сделок">
             {grid.map(date => {
               const iso = toIso(date);
               const items = itemsByDate.get(iso);
               const outside = date.getMonth() !== cursor.getMonth();
               const overdueCount = items?.tasks.filter(task => task.overdue).length ?? 0;
-              const chips: Array<{ id: string; label: string; kind: 'task' | 'overdue' | 'deal' }> = [
-                ...(items?.tasks ?? []).map(task => ({
-                  id: task.id, label: task.title, kind: task.overdue ? 'overdue' as const : 'task' as const,
+              const chips: Array<{ id: string; label: string; kind: string; color?: string }> = [
+                ...(items?.events ?? []).map(event => ({
+                  id: event.id, label: event.title, kind: `google is-${event.eventType.toLowerCase()}`,
+                  color: EVENT_TYPE_COLOR[event.eventType],
                 })),
-                ...(items?.deals ?? []).map(deal => ({ id: deal.id, label: deal.title, kind: 'deal' as const })),
+                ...(items?.tasks ?? []).map(task => ({
+                  id: task.id, label: task.title, kind: task.overdue ? 'overdue' : 'task',
+                })),
+                ...(items?.deals ?? []).map(deal => ({ id: deal.id, label: deal.title, kind: 'deal' })),
               ];
               const visibleChips = chips.slice(0, 3);
               const hiddenCount = chips.length - visibleChips.length;
@@ -159,7 +312,10 @@ export function ClientsCalendarPane({
                   </span>
                   <span className="cl-cal-chips">
                     {visibleChips.map(chip => (
-                      <span key={chip.id} className={`cl-cal-chip is-${chip.kind}`}>{chip.label}</span>
+                      <span key={chip.id} className={`cl-cal-chip is-${chip.kind}`}
+                            style={chip.color ? { background: `${chip.color}2e`, color: chip.color } : undefined}>
+                        {chip.label}
+                      </span>
                     ))}
                     {hiddenCount > 0 && <span className="cl-cal-chip-more">+{hiddenCount}</span>}
                   </span>
@@ -169,54 +325,106 @@ export function ClientsCalendarPane({
           </div>
 
           <div className="cl-cal-legend">
-            <span><i className="cl-cal-dot is-task" />Задача</span>
+            {EVENT_TYPE_ORDER.map(type => (
+              <span key={type}><i className="cl-cal-dot" style={{ background: EVENT_TYPE_COLOR[type] }} />{EVENT_TYPE_LABELS[type]}</span>
+            ))}
+            <span><i className="cl-cal-dot is-task" />Задача CRM</span>
             <span><i className="cl-cal-dot is-overdue" />Просрочена</span>
-            <span><i className="cl-cal-dot is-deal" />Ожидаемое закрытие сделки</span>
+            <span><i className="cl-cal-dot is-deal" />Сделка</span>
           </div>
         </section>
 
-        <aside className="glass-panel cl-cal-agenda" aria-label={`События: ${formatDate(selected)}`}>
-          <strong>{formatDate(selected)}{selected === todayIso ? ' · сегодня' : ''}</strong>
+        <div className="cl-cal-side">
+          <aside className="glass-panel cl-cal-agenda" aria-label={`События: ${formatDate(selected)}`}>
+            <div className="cl-cal-agenda-head">
+              <strong>{formatDate(selected)}{selected === todayIso ? ' · сегодня' : ''}</strong>
+            </div>
 
-          {!selectedItems || (selectedItems.tasks.length === 0 && selectedItems.deals.length === 0) ? (
-            <p className="cl-muted" style={{ margin: '10px 0' }}>На этот день ничего не запланировано.</p>
-          ) : (
-            <ul className="cl-cal-agenda-list">
-              {selectedItems.tasks.map(task => (
-                <li key={task.id} className={`cl-cal-agenda-item${task.overdue ? ' is-overdue' : ''}`}>
-                  <button type="button" className="cl-task-check" aria-label={`Отметить выполненной: ${task.title}`}
-                          onClick={() => onCompleteTask(task)}>
-                    <Check size={12} />
-                  </button>
-                  <span className="cl-cal-agenda-icon"><ListChecks size={13} /></span>
-                  <span>{task.title}</span>
-                </li>
-              ))}
-              {selectedItems.deals.map(deal => (
-                <li key={deal.id} className="cl-cal-agenda-item">
-                  <button type="button" className="cl-cal-agenda-link" onClick={() => onOpenDeal(deal)}>
-                    <span className="cl-cal-agenda-icon"><Target size={13} /></span>
-                    <span>{deal.title}</span>
-                  </button>
-                  {deal.companyName && <span className="cl-cal-agenda-sub"><Building2 size={11} />{deal.companyName}</span>}
-                </li>
-              ))}
-            </ul>
+            {!selectedItems || (selectedItems.tasks.length === 0 && selectedItems.deals.length === 0 && selectedItems.events.length === 0) ? (
+              <p className="cl-muted" style={{ margin: '10px 0' }}>На этот день ничего не запланировано.</p>
+            ) : (
+              <ul className="cl-cal-agenda-list">
+                {(selectedItems.events ?? []).map(event => {
+                  const Icon = EVENT_TYPE_ICON[event.eventType];
+                  return (
+                    <li key={event.id} className="cl-cal-agenda-item">
+                      <button type="button" className="cl-cal-agenda-link" onClick={() => openEditDrawer(event)}>
+                        <span className="cl-cal-agenda-icon" style={{ color: EVENT_TYPE_COLOR[event.eventType] }}><Icon size={13} /></span>
+                        <span>{eventTime(event)} · {event.title}</span>
+                      </button>
+                      {event.link && (
+                        <a className="cl-cal-agenda-sub" href={event.link} target="_blank" rel="noreferrer" onClick={ev => ev.stopPropagation()}>
+                          <ExternalLink size={11} />Google Календарь
+                        </a>
+                      )}
+                    </li>
+                  );
+                })}
+                {selectedItems.tasks.map(task => (
+                  <li key={task.id} className={`cl-cal-agenda-item${task.overdue ? ' is-overdue' : ''}`}>
+                    <button type="button" className="cl-task-check" aria-label={`Отметить выполненной: ${task.title}`}
+                            onClick={() => onCompleteTask(task)}>
+                      <Check size={12} />
+                    </button>
+                    <span className="cl-cal-agenda-icon"><ListChecks size={13} /></span>
+                    <span>{task.title}</span>
+                  </li>
+                ))}
+                {selectedItems.deals.map(deal => (
+                  <li key={deal.id} className="cl-cal-agenda-item">
+                    <button type="button" className="cl-cal-agenda-link" onClick={() => onOpenDeal(deal)}>
+                      <span className="cl-cal-agenda-icon"><Target size={13} /></span>
+                      <span>{deal.title}</span>
+                    </button>
+                    {deal.companyName && <span className="cl-cal-agenda-sub"><Building2 size={11} />{deal.companyName}</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <div className="cl-cal-quick-add">
+              <input
+                className="form-input" placeholder="Добавить задачу на этот день…" value={quickTitle}
+                onChange={ev => setQuickTitle(ev.target.value)}
+                onKeyDown={ev => { if (ev.key === 'Enter') void addQuickTask(); }}
+              />
+              <button type="button" className="icon-btn" aria-label="Добавить задачу" disabled={!quickTitle.trim() || adding}
+                      onClick={() => void addQuickTask()}>
+                <Plus size={15} />
+              </button>
+            </div>
+          </aside>
+
+          {status?.connected && (
+            <aside className="glass-panel cl-cal-upcoming" aria-label="Предстоящие события">
+              <strong>Предстоящие события</strong>
+              {upcomingEvents.length === 0 ? (
+                <p className="cl-muted" style={{ margin: '10px 0' }}>Ничего не запланировано.</p>
+              ) : (
+                <ul className="cl-cal-upcoming-list">
+                  {upcomingEvents.map(event => (
+                    <li key={event.id}>
+                      <button type="button" onClick={() => jumpTo(event.start.slice(0, 10))}>
+                        <span className="cl-cal-upcoming-date">{formatDate(event.start)}</span>
+                        <span className="cl-cal-upcoming-title">{eventTime(event)} · {event.title}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </aside>
           )}
-
-          <div className="cl-cal-quick-add">
-            <input
-              className="form-input" placeholder="Добавить задачу на этот день…" value={quickTitle}
-              onChange={event => setQuickTitle(event.target.value)}
-              onKeyDown={event => { if (event.key === 'Enter') void addQuickTask(); }}
-            />
-            <button type="button" className="icon-btn" aria-label="Добавить задачу" disabled={!quickTitle.trim() || adding}
-                    onClick={() => void addQuickTask()}>
-              <Plus size={15} />
-            </button>
-          </div>
-        </aside>
+        </div>
       </div>
+
+      <CalendarEventDrawer
+        open={drawerOpen}
+        event={editingEvent}
+        defaultDate={selected}
+        onClose={() => setDrawerOpen(false)}
+        onSubmit={submitEvent}
+        onDelete={deleteEvent}
+      />
     </div>
   );
 }

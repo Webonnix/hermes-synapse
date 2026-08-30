@@ -8,7 +8,7 @@ import uuid
 import httpx
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 logger = logging.getLogger("hermes.tools")
 
@@ -464,6 +464,23 @@ def set_recurring_reminder(label: str, interval_hours: float, chat_id: str) -> s
 # 5. GOOGLE CALENDAR
 # ═══════════════════════════════════════════════════════════════════════════════
 
+CALENDAR_LOCAL_TZ_NAME = "Asia/Jerusalem"
+
+# Event "type" as the CRM Calendar pane's colour legend (Встречи, Задачи,
+# Звонки, Дедлайны, Обучение, Другое) — stored on the *Google* event itself
+# via its native `colorId`, not in a side table. This is the whole reason to
+# use colorId rather than inventing our own field: an event created from the
+# dashboard, from chat, or directly in Google's own apps all show the same
+# colour everywhere, because there is exactly one place the colour lives.
+# Google's palette: 1 Lavender, 6 Tangerine, 8 Graphite, 9 Blueberry,
+# 10 Basil, 11 Tomato (https://developers.google.com/calendar/api/v3/reference/colors).
+CALENDAR_EVENT_COLORS: Dict[str, str] = {
+    "MEETING": "1", "TASK": "9", "CALL": "10", "DEADLINE": "11", "TRAINING": "6", "OTHER": "8",
+}
+CALENDAR_COLOR_TO_TYPE: Dict[str, str] = {code: kind for kind, code in CALENDAR_EVENT_COLORS.items()}
+CALENDAR_EVENT_TYPES: Tuple[str, ...] = tuple(CALENDAR_EVENT_COLORS)
+
+
 def _get_calendar_service():
     """Build an authorized Google Calendar API service object."""
     token_path = os.path.join(os.path.dirname(__file__), "data", "google_token.json")
@@ -498,112 +515,250 @@ def _get_calendar_service():
         return None, str(e)
 
 
+def calendar_connection_status() -> Dict[str, Any]:
+    """Whether the Google Calendar integration is actually usable right now —
+    the dashboard polls this so it can show a plain "not connected" state
+    with real instructions instead of a wall of per-request errors. Never
+    raises: every failure mode becomes a `reason` code the frontend can
+    render a specific message for."""
+    creds_path = os.path.join(os.path.dirname(__file__), "data", "google_credentials.json")
+    token_path = os.path.join(os.path.dirname(__file__), "data", "google_token.json")
+    if not os.path.exists(creds_path):
+        return {"connected": False, "reason": "no_credentials"}
+    if not os.path.exists(token_path):
+        return {"connected": False, "reason": "no_token"}
+    _, err = _get_calendar_service()
+    if err:
+        return {"connected": False, "reason": "auth_error", "detail": err}
+    return {"connected": True}
+
+
+def _event_to_dict(e: Dict[str, Any]) -> Dict[str, Any]:
+    start_info = e.get("start", {}) or {}
+    end_info = e.get("end", {}) or {}
+    return {
+        "id": e.get("id", ""),
+        "title": e.get("summary", "(без названия)"),
+        "start": start_info.get("dateTime", start_info.get("date", "")),
+        "end": end_info.get("dateTime", end_info.get("date", "")),
+        "allDay": "date" in start_info and "dateTime" not in start_info,
+        "location": e.get("location", ""),
+        "link": e.get("htmlLink", ""),
+        "description": e.get("description", ""),
+        "eventType": CALENDAR_COLOR_TO_TYPE.get(e.get("colorId"), "OTHER"),
+    }
+
+
+def _list_events(time_min: datetime, time_max: datetime, max_results: int = 100) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    service, err = _get_calendar_service()
+    if err:
+        return None, err
+    try:
+        events_result = service.events().list(
+            calendarId="primary",
+            timeMin=time_min.astimezone(timezone.utc).isoformat(),
+            timeMax=time_max.astimezone(timezone.utc).isoformat(),
+            maxResults=max_results,
+            singleEvents=True,
+            orderBy="startTime",
+        ).execute()
+        return [_event_to_dict(e) for e in events_result.get("items", [])], None
+    except Exception as e:
+        logger.error(f"Calendar list events error: {e}")
+        return None, str(e)
+
+
 def get_calendar_events(days_ahead: int = 7) -> str:
     """List upcoming Google Calendar events for the next N days.
-    
+
     days_ahead=0  → events for today only (Israel local date)
     days_ahead=1  → events tomorrow (Israel local date)
     days_ahead=7  → events in the next 7 days (default)
-    
+
     NOTE: uses Asia/Jerusalem timezone so midnight is correct even when
     Docker runs in UTC and local time is past midnight.
     """
-    service, err = _get_calendar_service()
+    from zoneinfo import ZoneInfo
+    LOCAL_TZ = ZoneInfo(CALENDAR_LOCAL_TZ_NAME)
+
+    now_local = datetime.now(LOCAL_TZ)
+    today_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    if days_ahead == 0:
+        range_start, range_end = today_local, today_local + timedelta(days=1)
+        period_label = "сегодня"
+    else:
+        range_start, range_end = today_local, today_local + timedelta(days=days_ahead + 1)
+        period_label = f"ближайшие {days_ahead} дней"
+
+    events, err = _list_events(range_start, range_end, max_results=20)
     if err:
         return json.dumps({"error": err, "hint": "Запустите python backend/google_auth.py для авторизации"})
+    if not events:
+        return json.dumps({"events": [], "message": f"Нет событий на {period_label}."})
+    # The tool-calling shape predates `id`/`allDay`/`eventType` — keep the
+    # original keys (`all_day`) alongside the new ones rather than breaking
+    # whatever the model has already learned to read from a prior turn.
+    legacy = [{**e, "all_day": e["allDay"]} for e in events]
+    return json.dumps({"events": legacy, "count": len(legacy)}, ensure_ascii=False)
+
+
+def _parse_local(date: str, time: str, tz) -> datetime:
+    return datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+
+
+def _create_event(
+    title: str, date: str, time: str = "10:00", duration_minutes: Optional[int] = None,
+    end_time: Optional[str] = None, description: str = "", event_type: str = "OTHER", location: str = "",
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    service, err = _get_calendar_service()
+    if err:
+        return None, err
     try:
         from zoneinfo import ZoneInfo
-        LOCAL_TZ = ZoneInfo("Asia/Jerusalem")
-
-        # Compute today's local date in Israel time (not UTC!)
-        now_local = datetime.now(LOCAL_TZ)
-        today_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-
-        if days_ahead == 0:
-            # Exactly today: [start of local today, start of local tomorrow)
-            range_start = today_local
-            range_end   = today_local + timedelta(days=1)
-            period_label = "сегодня"
+        LOCAL_TZ = ZoneInfo(CALENDAR_LOCAL_TZ_NAME)
+        start_dt = _parse_local(date, time, LOCAL_TZ)
+        if end_time:
+            end_dt = _parse_local(date, end_time, LOCAL_TZ)
+            if end_dt <= start_dt:
+                end_dt += timedelta(days=1)
         else:
-            range_start = today_local
-            range_end   = today_local + timedelta(days=days_ahead + 1)
-            period_label = f"ближайшие {days_ahead} дней"
+            end_dt = start_dt + timedelta(minutes=duration_minutes if duration_minutes is not None else 60)
 
-        # Convert to UTC for the Google Calendar API
-        today_start = range_start.astimezone(timezone.utc)
-        end         = range_end.astimezone(timezone.utc)
-
-        events_result = service.events().list(
-            calendarId="primary",
-            timeMin=today_start.isoformat(),
-            timeMax=end.isoformat(),
-            maxResults=20,
-            singleEvents=True,
-            orderBy="startTime"
-        ).execute()
-        events = events_result.get("items", [])
-        if not events:
-            return json.dumps({"events": [], "message": f"Нет событий на {period_label}."})
-
-        result = []
-        for e in events:
-            start_info = e.get("start", {})
-            start = start_info.get("dateTime", start_info.get("date", ""))
-            is_all_day = "date" in start_info and "dateTime" not in start_info
-            result.append({
-                "title":      e.get("summary", "(без названия)"),
-                "start":      start,
-                "all_day":    is_all_day,
-                "location":   e.get("location", ""),
-                "link":       e.get("htmlLink", ""),
-                "description": e.get("description", ""),
-            })
-        return json.dumps({"events": result, "count": len(result)}, ensure_ascii=False)
+        body = {
+            "summary": title,
+            "description": description,
+            "location": location,
+            "start": {"dateTime": start_dt.isoformat()},
+            "end": {"dateTime": end_dt.isoformat()},
+            "colorId": CALENDAR_EVENT_COLORS.get(event_type, CALENDAR_EVENT_COLORS["OTHER"]),
+        }
+        created = service.events().insert(calendarId="primary", body=body).execute()
+        return _event_to_dict(created), None
     except Exception as e:
-        logger.error(f"Calendar get events error: {e}")
-        return json.dumps({"error": str(e)})
+        logger.error(f"Calendar add event error: {e}")
+        return None, str(e)
 
 
 def add_calendar_event(title: str, date: str, time: str = "10:00",
                        duration_minutes: Optional[int] = None,
                        end_time: Optional[str] = None,
-                       description: str = "") -> str:
-    """Add an event to Google Calendar. date format: YYYY-MM-DD, time: HH:MM."""
-    service, err = _get_calendar_service()
+                       description: str = "",
+                       event_type: str = "OTHER",
+                       location: str = "") -> str:
+    """Add an event to Google Calendar. date format: YYYY-MM-DD, time: HH:MM.
+    event_type colours the event consistently across the dashboard and
+    Google's own apps — one of MEETING/TASK/CALL/DEADLINE/TRAINING/OTHER."""
+    event_type = event_type if event_type in CALENDAR_EVENT_TYPES else "OTHER"
+    event, err = _create_event(title, date, time, duration_minutes, end_time, description, event_type, location)
     if err:
         return json.dumps({"error": err})
+    return json.dumps({
+        "status": "created", "title": event["title"], "start": event["start"], "end": event["end"],
+        "link": event["link"], "event_id": event["id"],
+    }, ensure_ascii=False)
+
+
+def _update_event(
+    event_id: str, title: Optional[str] = None, date: Optional[str] = None, time: Optional[str] = None,
+    end_time: Optional[str] = None, duration_minutes: Optional[int] = None, description: Optional[str] = None,
+    event_type: Optional[str] = None, location: Optional[str] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    service, err = _get_calendar_service()
+    if err:
+        return None, err
     try:
-        # Build start/end datetimes
+        existing = service.events().get(calendarId="primary", eventId=event_id).execute()
+    except Exception as e:
+        logger.error(f"Calendar get event error: {e}")
+        return None, str(e)
+
+    body = dict(existing)
+    if title is not None:
+        body["summary"] = title
+    if description is not None:
+        body["description"] = description
+    if location is not None:
+        body["location"] = location
+    if event_type is not None:
+        body["colorId"] = CALENDAR_EVENT_COLORS.get(event_type, CALENDAR_EVENT_COLORS["OTHER"])
+
+    if date is not None or time is not None or end_time is not None or duration_minutes is not None:
         from zoneinfo import ZoneInfo
-        LOCAL_TZ = ZoneInfo("Asia/Jerusalem")
-        start_dt = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M").replace(tzinfo=LOCAL_TZ)
-        
+        LOCAL_TZ = ZoneInfo(CALENDAR_LOCAL_TZ_NAME)
+        existing_start_raw = (existing.get("start") or {}).get("dateTime")
+        existing_end_raw = (existing.get("end") or {}).get("dateTime")
+        current_start = (
+            datetime.fromisoformat(existing_start_raw).astimezone(LOCAL_TZ)
+            if existing_start_raw else datetime.now(LOCAL_TZ)
+        )
+        new_date = date or current_start.strftime("%Y-%m-%d")
+        new_time = time or current_start.strftime("%H:%M")
+        start_dt = _parse_local(new_date, new_time, LOCAL_TZ)
+
         if end_time:
-            end_dt = datetime.strptime(f"{date} {end_time}", "%Y-%m-%d %H:%M").replace(tzinfo=LOCAL_TZ)
+            end_dt = _parse_local(new_date, end_time, LOCAL_TZ)
             if end_dt <= start_dt:
                 end_dt += timedelta(days=1)
+        elif duration_minutes is not None:
+            end_dt = start_dt + timedelta(minutes=duration_minutes)
+        elif existing_start_raw and existing_end_raw:
+            # Only the start moved — carry the event's own duration forward
+            # rather than defaulting it back to an hour.
+            end_dt = start_dt + (datetime.fromisoformat(existing_end_raw) - datetime.fromisoformat(existing_start_raw))
         else:
-            dur = duration_minutes if duration_minutes is not None else 60
-            end_dt = start_dt + timedelta(minutes=dur)
+            end_dt = start_dt + timedelta(minutes=60)
 
-        event = {
-            "summary":     title,
-            "description": description,
-            "start":       {"dateTime": start_dt.isoformat()},
-            "end":         {"dateTime": end_dt.isoformat()},
-        }
-        created = service.events().insert(calendarId="primary", body=event).execute()
-        return json.dumps({
-            "status":   "created",
-            "title":    title,
-            "start":    start_dt.isoformat(),
-            "end":      end_dt.isoformat(),
-            "link":     created.get("htmlLink", ""),
-            "event_id": created.get("id", ""),
-        }, ensure_ascii=False)
+        body["start"] = {"dateTime": start_dt.isoformat()}
+        body["end"] = {"dateTime": end_dt.isoformat()}
+
+    try:
+        updated = service.events().update(calendarId="primary", eventId=event_id, body=body).execute()
+        return _event_to_dict(updated), None
     except Exception as e:
-        logger.error(f"Calendar add event error: {e}")
-        return json.dumps({"error": str(e)})
+        logger.error(f"Calendar update event error: {e}")
+        return None, str(e)
+
+
+def update_calendar_event(
+    event_id: str, title: Optional[str] = None, date: Optional[str] = None, time: Optional[str] = None,
+    end_time: Optional[str] = None, duration_minutes: Optional[int] = None, description: Optional[str] = None,
+    event_type: Optional[str] = None, location: Optional[str] = None,
+) -> str:
+    """Change an existing Google Calendar event. Only the fields provided are
+    touched — everything else (including a colour/type you don't pass) stays
+    as it was."""
+    dur = int(duration_minutes) if duration_minutes is not None else None
+    event_type = event_type if event_type in CALENDAR_EVENT_TYPES else None
+    event, err = _update_event(event_id, title=title, date=date, time=time, end_time=end_time,
+                                duration_minutes=dur, description=description,
+                                event_type=event_type, location=location)
+    if err:
+        return json.dumps({"error": err})
+    return json.dumps({"status": "updated", **event}, ensure_ascii=False)
+
+
+def _delete_event(event_id: str) -> Tuple[bool, Optional[str]]:
+    service, err = _get_calendar_service()
+    if err:
+        return False, err
+    try:
+        service.events().delete(calendarId="primary", eventId=event_id).execute()
+        return True, None
+    except Exception as e:
+        # Google 410/404 both mean "already gone" — deleting an event twice
+        # (e.g. a retried chat message) should read as success, not an error.
+        if "410" in str(e) or "404" in str(e) or "Not Found" in str(e):
+            return True, None
+        logger.error(f"Calendar delete event error: {e}")
+        return False, str(e)
+
+
+def delete_calendar_event(event_id: str) -> str:
+    """Remove an event from Google Calendar."""
+    ok, err = _delete_event(event_id)
+    if not ok:
+        return json.dumps({"error": err})
+    return json.dumps({"status": "deleted", "event_id": event_id})
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -890,7 +1045,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "add_calendar_event",
-            "description": "Добавляет новое событие в Google Календарь.",
+            "description": "Добавляет новое событие (напоминание, встречу, звонок, дедлайн) в Google Календарь. Событие сразу видно и в дашборде Vexa (раздел Клиенты → Календарь), и в самом Google Календаре пользователя.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -899,9 +1054,46 @@ TOOLS_SCHEMA = [
                     "time":             {"type": "string",  "description": "Время в формате HH:MM (по умолчанию 10:00)"},
                     "end_time":         {"type": "string",  "description": "Время окончания в формате HH:MM (опционально, если известно точное время окончания)"},
                     "duration_minutes": {"type": "integer", "description": "Длительность в минутах (по умолчанию 60, игнорируется если передан end_time)"},
-                    "description":      {"type": "string",  "description": "Описание события (опционально)"}
+                    "description":      {"type": "string",  "description": "Описание события (опционально)"},
+                    "event_type":       {"type": "string",  "enum": ["MEETING", "TASK", "CALL", "DEADLINE", "TRAINING", "OTHER"],
+                                          "description": "Тип события — определяет цвет в календаре. MEETING — встреча, TASK — задача/напоминание, CALL — созвон, DEADLINE — дедлайн, TRAINING — обучение, OTHER — по умолчанию."},
+                    "location":         {"type": "string",  "description": "Место проведения (опционально)"}
                 },
                 "required": ["title", "date"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_calendar_event",
+            "description": "Изменяет существующее событие в Google Календаре (переносит время, меняет название и т.п.). Нужен event_id из get_calendar_events или из ответа add_calendar_event.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event_id":         {"type": "string",  "description": "ID события в Google Календаре"},
+                    "title":            {"type": "string",  "description": "Новое название (опционально)"},
+                    "date":             {"type": "string",  "description": "Новая дата YYYY-MM-DD (опционально)"},
+                    "time":             {"type": "string",  "description": "Новое время начала HH:MM (опционально)"},
+                    "end_time":         {"type": "string",  "description": "Новое время окончания HH:MM (опционально)"},
+                    "duration_minutes": {"type": "integer", "description": "Новая длительность в минутах (опционально)"},
+                    "description":      {"type": "string",  "description": "Новое описание (опционально)"}
+                },
+                "required": ["event_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_calendar_event",
+            "description": "Удаляет (отменяет) событие из Google Календаря. Нужен event_id.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event_id": {"type": "string", "description": "ID события в Google Календаре"}
+                },
+                "required": ["event_id"]
             }
         }
     },
@@ -2940,7 +3132,24 @@ def execute_tool(name: str, arguments: Dict[str, Any], chat_id: str = "default")
             end_time=arguments.get("end_time"),
             duration_minutes=int(dur) if dur is not None else None,
             description=arguments.get("description", ""),
+            event_type=arguments.get("event_type", "OTHER"),
+            location=arguments.get("location", ""),
         )
+
+    elif name == "update_calendar_event":
+        dur = arguments.get("duration_minutes")
+        return update_calendar_event(
+            event_id=arguments.get("event_id", ""),
+            title=arguments.get("title"),
+            date=arguments.get("date"),
+            time=arguments.get("time"),
+            end_time=arguments.get("end_time"),
+            duration_minutes=int(dur) if dur is not None else None,
+            description=arguments.get("description"),
+        )
+
+    elif name == "delete_calendar_event":
+        return delete_calendar_event(arguments.get("event_id", ""))
 
     elif name == "get_todoist_tasks":
         return get_todoist_tasks(arguments.get("filter_str", "today | overdue"))

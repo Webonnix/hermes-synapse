@@ -3148,11 +3148,63 @@ main.simple-chat-page { min-width: 0; padding: 0 !important; overflow: hidden !i
   color: var(--accent-cyan);
 }
 
+/* Google-not-connected notice — a step more urgent than .cl-cal-reminder-note
+   (amber/warning rather than informational cyan), since it means the
+   "Создать событие" button and every Google-backed chip are simply absent
+   until someone completes the one-time sign-in. */
+.cl-cal-status-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 195, 72, 0.28);
+  background: rgba(255, 195, 72, 0.07);
+  color: var(--warning);
+}
+
+.cl-cal-status-banner svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.cl-cal-status-banner strong {
+  color: var(--text-primary);
+  display: block;
+  margin-bottom: 3px;
+}
+
+.cl-cal-status-banner p {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.cl-cal-status-banner code {
+  font: 600 0.78em var(--font-mono);
+  color: var(--warning);
+}
+
+.cl-cal-status-banner.is-inline {
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  font-size: 0.78rem;
+  gap: 7px;
+}
+
 .cl-cal-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 280px;
   gap: 16px;
   align-items: start;
+}
+
+.cl-cal-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  position: sticky;
+  top: 0;
 }
 
 .cl-cal-board {
@@ -3163,6 +3215,8 @@ main.simple-chat-page { min-width: 0; padding: 0 !important; overflow: hidden !i
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
   margin-bottom: 12px;
 }
 
@@ -3316,8 +3370,12 @@ main.simple-chat-page { min-width: 0; padding: 0 !important; overflow: hidden !i
   display: flex;
   flex-direction: column;
   gap: 4px;
-  position: sticky;
-  top: 0;
+}
+
+.cl-cal-agenda-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .cl-cal-agenda-list {
@@ -3389,9 +3447,63 @@ main.simple-chat-page { min-width: 0; padding: 0 !important; overflow: hidden !i
   flex: 1;
 }
 
+.cl-cal-upcoming {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cl-cal-upcoming-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 8px;
+  list-style: none;
+}
+
+.cl-cal-upcoming-list button {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cl-cal-upcoming-list button:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.cl-cal-upcoming-date {
+  font: 700 0.64rem var(--font-mono);
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+
+.cl-cal-upcoming-title {
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Event-type picker in CalendarEventDrawer — same pill shape as
+   .cl-deal-stage-btn, plus room for the colour dot every type carries. */
+.cl-event-type-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 @media (max-width: 900px) {
   .cl-cal-layout { grid-template-columns: 1fr; }
-  .cl-cal-agenda { position: static; }
+  .cl-cal-side { position: static; }
   .cl-cal-cell { min-height: 58px; }
 }
 

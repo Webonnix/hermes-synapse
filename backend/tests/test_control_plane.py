@@ -25,6 +25,16 @@ def test_risk_policy_defaults_unknown_tools_to_r4(control_db):
     assert control_plane.classify_tool_risk("untrusted_plugin_action") == "R4"
 
 
+def test_calendar_reads_are_free_writes_need_one_approval_deletes_need_two(control_db):
+    # Listing what's on the calendar is a pure lookup — same class as
+    # web_search. Moving/renaming an event matches creating one (R3, one
+    # owner approval); deleting a real event off the owner's own Google
+    # Calendar is treated like delete_todoist_task (R4, two approvals).
+    assert control_plane.classify_tool_risk("get_calendar_events") == "R0"
+    assert control_plane.classify_tool_risk("update_calendar_event") == "R3"
+    assert control_plane.classify_tool_risk("delete_calendar_event") == "R4"
+
+
 def test_browser_read_is_zero_approval_browser_task_requires_one(control_db):
     # browser_read excludes click/input/submit actions server-side, matches
     # web_search's R1 (no approval). browser_task is the full interactive

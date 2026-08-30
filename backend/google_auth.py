@@ -2,9 +2,17 @@
 """
 Google Calendar OAuth2 — manual copy-paste flow (most reliable).
 
-Run on your Mac:
-    cd /Users/pauloberezini/Documents/private/git/jarvis
-    python3 backend/google_auth.py
+This is a one-time, laptop-side script, not something that runs on the
+production server: Google's OAuth flow needs a real browser talking to
+`localhost`, which the headless deployment box doesn't have.
+
+Run it on any machine with a browser and a checkout of this repo:
+    cd <path to your checkout of this repo>/src/backend
+    python3 google_auth.py
+
+It needs `data/google_credentials.json` next to it — a "Desktop app" OAuth
+client downloaded once from Google Cloud Console (not a repo secret; get it
+from whoever administers that project).
 
 Steps:
   1. A URL will be printed — open it in your browser (incognito recommended)
@@ -12,6 +20,13 @@ Steps:
   3. Your browser will try to open localhost and show an error — that's fine
   4. Copy the FULL URL from the browser address bar (starts with http://localhost:...)
   5. Paste it here when prompted
+
+That produces `data/google_token.json` next to `google_credentials.json`.
+Copy *both* files onto the server, into its `backend/data/` — e.g.:
+    scp data/google_credentials.json data/google_token.json \\
+        albert@192.168.0.200:/mnt/fast_storage/hermes-web/src/backend/data/
+The dashboard's «Клиенты → Календарь» pane (GET /api/calendar/status) reports
+which of the two it's still missing.
 """
 
 import os

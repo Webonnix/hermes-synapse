@@ -293,3 +293,32 @@ export interface ClientNote {
   createdAt: string;
   updatedAt: string;
 }
+
+// ── Календарь (Google Calendar) ──────────────────────────────────────────────
+
+export type CalendarEventType = 'MEETING' | 'TASK' | 'CALL' | 'DEADLINE' | 'TRAINING' | 'OTHER';
+
+export interface CalendarEvent {
+  id: string;
+  title: string;
+  /** ISO datetime, or a bare YYYY-MM-DD when `allDay` is true. */
+  start: string;
+  end: string;
+  allDay: boolean;
+  location: string;
+  description: string;
+  /** Opens the event in the owner's own Google Calendar. */
+  link: string;
+  eventType: CalendarEventType;
+}
+
+export interface CalendarStatus {
+  connected: boolean;
+  /** Present only when `connected` is false — which sentence to show.
+   *  'forbidden' is frontend-only: the backend never returns it — it's
+   *  what `ClientsCalendarPane` infers locally from a 403 on this same
+   *  request, distinguishing "this role can't see the calendar" from
+   *  "Google itself isn't reachable". */
+  reason?: 'no_credentials' | 'no_token' | 'auth_error' | 'forbidden';
+  detail?: string;
+}

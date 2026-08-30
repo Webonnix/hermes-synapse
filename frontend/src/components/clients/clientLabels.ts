@@ -1,6 +1,6 @@
 import type {
-  BillingFrequency, ClientStatus, ConnectionStatus, DealStage, InvoiceStatus, PaymentStatus,
-  ServiceType, TaskPriority, TaskStatus,
+  BillingFrequency, CalendarEventType, ClientStatus, ConnectionStatus, DealStage, InvoiceStatus,
+  PaymentStatus, ServiceType, TaskPriority, TaskStatus,
 } from './clientTypes';
 
 /** Russian labels and badge tones for every enum the module renders.
@@ -124,6 +124,31 @@ export const DEAL_STAGE_TONE: Record<DealStage, Tone> = {
 };
 
 export const DEAL_SOURCES = ['Сайт', 'Реферал', 'Соцсети', 'Холодный контакт', 'Партнёр', 'Другое'];
+
+// ── Календарь (Google Calendar) ──────────────────────────────────────────────
+
+/** Picker order — legend and the type selector in the event drawer both walk
+ *  this array, so the two are never in a different order by accident. */
+export const EVENT_TYPE_ORDER: CalendarEventType[] = ['MEETING', 'TASK', 'CALL', 'DEADLINE', 'TRAINING', 'OTHER'];
+
+export const EVENT_TYPE_LABELS: Record<CalendarEventType, string> = {
+  MEETING: 'Встреча', TASK: 'Задача', CALL: 'Звонок', DEADLINE: 'Дедлайн', TRAINING: 'Обучение', OTHER: 'Другое',
+};
+
+/** Matches backend/tools.py's CALENDAR_EVENT_COLORS mapping to Google's own
+ *  colorId palette, so the dot shown here is the same colour the event has
+ *  in the owner's actual Google Calendar app — not a second, unrelated
+ *  colour scheme invented just for this dashboard. */
+export const EVENT_TYPE_COLOR: Record<CalendarEventType, string> = {
+  MEETING: '#9b88ff', TASK: '#73d9ff', CALL: '#5ff0bf', DEADLINE: '#ff5d8f', TRAINING: '#ffc348', OTHER: '#8a94a6',
+};
+
+export const CALENDAR_STATUS_REASON_TEXT: Record<string, string> = {
+  no_credentials: 'На сервере нет google_credentials.json — учётные данные приложения Google ещё не настроены.',
+  no_token: 'Google не авторизован — токен доступа не найден.',
+  auth_error: 'Авторизация не выполнена или истекла.',
+  forbidden: 'Недостаточно прав для просмотра календаря Google.',
+};
 
 // ── CRM: tasks ───────────────────────────────────────────────────────────────
 

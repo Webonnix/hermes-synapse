@@ -44,6 +44,12 @@ TOOL_RISKS = {
     "request_capability": "R2",
     "request_mcp_connection": "R2",
     "add_calendar_event": "R3",
+    # Moving/renaming an existing event is the same order of risk as creating
+    # one — reversible, one owner approval. Deleting is not: it destroys a
+    # real event on the owner's own Google Calendar, so it gets
+    # delete_todoist_task's R4 (two approvals) rather than R3.
+    "update_calendar_event": "R3",
+    "delete_calendar_event": "R4",
     "add_todoist_task": "R3",
     "create_subagent": "R3",
     "save_subagent_memory": "R3",

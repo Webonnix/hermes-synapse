@@ -4005,6 +4005,28 @@ class ClientNoteUpdateRequest(BaseModel):
     pinned: Optional[bool] = None
 
 
+class CalendarEventRequest(BaseModel):
+    title: str
+    date: str
+    time: str = "10:00"
+    endTime: Optional[str] = None
+    durationMinutes: Optional[int] = None
+    description: str = ""
+    eventType: str = "OTHER"
+    location: str = ""
+
+
+class CalendarEventUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    date: Optional[str] = None
+    time: Optional[str] = None
+    endTime: Optional[str] = None
+    durationMinutes: Optional[int] = None
+    description: Optional[str] = None
+    eventType: Optional[str] = None
+    location: Optional[str] = None
+
+
 def _client_error(exc: Exception) -> HTTPException:
     """Maps the modules' domain errors onto status codes. Bad input is 400 and
     a missing row is 404 — neither is a server fault, and returning 500 for them
@@ -4746,6 +4768,97 @@ async def delete_client_note_api(note_id: str, request: Request):
     except Exception as exc:
         raise _client_error(exc)
     return {"status": "success", "id": note_id}
+
+
+# ── CRM: Календарь (Google Calendar) ────────────────────────────────────────
+# Thin wrappers over backend/tools.py's *dict*-returning internals
+# (`_list_events`/`_create_event`/`_update_event`/`_delete_event`) — the same
+# functions the chat agent's `get_calendar_events`/`add_calendar_event`/
+# `update_calendar_event`/`delete_calendar_event` tools call, so a dashboard
+# action and an agent action against the same event are one code path, not
+# two that could drift. Deliberately outside control_plane's R3/R4 approval
+# gate: that gate exists for the *agent* deciding on its own to touch the
+# owner's calendar, not for the owner's own dashboard button click.
+
+def _calendar_error(exc_or_message) -> HTTPException:
+    """404 means Google itself said the event is gone — its errors carry an
+    HTTP status/reason in English ("404", "Not Found"). Everything else
+    (missing credentials, an expired token, a network failure) is a 502: the
+    integration is not currently usable, which is a different situation from
+    "that specific event doesn't exist". The two must not be conflated — an
+    earlier version of this matched the *Russian* "не найден" substring,
+    which the credentials-missing message also contains ("...не найден."),
+    so a disconnected calendar was misreported as a 404."""
+    detail = str(exc_or_message)
+    if "404" in detail or "Not Found" in detail:
+        return HTTPException(status_code=404, detail=detail)
+    return HTTPException(status_code=502, detail=detail)
+
+
+@app.get("/api/calendar/status")
+async def calendar_status_api(request: Request):
+    from backend import permissions, tools
+    permissions.require(request, permissions.CLIENTS_CALENDAR_VIEW)
+    return await asyncio.to_thread(tools.calendar_connection_status)
+
+
+@app.get("/api/calendar/events")
+async def list_calendar_events_api(request: Request, dateFrom: str, dateTo: str):
+    """`dateFrom`/`dateTo` are YYYY-MM-DD, inclusive, interpreted in the same
+    Asia/Jerusalem local day boundaries the chat tools use — a month grid on
+    screen and "сегодня" in chat must agree on where a day starts."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    from backend import permissions, tools
+    permissions.require(request, permissions.CLIENTS_CALENDAR_VIEW)
+    try:
+        tz = ZoneInfo(tools.CALENDAR_LOCAL_TZ_NAME)
+        start = datetime.strptime(dateFrom, "%Y-%m-%d").replace(tzinfo=tz)
+        end = datetime.strptime(dateTo, "%Y-%m-%d").replace(tzinfo=tz) + timedelta(days=1)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Некорректная дата: {exc}")
+    events, err = await asyncio.to_thread(tools._list_events, start, end, 250)
+    if err:
+        raise _calendar_error(err)
+    return events
+
+
+@app.post("/api/calendar/events")
+async def create_calendar_event_api(payload: CalendarEventRequest, request: Request):
+    from backend import permissions, tools
+    permissions.require(request, permissions.CLIENTS_CALENDAR_EDIT)
+    event_type = payload.eventType if payload.eventType in tools.CALENDAR_EVENT_TYPES else "OTHER"
+    event, err = await asyncio.to_thread(
+        tools._create_event, payload.title, payload.date, payload.time, payload.durationMinutes,
+        payload.endTime, payload.description, event_type, payload.location,
+    )
+    if err:
+        raise _calendar_error(err)
+    return event
+
+
+@app.patch("/api/calendar/events/{event_id}")
+async def update_calendar_event_api(event_id: str, payload: CalendarEventUpdateRequest, request: Request):
+    from backend import permissions, tools
+    permissions.require(request, permissions.CLIENTS_CALENDAR_EDIT)
+    event_type = payload.eventType if payload.eventType in tools.CALENDAR_EVENT_TYPES else None
+    event, err = await asyncio.to_thread(
+        tools._update_event, event_id, payload.title, payload.date, payload.time, payload.endTime,
+        payload.durationMinutes, payload.description, event_type, payload.location,
+    )
+    if err:
+        raise _calendar_error(err)
+    return event
+
+
+@app.delete("/api/calendar/events/{event_id}")
+async def delete_calendar_event_api(event_id: str, request: Request):
+    from backend import permissions, tools
+    permissions.require(request, permissions.CLIENTS_CALENDAR_EDIT)
+    ok, err = await asyncio.to_thread(tools._delete_event, event_id)
+    if not ok:
+        raise _calendar_error(err)
+    return {"status": "success", "id": event_id}
 
 
 @app.websocket("/api/ws")

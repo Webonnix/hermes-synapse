@@ -118,7 +118,16 @@ TOOL_INTENT_KEYWORDS = {
     ],
     "add_calendar_event": [
         "добавь событие", "создай событие", "запиши в календар", "добавь в календар",
-        "создай встреч", "добавь встреч", "назначь встреч", "add event", "create meeting"
+        "создай встреч", "добавь встреч", "назначь встреч", "add event", "create meeting",
+        "напомни", "напоминание", "запланируй", "поставь звонок", "созвонимся"
+    ],
+    "update_calendar_event": [
+        "перенеси встреч", "перенеси событие", "измени встреч", "измени событие",
+        "перенеси созвон", "reschedule"
+    ],
+    "delete_calendar_event": [
+        "отмени встреч", "отмени событие", "удали встреч", "удали событие", "удали созвон",
+        "cancel meeting", "cancel event"
     ],
     "get_todoist_tasks": [
         "todoist", "задачи", "список дел", "что сделать", "tasks"
@@ -263,7 +272,8 @@ def _select_tools_for_query(user_message: str, tools_schema: List[Dict[str, Any]
         return []
 
     # Some actions often need a quick time reference to interpret "today", "tomorrow", or "in 10 minutes".
-    if matched & {"set_timer", "set_alarm", "get_calendar_events", "add_calendar_event", "web_search"}:
+    if matched & {"set_timer", "set_alarm", "get_calendar_events", "add_calendar_event",
+                  "update_calendar_event", "delete_calendar_event", "web_search"}:
         matched.add("get_current_time_israel")
 
     return [tool for tool in tools_schema if tool.get("function", {}).get("name") in matched]
@@ -1054,7 +1064,9 @@ CRITICAL RULES FOR TIMERS AND ALARMS:
 - NEVER ask clarifying questions (e.g., "Do you want a label for it?"). Just set the timer and confirm execution.
 
 CRITICAL RULES FOR CALENDAR AND TASK ACTIONS:
-- When the user asks to create or add a calendar event or meeting and date/time are present, call `add_calendar_event`.
+- When the user asks to create or add a calendar event, meeting or reminder and date/time are present, call `add_calendar_event`. Set `event_type` to match what it actually is (MEETING/TASK/CALL/DEADLINE/TRAINING/OTHER) — this is what colours it correctly in both the dashboard and the user's own Google Calendar. A plain "напомни мне ..." with no other context is TASK.
+- When the user asks to move, rename or otherwise change an existing event, first call `get_calendar_events` to find its `event_id` if you don't already have one from this conversation, then call `update_calendar_event`.
+- When the user asks to cancel or delete an event, find its `event_id` the same way, then call `delete_calendar_event`. Confirm what you cancelled in your reply — do not silently delete without saying so.
 - When the user asks to create a Todoist task, call `add_todoist_task`.
 - These actions are not complete when a tool returns `awaiting_approval`; report the task ID and request owner approval.
 
@@ -2391,7 +2403,7 @@ class JarvisAgent:
             "market_monitor": ["get_market_prices", "add_price_alert"],
             "obsidian_rag": ["search_obsidian", "read_obsidian_note", "create_obsidian_note", "sync_obsidian_vault"],
             "todoist_sync": ["get_todoist_tasks", "add_todoist_task", "delete_todoist_task"],
-            "google_calendar": ["get_calendar_events", "add_calendar_event"],
+            "google_calendar": ["get_calendar_events", "add_calendar_event", "update_calendar_event", "delete_calendar_event"],
             "timers_alarms": ["set_timer", "set_alarm", "cancel_timer_or_alarm"],
             "shell_execution": ["get_system_stats", "execute_command"],
             "python_sandbox": ["execute_command"],
