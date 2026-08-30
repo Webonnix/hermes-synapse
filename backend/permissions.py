@@ -42,6 +42,15 @@ CLIENTS_INVOICES_MARK_PAID = "clients.invoices.mark_paid"
 CLIENTS_PAYMENTS_VIEW = "clients.payments.view"
 CLIENTS_PAYMENTS_CREATE = "clients.payments.create"
 CLIENTS_FINANCIALS_VIEW = "clients.financials.view"
+# CRM: the sales pipeline (leads/deals), separately from the client book —
+# a support role can be trusted with follow-ups and notes on an existing
+# client without also seeing what is being negotiated with a prospect.
+CLIENTS_DEALS_VIEW = "clients.deals.view"
+CLIENTS_DEALS_EDIT = "clients.deals.edit"
+CLIENTS_TASKS_VIEW = "clients.tasks.view"
+CLIENTS_TASKS_EDIT = "clients.tasks.edit"
+CLIENTS_NOTES_VIEW = "clients.notes.view"
+CLIENTS_NOTES_EDIT = "clients.notes.edit"
 SETTINGS_CURRENCY_VIEW = "settings.currency.view"
 SETTINGS_CURRENCY_EDIT = "settings.currency.edit"
 
@@ -66,6 +75,9 @@ ALL_PERMISSIONS: tuple = (
     CLIENTS_INVOICES_MARK_PAID,
     CLIENTS_PAYMENTS_VIEW, CLIENTS_PAYMENTS_CREATE,
     CLIENTS_FINANCIALS_VIEW,
+    CLIENTS_DEALS_VIEW, CLIENTS_DEALS_EDIT,
+    CLIENTS_TASKS_VIEW, CLIENTS_TASKS_EDIT,
+    CLIENTS_NOTES_VIEW, CLIENTS_NOTES_EDIT,
     SETTINGS_CURRENCY_VIEW, SETTINGS_CURRENCY_EDIT,
     CF_VIEW, CF_PIPELINE_EDIT, CF_RUN_START, CF_RUN_CANCEL, CF_CONTENT_REVIEW,
     CF_PUBLISH, CF_CHANNELS_MANAGE, CF_SETTINGS_EDIT,
@@ -87,6 +99,9 @@ BUILTIN_ROLES: Dict[str, tuple] = {
         CLIENTS_INVOICES_MARK_PAID,
         CLIENTS_PAYMENTS_VIEW, CLIENTS_PAYMENTS_CREATE,
         CLIENTS_FINANCIALS_VIEW,
+        CLIENTS_DEALS_VIEW, CLIENTS_DEALS_EDIT,
+        CLIENTS_TASKS_VIEW, CLIENTS_TASKS_EDIT,
+        CLIENTS_NOTES_VIEW, CLIENTS_NOTES_EDIT,
         SETTINGS_CURRENCY_VIEW,
         # Runs the content operation end to end, including publishing to the
         # company's own channels; connecting new channels stays with the owner
@@ -94,15 +109,21 @@ BUILTIN_ROLES: Dict[str, tuple] = {
         CF_VIEW, CF_PIPELINE_EDIT, CF_RUN_START, CF_RUN_CANCEL, CF_CONTENT_REVIEW, CF_PUBLISH,
     ),
     # Support: sees who the clients are and whether their agents are healthy,
-    # and no money at all — no prices, no MRR, no invoices.
+    # and no money at all — no prices, no MRR, no invoices, no sales pipeline
+    # (a deal is a number being negotiated, same category as a price). Tasks
+    # and notes are exactly what this role's day is made of, so those stay in.
     "operator": (
         CLIENTS_VIEW, CLIENTS_AGENTS_VIEW, CLIENTS_AGENTS_CONNECT,
         CLIENTS_AGENTS_DISCONNECT, SETTINGS_CURRENCY_VIEW,
+        CLIENTS_TASKS_VIEW, CLIENTS_TASKS_EDIT, CLIENTS_NOTES_VIEW, CLIENTS_NOTES_EDIT,
         # The spec's REVIEWER (§81): may approve or reject a video, may not
         # edit the pipeline that produced it and may not publish it directly.
         CF_VIEW, CF_CONTENT_REVIEW, CF_RUN_START,
     ),
-    "viewer": (CLIENTS_VIEW, CLIENTS_AGENTS_VIEW, SETTINGS_CURRENCY_VIEW, CF_VIEW),
+    "viewer": (
+        CLIENTS_VIEW, CLIENTS_AGENTS_VIEW, CLIENTS_DEALS_VIEW, CLIENTS_TASKS_VIEW, CLIENTS_NOTES_VIEW,
+        SETTINGS_CURRENCY_VIEW, CF_VIEW,
+    ),
 }
 
 SETTING_CUSTOM_ROLES = "dashboard_roles"

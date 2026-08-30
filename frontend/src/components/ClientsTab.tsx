@@ -6,33 +6,43 @@ import { useCurrencySettings } from './currency/useCurrencySettings';
 import { ClientKpiCards, ClientKpiSkeleton } from './clients/ClientKpiCards';
 import { ClientsToolbar, EMPTY_FILTERS, type ClientFilters } from './clients/ClientsToolbar';
 import { ClientsPagination, ClientsTable, ClientsTableSkeleton, type SortKey } from './clients/ClientsTable';
-import { ClientDrawer } from './clients/ClientDrawer';
+import { ClientDrawer, type DraftState } from './clients/ClientDrawer';
 import { AgentConnectionsPane } from './clients/AgentConnectionsPane';
 import { ClientInvoicesPane } from './clients/ClientInvoicesPane';
 import { ClientPaymentsPane } from './clients/ClientPaymentsPane';
 import { ClientDetailsPane } from './clients/ClientDetailsPane';
+import { DealsPipeline } from './clients/DealsPipeline';
+import { DealDrawer } from './clients/DealDrawer';
+import { ClientTasksPane } from './clients/ClientTasksPane';
 import type {
   AgentConnection, CatalogueService, Client, ClientActivityEntry, ClientBillingSummary,
-  ClientInvoice, ClientPayment, ClientsDashboard, ClientsPage, PickerAgent,
+  ClientInvoice, ClientNote, ClientPayment, ClientsDashboard, ClientsPage, ClientTask, Deal,
+  DealStage, PickerAgent, PipelineSummary, TaskPriority, TaskStats,
 } from './clients/clientTypes';
 
 /**
- * «Клиенты» — the commercial section (§3).
+ * «Клиенты» — the CRM section (§3, §CRM).
  *
- * Four panes: the client book, agent connections, invoices and payments.
- * Navigation between them lives in the left sidebar (App.tsx), not on this
- * page — the sidebar owns the "which pane" question and passes it down as
- * `pane`/`onPaneChange`, the same controlled-with-fallback shape as any
- * externally-driven tab state. The fallback (internal state, defaulting to
- * 'clients') keeps this component fully usable standalone — every existing
- * test renders it with zero nav props and still gets a working clients list.
+ * Six panes: the sales pipeline, the client book, agent connections,
+ * invoices, payments and follow-ups. Navigation between them lives in the
+ * left sidebar (App.tsx), not on this page — the sidebar owns the "which
+ * pane" question and passes it down as `pane`/`onPaneChange`, the same
+ * controlled-with-fallback shape as any externally-driven tab state. The
+ * fallback (internal state, defaulting to 'clients') keeps this component
+ * fully usable standalone — every existing test renders it with zero nav
+ * props and still gets a working clients list.
  *
  * State that every pane depends on (currency settings, the agent and service
  * pickers) is loaded once here and passed down, so switching panes does not
  * re-fetch the world.
+ *
+ * The pipeline and the client book meet at exactly one place: converting a
+ * deal. That flow reuses this same `ClientDrawer` — pre-filled from the deal
+ * via its `prefill` prop — instead of a second creation form; see
+ * `submitClientOrConvert` and `startConvert` below.
  */
 
-export type Pane = 'clients' | 'connections' | 'invoices' | 'payments';
+export type Pane = 'deals' | 'clients' | 'connections' | 'invoices' | 'payments' | 'tasks';
 
 /** Turns the filter/sort/page state into the query the backend understands.
  *  Filtering happens server-side across the whole book — see §38. */
@@ -76,7 +86,7 @@ function exportCsv(clients: Client[], displayCurrency: string) {
   const escape = (value: string) => `"${String(value ?? '').replace(/"/g, '""')}"`;
   const csv = [header, ...rows].map(row => row.map(escape).join(';')).join('\n');
   // BOM so Excel opens the Cyrillic correctly instead of showing mojibake.
-  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
@@ -85,14 +95,32 @@ function exportCsv(clients: Client[], displayCurrency: string) {
   URL.revokeObjectURL(url);
 }
 
+/** What DealDrawer's "Конвертировать в клиента" hands to ClientDrawer as a
+ *  starting point — a person still reviews and completes it before saving. */
+function draftFromDeal(deal: Deal, baseCurrency: string): Partial<DraftState> {
+  return {
+    type: deal.companyName ? 'COMPANY' : 'PERSON',
+    name: deal.companyName || deal.contactName || deal.title,
+    projectName: deal.title,
+    contactName: deal.contactName,
+    contactEmail: deal.contactEmail,
+    contactPhone: deal.contactPhone,
+    amount: deal.value ?? '',
+    currency: deal.value ? deal.currency : baseCurrency,
+  };
+}
+
 export function ClientsTab({
   onOpenAgent, pane = 'clients',
 }: {
   onOpenAgent?: (agentId: string) => void;
-  /** Which of the four panes to show — set by the sidebar (App.tsx), which
+  /** Which of the six panes to show — set by the sidebar (App.tsx), which
    *  owns navigation for this section entirely; this component has no
-   *  internal way to change it. Defaults to 'clients' so it stays usable
-   *  standalone (every test renders it with no `pane` prop at all). */
+   *  internal way to change it. Defaults to 'clients' here so it stays
+   *  usable standalone (every existing test renders it with no `pane` prop);
+   *  App.tsx's own `clientsPane` state defaults to 'deals' instead — a CRM
+   *  opening on the pipeline is a production UX choice, not this
+   *  component's default. */
   pane?: Pane;
 }) {
   const { settings, loading: currencyLoading } = useCurrencySettings();
@@ -116,10 +144,30 @@ export function ClientsTab({
   const [selectedInvoices, setSelectedInvoices] = useState<ClientInvoice[]>([]);
   const [selectedPayments, setSelectedPayments] = useState<ClientPayment[]>([]);
   const [selectedActivity, setSelectedActivity] = useState<ClientActivityEntry[]>([]);
+  const [selectedTasks, setSelectedTasks] = useState<ClientTask[]>([]);
+  const [selectedTasksLoading, setSelectedTasksLoading] = useState(false);
+  const [selectedNotes, setSelectedNotes] = useState<ClientNote[]>([]);
+  const [selectedNotesLoading, setSelectedNotesLoading] = useState(false);
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerMode, setDrawerMode] = useState<'create' | 'edit'>('create');
   const [drawerClient, setDrawerClient] = useState<Client | null>(null);
+  const [drawerPrefill, setDrawerPrefill] = useState<Partial<DraftState> | undefined>(undefined);
+  const [convertingDeal, setConvertingDeal] = useState<Deal | null>(null);
+
+  // ── deals (sales pipeline) ──────────────────────────────────────────────
+  const [deals, setDeals] = useState<Deal[]>([]);
+  const [pipelineSummary, setPipelineSummary] = useState<PipelineSummary | null>(null);
+  const [dealsLoading, setDealsLoading] = useState(true);
+  const [dealsError, setDealsError] = useState('');
+  const [dealDrawerOpen, setDealDrawerOpen] = useState(false);
+  const [dealDrawerDeal, setDealDrawerDeal] = useState<Deal | null>(null);
+
+  // ── tasks (global pane) ──────────────────────────────────────────────────
+  const [tasks, setTasks] = useState<ClientTask[]>([]);
+  const [taskStats, setTaskStats] = useState<TaskStats | null>(null);
+  const [tasksLoading, setTasksLoading] = useState(false);
+  const [tasksError, setTasksError] = useState('');
 
   const [loading, setLoading] = useState(true);
   const [paneLoading, setPaneLoading] = useState(false);
@@ -129,8 +177,12 @@ export function ClientsTab({
 
   /** A 403 on the dashboard means this role lacks clients.financials.view. The
    *  money columns then disappear — and the backend already omitted the
-   *  numbers, so there is nothing to leak either way. */
+   *  numbers, so there is nothing to leak either way. Same idea for the
+   *  pipeline, tasks and notes, each behind its own permission. */
   const [canSeeFinancials, setCanSeeFinancials] = useState(true);
+  const [canViewDeals, setCanViewDeals] = useState(true);
+  const [canViewTasks, setCanViewTasks] = useState(true);
+  const [canViewNotes, setCanViewNotes] = useState(true);
 
   useEffect(() => {
     if (!toast) return undefined;
@@ -195,8 +247,60 @@ export function ClientsTab({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings.displayCurrency, ratesKey, currencyLoading]);
 
+  const loadDeals = useCallback(async () => {
+    setDealsLoading(true);
+    setDealsError('');
+    try {
+      const [list, summary] = await Promise.all([
+        api<Deal[]>('/api/deals').catch(exc => {
+          if (String((exc as Error).message).includes('403')) { setCanViewDeals(false); return []; }
+          throw exc;
+        }),
+        api<PipelineSummary>('/api/deals/pipeline').catch(() => null),
+      ]);
+      setDeals(Array.isArray(list) ? list : []);
+      setPipelineSummary(summary);
+    } catch (exc) {
+      setDealsError((exc as Error).message);
+    } finally {
+      setDealsLoading(false);
+    }
+  }, []);
+
+  const loadTasks = useCallback(async () => {
+    setTasksLoading(true);
+    setTasksError('');
+    try {
+      const [list, stats] = await Promise.all([
+        api<ClientTask[]>('/api/client-tasks').catch(exc => {
+          if (String((exc as Error).message).includes('403')) { setCanViewTasks(false); return []; }
+          throw exc;
+        }),
+        api<TaskStats>('/api/client-tasks/stats').catch(() => null),
+      ]);
+      setTasks(Array.isArray(list) ? list : []);
+      setTaskStats(stats);
+    } catch (exc) {
+      setTasksError((exc as Error).message);
+    } finally {
+      setTasksLoading(false);
+    }
+  }, []);
+
+  // The task-stats badge on the sidebar needs a number even when this section
+  // is not the active pane, so it refreshes on an interval regardless — the
+  // same pattern SMM Factory uses for its pending-drafts count.
+  useEffect(() => {
+    void loadTasks();
+    const interval = setInterval(() => { void loadTasks(); }, 60000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => { if (pane === 'deals') void loadDeals(); }, [pane, loadDeals]);
+
   const loadPane = useCallback(async (target: Pane) => {
-    if (target === 'clients') return;
+    if (target === 'clients' || target === 'deals' || target === 'tasks') return;
     setPaneLoading(true);
     setPaneError('');
     try {
@@ -215,6 +319,34 @@ export function ClientsTab({
   }, []);
 
   useEffect(() => { void loadPane(pane); }, [pane, loadPane]);
+
+  /** Fetches one client's notes and applies the same defensive shape guard
+   *  every array-typed response in this file gets — a malformed response
+   *  must not crash the notes pane, only leave it empty. */
+  const fetchNotes = useCallback(async (clientId: string): Promise<ClientNote[]> => {
+    try {
+      const list = await api<ClientNote[]>(`/api/clients/${clientId}/notes`);
+      return Array.isArray(list) ? list : [];
+    } catch (exc) {
+      if (String((exc as Error).message).includes('403')) setCanViewNotes(false);
+      return [];
+    }
+  }, []);
+
+  const loadClientExtras = useCallback(async (clientId: string) => {
+    setSelectedTasksLoading(true);
+    setSelectedNotesLoading(true);
+    try {
+      const list = await api<ClientTask[]>(`/api/client-tasks?clientId=${clientId}`);
+      setSelectedTasks(Array.isArray(list) ? list : []);
+    } catch {
+      setSelectedTasks([]);
+    } finally {
+      setSelectedTasksLoading(false);
+    }
+    setSelectedNotes(await fetchNotes(clientId));
+    setSelectedNotesLoading(false);
+  }, [fetchNotes]);
 
   const openClient = useCallback(async (client: Client) => {
     try {
@@ -236,10 +368,11 @@ export function ClientsTab({
       setSelectedInvoices(clientInvoices);
       setSelectedPayments(clientPayments);
       setSelectedActivity(activity);
+      void loadClientExtras(client.id);
     } catch (exc) {
       setToast((exc as Error).message);
     }
-  }, [canSeeFinancials]);
+  }, [canSeeFinancials, loadClientExtras]);
 
   const submitClient = useCallback(async (
     payload: Record<string, unknown>, mode: 'create' | 'edit', clientId?: string,
@@ -253,6 +386,24 @@ export function ClientsTab({
     }
     await loadClients();
   }, [loadClients]);
+
+  /** Fires when ClientDrawer's onSubmit runs while a deal conversion is in
+   *  progress — the drawer itself does not know it is being reused for this,
+   *  which is the point (see the module docstring). */
+  const submitClientOrConvert = useCallback(async (
+    payload: Record<string, unknown>, mode: 'create' | 'edit', clientId?: string,
+  ) => {
+    if (convertingDeal) {
+      const result = await api<{ deal: Deal; client: Client }>(
+        `/api/deals/${convertingDeal.id}/convert-to-client`, { method: 'POST', body: JSON.stringify(payload) },
+      );
+      setToast(`Сделка стала клиентом «${result.client.name}»`);
+      setConvertingDeal(null);
+      await loadDeals();
+      return;
+    }
+    await submitClient(payload, mode, clientId);
+  }, [convertingDeal, loadDeals, submitClient]);
 
   const connectionAction = useCallback(async (
     connection: AgentConnection, action: 'check' | 'reconnect' | 'disconnect',
@@ -324,6 +475,108 @@ export function ClientsTab({
     });
   }, []);
 
+  // ── deals actions ────────────────────────────────────────────────────────
+
+  const submitDeal = useCallback(async (payload: Record<string, unknown>, dealId?: string) => {
+    if (dealId) {
+      await api(`/api/deals/${dealId}`, { method: 'PATCH', body: JSON.stringify(payload) });
+      setToast('Сделка обновлена');
+    } else {
+      await api('/api/deals', { method: 'POST', body: JSON.stringify(payload) });
+      setToast('Сделка создана');
+    }
+    await loadDeals();
+  }, [loadDeals]);
+
+  const changeDealStage = useCallback(async (deal: Deal, stage: DealStage) => {
+    try {
+      await api(`/api/deals/${deal.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(stage === 'LOST'
+          ? { stage, lostReason: window.prompt('Причина проигрыша сделки:', deal.lostReason || '') || '' }
+          : { stage }),
+      });
+      await loadDeals();
+    } catch (exc) {
+      setToast((exc as Error).message);
+      await loadDeals(); // snap the card back to its real stage
+    }
+  }, [loadDeals]);
+
+  const deleteDeal = useCallback(async (deal: Deal) => {
+    if (!window.confirm(`Удалить сделку «${deal.title}»?`)) return;
+    try {
+      await api(`/api/deals/${deal.id}`, { method: 'DELETE' });
+      setToast('Сделка удалена');
+      await loadDeals();
+    } catch (exc) {
+      setToast((exc as Error).message);
+    }
+  }, [loadDeals]);
+
+  const startConvert = useCallback((deal: Deal) => {
+    setDealDrawerOpen(false);
+    setConvertingDeal(deal);
+    setDrawerPrefill(draftFromDeal(deal, settings.baseCurrency));
+    setDrawerMode('create');
+    setDrawerClient(null);
+    setDrawerOpen(true);
+  }, [settings.baseCurrency]);
+
+  // ── task actions (shared between the global pane and the client card) ──
+
+  const createTask = useCallback(async (payload: {
+    title: string; dueAt: string; priority: TaskPriority; clientId?: string; dealId?: string;
+  }) => {
+    await api('/api/client-tasks', { method: 'POST', body: JSON.stringify(payload) });
+    await loadTasks();
+    if (payload.clientId && selected?.id === payload.clientId) await loadClientExtras(payload.clientId);
+  }, [loadTasks, loadClientExtras, selected]);
+
+  const refreshTasksEverywhere = useCallback(async () => {
+    await loadTasks();
+    if (selected) await loadClientExtras(selected.id);
+  }, [loadTasks, loadClientExtras, selected]);
+
+  const completeTask = useCallback((task: { id: string }) => {
+    api(`/api/client-tasks/${task.id}/complete`, { method: 'POST' })
+      .then(refreshTasksEverywhere)
+      .catch(exc => setToast((exc as Error).message));
+  }, [refreshTasksEverywhere]);
+
+  const reopenTask = useCallback((task: { id: string }) => {
+    api(`/api/client-tasks/${task.id}/reopen`, { method: 'POST' })
+      .then(refreshTasksEverywhere)
+      .catch(exc => setToast((exc as Error).message));
+  }, [refreshTasksEverywhere]);
+
+  const deleteTask = useCallback((task: { id: string; title: string }) => {
+    if (!window.confirm(`Удалить задачу «${task.title}»?`)) return;
+    api(`/api/client-tasks/${task.id}`, { method: 'DELETE' })
+      .then(refreshTasksEverywhere)
+      .catch(exc => setToast((exc as Error).message));
+  }, [refreshTasksEverywhere]);
+
+  // ── note actions ─────────────────────────────────────────────────────────
+
+  const createNote = useCallback(async (body: string) => {
+    if (!selected) return;
+    await api(`/api/clients/${selected.id}/notes`, { method: 'POST', body: JSON.stringify({ body }) });
+    setSelectedNotes(await fetchNotes(selected.id));
+  }, [selected, fetchNotes]);
+
+  const updateNote = useCallback(async (note: ClientNote, patch: { body?: string; pinned?: boolean }) => {
+    await api(`/api/client-notes/${note.id}`, { method: 'PATCH', body: JSON.stringify(patch) });
+    if (selected) setSelectedNotes(await fetchNotes(selected.id));
+  }, [selected, fetchNotes]);
+
+  const deleteNote = useCallback((note: ClientNote) => {
+    if (!window.confirm('Удалить заметку?')) return;
+    api(`/api/client-notes/${note.id}`, { method: 'DELETE' })
+      .then(() => selected && fetchNotes(selected.id).then(setSelectedNotes))
+      .catch(exc => setToast((exc as Error).message));
+  }, [selected, fetchNotes]);
+
   const clients = useMemo(() => result?.items ?? [], [result]);
   const showSkeletons = loading && !result;
 
@@ -337,8 +590,14 @@ export function ClientsTab({
           invoices={selectedInvoices}
           payments={selectedPayments}
           activity={selectedActivity}
+          tasks={selectedTasks}
+          tasksLoading={selectedTasksLoading}
+          notes={selectedNotes}
+          notesLoading={selectedNotesLoading}
           settings={settings}
           canSeeFinancials={canSeeFinancials}
+          canViewTasks={canViewTasks}
+          canViewNotes={canViewNotes}
           onBack={() => setSelected(null)}
           onCheck={connection => connectionAction(connection, 'check')}
           onReconnect={connection => connectionAction(connection, 'reconnect')}
@@ -349,6 +608,13 @@ export function ClientsTab({
           onCancelInvoice={invoice => invoiceAction(invoice, 'cancel')}
           onCreateInvoice={createInvoiceForSelected}
           onReload={() => openClient(selected)}
+          onCreateTask={createTask}
+          onCompleteTask={completeTask}
+          onReopenTask={reopenTask}
+          onDeleteTask={deleteTask}
+          onCreateNote={createNote}
+          onUpdateNote={updateNote}
+          onDeleteNote={deleteNote}
         />
       </div>
     );
@@ -359,22 +625,41 @@ export function ClientsTab({
       <div style={styles.tabHeader}>
         <div>
           <h2 className="glow-text-cyan" style={styles.tabTitle}>Клиенты</h2>
-          <p style={styles.tabSubtitle}>Клиенты, услуги, агенты и платежи</p>
+          <p style={styles.tabSubtitle}>Сделки, клиенты, услуги, агенты, платежи и задачи</p>
         </div>
-        <div className="cl-header-actions">
-          <button type="button" className="btn-ghost"
-                  disabled={clients.length === 0}
-                  onClick={() => exportCsv(clients, result?.displayCurrency ?? settings.displayCurrency)}>
-            <Download size={15} /><span>Экспорт</span>
-          </button>
-          <button type="button" className="btn-primary"
-                  onClick={() => { setDrawerMode('create'); setDrawerClient(null); setDrawerOpen(true); }}>
-            <Plus size={16} /><span>Добавить клиента</span>
-          </button>
-        </div>
+        {pane === 'clients' && (
+          <div className="cl-header-actions">
+            <button type="button" className="btn-ghost"
+                    disabled={clients.length === 0}
+                    onClick={() => exportCsv(clients, result?.displayCurrency ?? settings.displayCurrency)}>
+              <Download size={15} /><span>Экспорт</span>
+            </button>
+            <button type="button" className="btn-primary"
+                    onClick={() => { setDrawerMode('create'); setDrawerClient(null); setDrawerPrefill(undefined); setDrawerOpen(true); }}>
+              <Plus size={16} /><span>Добавить клиента</span>
+            </button>
+          </div>
+        )}
       </div>
 
       {toast && <div className="cl-toast" role="status">{toast}</div>}
+
+      {pane === 'deals' && !canViewDeals && (
+        <div className="admin-empty-cta"><span>Недостаточно прав для просмотра воронки сделок.</span></div>
+      )}
+      {pane === 'deals' && canViewDeals && (
+        <DealsPipeline
+          deals={deals}
+          summary={pipelineSummary}
+          loading={dealsLoading}
+          error={dealsError}
+          settings={settings}
+          onCreate={() => { setDealDrawerDeal(null); setDealDrawerOpen(true); }}
+          onOpen={deal => { setDealDrawerDeal(deal); setDealDrawerOpen(true); }}
+          onStageChange={changeDealStage}
+          onRetry={() => void loadDeals()}
+        />
+      )}
 
       {pane === 'clients' && (
         <>
@@ -404,7 +689,7 @@ export function ClientsTab({
               <strong>Клиентов пока нет</strong>
               <span>Добавьте первого клиента, чтобы начать вести услуги, агентов и платежи.</span>
               <button type="button" className="btn-primary"
-                      onClick={() => { setDrawerMode('create'); setDrawerClient(null); setDrawerOpen(true); }}>
+                      onClick={() => { setDrawerMode('create'); setDrawerClient(null); setDrawerPrefill(undefined); setDrawerOpen(true); }}>
                 <Plus size={15} /><span>Добавить клиента</span>
               </button>
             </div>
@@ -418,7 +703,7 @@ export function ClientsTab({
                 canSeeFinancials={canSeeFinancials}
                 onSort={toggleSort}
                 onOpen={client => void openClient(client)}
-                onEdit={client => { setDrawerMode('edit'); setDrawerClient(client); setDrawerOpen(true); }}
+                onEdit={client => { setDrawerMode('edit'); setDrawerClient(client); setDrawerPrefill(undefined); setDrawerOpen(true); }}
                 onConnectAgent={client => void openClient(client)}
               />
               <ClientsPagination
@@ -480,6 +765,46 @@ export function ClientsTab({
         />
       )}
 
+      {pane === 'tasks' && !canViewTasks && (
+        <div className="admin-empty-cta"><span>Недостаточно прав для просмотра задач.</span></div>
+      )}
+      {pane === 'tasks' && canViewTasks && (
+        <>
+          {taskStats && (
+            <div className="cl-kpi-row">
+              <div className="glass-panel admin-stat-card">
+                <div className="admin-stat-body">
+                  <span className="admin-stat-label">Открыто</span>
+                  <strong className="admin-stat-value">{taskStats.open}</strong>
+                </div>
+              </div>
+              <div className="glass-panel admin-stat-card">
+                <div className="admin-stat-body">
+                  <span className="admin-stat-label">Сегодня</span>
+                  <strong className="admin-stat-value">{taskStats.dueToday}</strong>
+                </div>
+              </div>
+              <div className={`glass-panel admin-stat-card${taskStats.overdue > 0 ? ' is-warning' : ''}`}>
+                <div className="admin-stat-body">
+                  <span className="admin-stat-label">Просрочено</span>
+                  <strong className="admin-stat-value">{taskStats.overdue}</strong>
+                </div>
+              </div>
+            </div>
+          )}
+          <ClientTasksPane
+            tasks={tasks}
+            loading={tasksLoading}
+            error={tasksError}
+            onCreate={createTask}
+            onComplete={completeTask}
+            onReopen={reopenTask}
+            onDelete={deleteTask}
+            onRetry={() => void loadTasks()}
+          />
+        </>
+      )}
+
       <ClientDrawer
         open={drawerOpen}
         mode={drawerMode}
@@ -487,8 +812,21 @@ export function ClientsTab({
         settings={settings}
         services={services}
         agents={agents}
-        onClose={() => setDrawerOpen(false)}
-        onSubmit={submitClient}
+        prefill={drawerPrefill}
+        title={convertingDeal ? `Клиент из сделки «${convertingDeal.title}»` : undefined}
+        submitLabel={convertingDeal ? 'Создать клиента' : undefined}
+        onClose={() => { setDrawerOpen(false); setConvertingDeal(null); }}
+        onSubmit={submitClientOrConvert}
+      />
+
+      <DealDrawer
+        open={dealDrawerOpen}
+        deal={dealDrawerDeal}
+        settings={settings}
+        onClose={() => setDealDrawerOpen(false)}
+        onSubmit={submitDeal}
+        onDelete={deleteDeal}
+        onConvert={startConvert}
       />
     </div>
   );

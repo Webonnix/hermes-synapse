@@ -1,5 +1,6 @@
 import type {
-  BillingFrequency, ClientStatus, ConnectionStatus, InvoiceStatus, PaymentStatus, ServiceType,
+  BillingFrequency, ClientStatus, ConnectionStatus, DealStage, InvoiceStatus, PaymentStatus,
+  ServiceType, TaskPriority, TaskStatus,
 } from './clientTypes';
 
 /** Russian labels and badge tones for every enum the module renders.
@@ -104,11 +105,67 @@ export const INVOICE_STATUS_TONE: Record<InvoiceStatus, Tone> = {
   CANCELLED: 'is-inactive',
 };
 
+// ── CRM: sales pipeline ──────────────────────────────────────────────────────
+
+/** Kanban column order — the one place that order is decided; everything else
+ *  (the board, the stage picker, the summary cards) iterates this. */
+export const DEAL_STAGE_ORDER: DealStage[] = [
+  'NEW', 'CONTACTED', 'QUALIFIED', 'PROPOSAL', 'NEGOTIATION', 'WON', 'LOST',
+];
+
+export const DEAL_STAGE_LABELS: Record<DealStage, string> = {
+  NEW: 'Новый', CONTACTED: 'Связались', QUALIFIED: 'Квалификация', PROPOSAL: 'Предложение',
+  NEGOTIATION: 'Переговоры', WON: 'Выигран', LOST: 'Проигран',
+};
+
+export const DEAL_STAGE_TONE: Record<DealStage, Tone> = {
+  NEW: 'is-inactive', CONTACTED: 'is-pending', QUALIFIED: 'is-pending', PROPOSAL: 'is-pending',
+  NEGOTIATION: 'is-pending', WON: 'is-active', LOST: 'is-revoked',
+};
+
+export const DEAL_SOURCES = ['Сайт', 'Реферал', 'Соцсети', 'Холодный контакт', 'Партнёр', 'Другое'];
+
+// ── CRM: tasks ───────────────────────────────────────────────────────────────
+
+export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
+  OPEN: 'Открыта', DONE: 'Выполнена', CANCELLED: 'Отменена',
+};
+
+export const TASK_PRIORITY_LABELS: Record<TaskPriority, string> = {
+  LOW: 'Низкий', NORMAL: 'Обычный', HIGH: 'Высокий',
+};
+
+/** "Сегодня" / "Завтра" / "Просрочено на 2 дн." — a due date reads as a
+ *  relation to today, not as a calendar date, everywhere a task shows it. */
+export function formatDueDate(value: string | null | undefined): string {
+  if (!value) return 'Без срока';
+  const due = new Date(`${value.slice(0, 10)}T00:00:00`);
+  if (Number.isNaN(due.getTime())) return formatDate(value);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const days = Math.round((due.getTime() - today.getTime()) / 86400000);
+  if (days === 0) return 'Сегодня';
+  if (days === 1) return 'Завтра';
+  if (days === -1) return 'Вчера';
+  if (days > 1 && days <= 6) return `Через ${days} дн.`;
+  if (days < -1) return `Просрочено на ${Math.abs(days)} дн.`;
+  return formatDate(value);
+}
+
 export function formatDate(value: string | null | undefined): string {
   if (!value) return '—';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '—';
   return date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+/** Whole days since a timestamp — the kanban card's "N дней в стадии" and the
+ *  staleness flag it earns past a week share this one calculation. */
+export function daysSince(value: string | null | undefined): number {
+  if (!value) return 0;
+  const then = new Date(value);
+  if (Number.isNaN(then.getTime())) return 0;
+  return Math.max(0, Math.floor((Date.now() - then.getTime()) / 86400000));
 }
 
 /** "2 минуты назад" — the form the agents block uses for last activity. */

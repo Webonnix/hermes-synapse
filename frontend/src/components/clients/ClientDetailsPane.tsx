@@ -9,13 +9,18 @@ import { AgentConnectionBadge, ClientStatusBadge, ServiceTypeBadge } from './Cli
 import { FREQUENCY_LABELS, formatDate, formatRelative } from './clientLabels';
 import { ClientInvoicesPane } from './ClientInvoicesPane';
 import { ClientPaymentsPane } from './ClientPaymentsPane';
+import { ClientTasksPane } from './ClientTasksPane';
+import { ClientNotesPane } from './ClientNotesPane';
 import type {
-  AgentConnection, Client, ClientActivityEntry, ClientBillingSummary, ClientInvoice, ClientPayment,
+  AgentConnection, Client, ClientActivityEntry, ClientBillingSummary, ClientInvoice, ClientNote, ClientPayment,
+  ClientTask, TaskPriority,
 } from './clientTypes';
 
 /** Client card (§46–§50): overview, services, agents, billing, documents. */
 
-type Section = 'overview' | 'services' | 'agents' | 'billing' | 'invoices' | 'payments' | 'contacts' | 'activity';
+type Section =
+  | 'overview' | 'services' | 'agents' | 'billing' | 'invoices' | 'payments'
+  | 'tasks' | 'notes' | 'contacts' | 'activity';
 
 const SECTIONS: Array<{ id: Section; label: string }> = [
   { id: 'overview', label: 'Обзор' },
@@ -24,6 +29,8 @@ const SECTIONS: Array<{ id: Section; label: string }> = [
   { id: 'billing', label: 'Billing' },
   { id: 'invoices', label: 'Счета' },
   { id: 'payments', label: 'Платежи' },
+  { id: 'tasks', label: 'Задачи' },
+  { id: 'notes', label: 'Заметки' },
   { id: 'contacts', label: 'Контакты' },
   { id: 'activity', label: 'Активность' },
 ];
@@ -38,17 +45,26 @@ function InfoRow({ label, value }: { label: string; value: ReactNode }) {
 }
 
 export function ClientDetailsPane({
-  client, billing, invoices, payments, activity, settings, canSeeFinancials,
+  client, billing, invoices, payments, activity, tasks, tasksLoading, notes, notesLoading,
+  settings, canSeeFinancials, canViewTasks, canViewNotes,
   onBack, onCheck, onReconnect, onDisconnect, onOpenAgent,
   onIssueInvoice, onMarkPaid, onCancelInvoice, onCreateInvoice, onReload,
+  onCreateTask, onCompleteTask, onReopenTask, onDeleteTask,
+  onCreateNote, onUpdateNote, onDeleteNote,
 }: {
   client: Client;
   billing: ClientBillingSummary | null;
   invoices: ClientInvoice[];
   payments: ClientPayment[];
   activity: ClientActivityEntry[];
+  tasks: ClientTask[];
+  tasksLoading: boolean;
+  notes: ClientNote[];
+  notesLoading: boolean;
   settings: CurrencySettings;
   canSeeFinancials: boolean;
+  canViewTasks: boolean;
+  canViewNotes: boolean;
   onBack: () => void;
   onCheck: (connection: AgentConnection) => void;
   onReconnect: (connection: AgentConnection) => void;
@@ -59,6 +75,13 @@ export function ClientDetailsPane({
   onCancelInvoice: (invoice: ClientInvoice) => void;
   onCreateInvoice: () => void;
   onReload: () => void;
+  onCreateTask: (payload: { title: string; dueAt: string; priority: TaskPriority; clientId?: string; dealId?: string }) => Promise<void>;
+  onCompleteTask: (task: ClientTask) => void;
+  onReopenTask: (task: ClientTask) => void;
+  onDeleteTask: (task: ClientTask) => void;
+  onCreateNote: (body: string) => Promise<void>;
+  onUpdateNote: (note: ClientNote, patch: { body?: string; pinned?: boolean }) => Promise<void>;
+  onDeleteNote: (note: ClientNote) => void;
 }) {
   const [section, setSection] = useState<Section>('overview');
 
@@ -66,8 +89,12 @@ export function ClientDetailsPane({
   // whatever tab happened to be open for the previous one.
   useEffect(() => { setSection('overview'); }, [client.id]);
 
-  const visibleSections = SECTIONS.filter(item =>
-    canSeeFinancials || !['billing', 'invoices', 'payments'].includes(item.id));
+  const visibleSections = SECTIONS.filter(item => {
+    if (['billing', 'invoices', 'payments'].includes(item.id)) return canSeeFinancials;
+    if (item.id === 'tasks') return canViewTasks;
+    if (item.id === 'notes') return canViewNotes;
+    return true;
+  });
 
   return (
     <div className="cl-details">
@@ -249,6 +276,22 @@ export function ClientDetailsPane({
       {section === 'payments' && canSeeFinancials && (
         <ClientPaymentsPane
           payments={payments} loading={false} error="" settings={settings} onRetry={onReload}
+        />
+      )}
+
+      {section === 'tasks' && canViewTasks && (
+        <ClientTasksPane
+          tasks={tasks} loading={tasksLoading} error="" embedded
+          clientId={client.id}
+          onCreate={onCreateTask} onComplete={onCompleteTask} onReopen={onReopenTask} onDelete={onDeleteTask}
+          onRetry={onReload}
+        />
+      )}
+
+      {section === 'notes' && canViewNotes && (
+        <ClientNotesPane
+          notes={notes} loading={notesLoading} error=""
+          onCreate={onCreateNote} onUpdate={onUpdateNote} onDelete={onDeleteNote} onRetry={onReload}
         />
       )}
 

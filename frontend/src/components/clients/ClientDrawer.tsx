@@ -15,7 +15,7 @@ import type { CatalogueService, Client, PickerAgent } from './clientTypes';
  * behind it.
  */
 
-interface DraftState {
+export interface DraftState {
   type: 'COMPANY' | 'PERSON';
   name: string;
   projectName: string;
@@ -63,7 +63,7 @@ function Field({ label, children, hint }: { label: string; children: ReactNode; 
 }
 
 export function ClientDrawer({
-  open, mode, client, settings, services, agents, onClose, onSubmit,
+  open, mode, client, settings, services, agents, onClose, onSubmit, prefill, submitLabel, title,
 }: {
   open: boolean;
   mode: 'create' | 'edit';
@@ -73,8 +73,17 @@ export function ClientDrawer({
   agents: PickerAgent[];
   onClose: () => void;
   onSubmit: (payload: Record<string, unknown>, mode: 'create' | 'edit', clientId?: string) => Promise<void>;
+  /** Starting values for a fresh 'create' draft — used to hand a won deal off
+   *  to this same drawer instead of building a second, thinner copy of the
+   *  form just for conversion (see DealDrawer's docstring). Ignored in 'edit'
+   *  mode, where the client's own data always wins. */
+  prefill?: Partial<DraftState>;
+  /** Overrides the footer's primary button label ("Создать клиента" instead
+   *  of "Добавить клиента") and the header title, for the conversion flow. */
+  submitLabel?: string;
+  title?: string;
 }) {
-  const [draft, setDraft] = useState<DraftState>(() => emptyDraft(settings.baseCurrency));
+  const [draft, setDraft] = useState<DraftState>(() => ({ ...emptyDraft(settings.baseCurrency), ...prefill }));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -107,8 +116,13 @@ export function ClientDrawer({
           ? String(service.billing.customIntervalDays) : '',
       });
     } else {
-      setDraft(emptyDraft(settings.baseCurrency));
+      setDraft({ ...emptyDraft(settings.baseCurrency), ...prefill });
     }
+    // prefill is a plain object built fresh by the caller on every render; keying
+    // off it would reopen this effect (and reset anything the operator typed)
+    // on every keystroke elsewhere in the page. It only has to apply once, when
+    // the drawer opens — the mount-time initial state above already covers that.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, mode, client, settings.baseCurrency]);
 
   if (!open) return null;
@@ -179,9 +193,10 @@ export function ClientDrawer({
   return (
     <>
       <div className="cl-drawer-backdrop" onClick={onClose} aria-hidden />
-      <aside className="cl-drawer" role="dialog" aria-modal="true" aria-label={mode === 'edit' ? 'Редактирование клиента' : 'Новый клиент'}>
+      <aside className="cl-drawer" role="dialog" aria-modal="true"
+             aria-label={title ?? (mode === 'edit' ? 'Редактирование клиента' : 'Новый клиент')}>
         <header>
-          <span>{mode === 'edit' ? 'Редактировать клиента' : 'Добавить клиента'}</span>
+          <span>{title ?? (mode === 'edit' ? 'Редактировать клиента' : 'Добавить клиента')}</span>
           <button type="button" className="icon-btn" onClick={onClose} aria-label="Закрыть">
             <X size={15} />
           </button>
@@ -357,7 +372,7 @@ export function ClientDrawer({
         <footer className="cl-drawer-footer">
           <button type="button" className="btn-ghost" onClick={onClose}>Отмена</button>
           <button type="button" className="btn-primary" disabled={saving} onClick={submit}>
-            {saving ? 'Сохранение…' : (mode === 'edit' ? 'Сохранить' : 'Добавить клиента')}
+            {saving ? 'Сохранение…' : (submitLabel ?? (mode === 'edit' ? 'Сохранить' : 'Добавить клиента'))}
           </button>
         </footer>
       </aside>

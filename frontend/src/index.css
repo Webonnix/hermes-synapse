@@ -2858,6 +2858,333 @@ main.simple-chat-page { min-width: 0; padding: 0 !important; overflow: hidden !i
   .cl-price-row { grid-template-columns: 1fr; }
 }
 
+/* ═══ CRM: sales pipeline (Сделки) ═══════════════════════════════════════
+   A row of columns that scrolls horizontally rather than wrapping — seven
+   stages is more than a laptop-width page fits, and a kanban board that
+   wrapped columns onto a second row would stop reading as a pipeline. */
+.cl-kanban {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  overflow-x: auto;
+  padding-bottom: 6px;
+}
+
+.cl-kanban-column {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 0 0 260px;
+  width: 260px;
+  padding: 10px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+/* Drop target feedback — the one piece of state a drag interaction needs to
+   communicate that isn't already obvious from the cursor. */
+.cl-kanban-column.is-drag-over {
+  border-color: rgba(155, 136, 255, 0.4);
+  background: rgba(155, 136, 255, 0.06);
+}
+
+.cl-kanban-col-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 2px 6px;
+  flex-wrap: wrap;
+}
+
+.cl-kanban-col-count {
+  font: 700 0.72rem var(--font-mono);
+  color: var(--text-dim);
+}
+
+.cl-kanban-col-value {
+  margin-left: auto;
+  font: 600 0.7rem var(--font-mono);
+  color: var(--text-dim);
+}
+
+.cl-kanban-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 40px;
+}
+
+.cl-kanban-empty {
+  padding: 14px 8px;
+  text-align: center;
+  font-size: 0.74rem;
+  color: var(--text-dim);
+  border: 1px dashed rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+}
+
+.cl-deal-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  cursor: grab;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.cl-deal-card:active {
+  cursor: grabbing;
+}
+
+.cl-deal-card.is-dragging {
+  opacity: 0.4;
+}
+
+.cl-deal-card-title {
+  border: none;
+  background: none;
+  padding: 0;
+  text-align: left;
+  font: 600 0.82rem var(--font-sans);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.cl-deal-card-title:hover {
+  color: var(--accent-cyan);
+}
+
+.cl-deal-card-sub {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.74rem;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cl-deal-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cl-deal-value {
+  font: 700 0.8rem var(--font-sans);
+  color: var(--text-primary);
+}
+
+.cl-deal-days {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* A deal that has sat in the same open stage a week or more is exactly the
+   thing a pipeline view exists to surface — the amber tone is the same one
+   .admin-stat-card.is-warning uses elsewhere, so "stale" reads consistently
+   with every other warning in the dashboard. */
+.cl-deal-days.is-stale {
+  color: var(--warning);
+}
+
+.cl-deal-stage-select select {
+  font-size: 0.72rem;
+  padding: 5px 8px;
+}
+
+.cl-deal-stage-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cl-deal-stage-btn {
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text-muted);
+  font: 600 0.72rem var(--font-sans);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.cl-deal-stage-btn:hover {
+  color: var(--text-primary);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.cl-deal-stage-btn.is-active {
+  color: #d8d1ff;
+  background: rgba(155, 136, 255, 0.16);
+  border-color: rgba(155, 136, 255, 0.4);
+}
+
+/* ═══ CRM: follow-ups (Задачи) ════════════════════════════════════════════ */
+.cl-task-add {
+  display: grid;
+  grid-template-columns: 1fr 150px 130px auto;
+  gap: 8px;
+}
+
+.cl-task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  list-style: none;
+}
+
+.cl-task-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 6px;
+  border-radius: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.cl-task-row:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.cl-task-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: transparent;
+  color: transparent;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.cl-task-check:hover {
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+}
+
+.cl-task-row.is-done .cl-task-check {
+  background: var(--success);
+  border-color: var(--success);
+  color: #0f172a;
+}
+
+.cl-task-row.is-done .cl-task-title {
+  color: var(--text-dim);
+  text-decoration: line-through;
+}
+
+.cl-task-row.is-overdue .cl-task-check {
+  border-color: var(--danger);
+}
+
+.cl-task-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.cl-task-title {
+  font-size: 0.84rem;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cl-task-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.72rem;
+}
+
+.cl-task-priority {
+  font: 700 0.62rem var(--font-mono);
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.cl-task-priority.is-high {
+  color: var(--danger);
+  background: rgba(255, 93, 143, 0.1);
+}
+
+.cl-task-priority.is-low {
+  color: var(--text-dim);
+}
+
+/* ═══ CRM: client notes (Заметки) ═════════════════════════════════════════ */
+.cl-note-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cl-note-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  list-style: none;
+}
+
+.cl-note-card {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cl-note-card.is-pinned {
+  border-color: rgba(255, 195, 72, 0.3);
+}
+
+.cl-note-card > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cl-note-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.76rem;
+  color: var(--text-primary);
+}
+
+.cl-note-body {
+  font-size: 0.84rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 900px) {
+  .cl-task-add { grid-template-columns: 1fr; }
+  .cl-kanban-column { flex-basis: 240px; width: 240px; }
+}
+
 /* ── sidebar submenu (Клиенты → Список клиентов/Подключения/Счета/Платежи) ──
    Nested navigation inside the left rail, distinct from .navBtn (App.tsx
    inline styles) since it's a new pattern this sidebar didn't have before —
@@ -2901,4 +3228,18 @@ main.simple-chat-page { min-width: 0; padding: 0 !important; overflow: hidden !i
 
 .sidebar-submenu button svg {
   flex-shrink: 0;
+}
+
+/* Overdue-task count on the "Задачи" submenu item — same warning tone as
+   .admin-stat-card.is-warning, so a person reads it the same way whether it
+   shows up here or as a KPI card inside the pane itself. */
+.sidebar-submenu-badge {
+  margin-left: auto;
+  min-width: 16px;
+  padding: 1px 5px;
+  border-radius: 9px;
+  background: rgba(255, 195, 72, 0.22);
+  color: #ffe1a1;
+  font: 700 0.62rem var(--font-mono);
+  text-align: center;
 }

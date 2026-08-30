@@ -3949,6 +3949,28 @@ class ClientPaymentRequest(BaseModel):
     comment: str = ""
 
 
+class DealRequest(BaseModel):
+    # Free-form like ClientRequest: backend/deals.py owns field validation, and
+    # the convert-to-client action forwards a client-shaped payload through the
+    # very same "extra: allow" pattern ClientRequest uses.
+    model_config = {"extra": "allow"}
+
+
+class ClientTaskRequest(BaseModel):
+    model_config = {"extra": "allow"}
+
+
+class ClientNoteRequest(BaseModel):
+    body: str
+    author: str = ""
+    pinned: bool = False
+
+
+class ClientNoteUpdateRequest(BaseModel):
+    body: Optional[str] = None
+    pinned: Optional[bool] = None
+
+
 def _client_error(exc: Exception) -> HTTPException:
     """Maps the modules' domain errors onto status codes. Bad input is 400 and
     a missing row is 404 — neither is a server fault, and returning 500 for them
@@ -4475,6 +4497,221 @@ async def run_client_billing_scheduler_api(request: Request):
     generated = await asyncio.to_thread(client_billing.generate_due_invoices)
     aged = await asyncio.to_thread(client_billing.sweep_overdue_invoices)
     return {**generated, "markedOverdue": aged}
+
+
+# ── CRM: sales pipeline (deals) ──────────────────────────────────────────────
+
+@app.get("/api/deals/pipeline")
+async def deals_pipeline_api(request: Request, displayCurrency: Optional[str] = None):
+    from backend import deals, permissions
+    permissions.require(request, permissions.CLIENTS_DEALS_VIEW)
+    try:
+        return await asyncio.to_thread(deals.pipeline_summary, displayCurrency)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.get("/api/deals")
+async def list_deals_api(
+    request: Request, stage: Optional[str] = None, search: str = "",
+    responsibleUserId: Optional[str] = None, includeClosed: bool = True,
+):
+    from backend import deals, permissions
+    permissions.require(request, permissions.CLIENTS_DEALS_VIEW)
+    try:
+        return await asyncio.to_thread(
+            deals.list_deals, stage=stage, search=search,
+            responsible_user_id=responsibleUserId, include_closed=includeClosed,
+        )
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.post("/api/deals")
+async def create_deal_api(payload: DealRequest, request: Request):
+    from backend import deals, permissions
+    actor = permissions.require(request, permissions.CLIENTS_DEALS_EDIT)
+    try:
+        return await asyncio.to_thread(deals.create_deal, payload.model_dump(), actor)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.get("/api/deals/{deal_id}")
+async def get_deal_api(deal_id: str, request: Request):
+    from backend import deals, permissions
+    permissions.require(request, permissions.CLIENTS_DEALS_VIEW)
+    deal = await asyncio.to_thread(deals.get_deal, deal_id)
+    if not deal:
+        raise HTTPException(status_code=404, detail="Сделка не найдена")
+    return deal
+
+
+@app.patch("/api/deals/{deal_id}")
+async def update_deal_api(deal_id: str, payload: DealRequest, request: Request):
+    """One route for every deal edit — a plain field change or a kanban card
+    dragged to a new stage (see backend/deals.py:update_deal)."""
+    from backend import deals, permissions
+    actor = permissions.require(request, permissions.CLIENTS_DEALS_EDIT)
+    try:
+        return await asyncio.to_thread(deals.update_deal, deal_id, payload.model_dump(exclude_unset=True), actor)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.delete("/api/deals/{deal_id}")
+async def delete_deal_api(deal_id: str, request: Request):
+    from backend import deals, permissions
+    permissions.require(request, permissions.CLIENTS_DEALS_EDIT)
+    try:
+        await asyncio.to_thread(deals.delete_deal, deal_id)
+    except Exception as exc:
+        raise _client_error(exc)
+    return {"status": "success", "id": deal_id}
+
+
+@app.post("/api/deals/{deal_id}/convert-to-client")
+async def convert_deal_api(deal_id: str, payload: ClientRequest, request: Request):
+    """Turns a won deal into a real client — the payload is exactly what the
+    "Добавить клиента" drawer would submit (name, contact, service, agent),
+    pre-filled by the frontend from the deal. Requires both deals-edit (this
+    changes the deal) and clients-create (it creates a client record)."""
+    from backend import deals, permissions
+    actor = permissions.require(request, permissions.CLIENTS_DEALS_EDIT, permissions.CLIENTS_CREATE)
+    try:
+        deal, client = await asyncio.to_thread(deals.convert_to_client, deal_id, payload.model_dump(), actor)
+    except Exception as exc:
+        raise _client_error(exc)
+    return {"deal": deal, "client": client}
+
+
+# ── CRM: tasks and follow-ups ────────────────────────────────────────────────
+
+@app.get("/api/client-tasks")
+async def list_client_tasks_api(
+    request: Request, clientId: Optional[str] = None, dealId: Optional[str] = None,
+    status: Optional[str] = None, overdueOnly: bool = False,
+):
+    from backend import client_tasks, permissions
+    permissions.require(request, permissions.CLIENTS_TASKS_VIEW)
+    try:
+        return await asyncio.to_thread(
+            client_tasks.list_tasks, client_id=clientId, deal_id=dealId, status=status, overdue_only=overdueOnly,
+        )
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.get("/api/client-tasks/stats")
+async def client_task_stats_api(request: Request):
+    from backend import client_tasks, permissions
+    permissions.require(request, permissions.CLIENTS_TASKS_VIEW)
+    return await asyncio.to_thread(client_tasks.task_stats)
+
+
+@app.post("/api/client-tasks")
+async def create_client_task_api(payload: ClientTaskRequest, request: Request):
+    from backend import client_tasks, permissions
+    actor = permissions.require(request, permissions.CLIENTS_TASKS_EDIT)
+    try:
+        return await asyncio.to_thread(client_tasks.create_task, payload.model_dump(), actor)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.patch("/api/client-tasks/{task_id}")
+async def update_client_task_api(task_id: str, payload: ClientTaskRequest, request: Request):
+    from backend import client_tasks, permissions
+    actor = permissions.require(request, permissions.CLIENTS_TASKS_EDIT)
+    try:
+        return await asyncio.to_thread(
+            client_tasks.update_task, task_id, payload.model_dump(exclude_unset=True), actor,
+        )
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.post("/api/client-tasks/{task_id}/complete")
+async def complete_client_task_api(task_id: str, request: Request):
+    from backend import client_tasks, permissions
+    actor = permissions.require(request, permissions.CLIENTS_TASKS_EDIT)
+    try:
+        return await asyncio.to_thread(client_tasks.complete_task, task_id, actor)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.post("/api/client-tasks/{task_id}/reopen")
+async def reopen_client_task_api(task_id: str, request: Request):
+    from backend import client_tasks, permissions
+    actor = permissions.require(request, permissions.CLIENTS_TASKS_EDIT)
+    try:
+        return await asyncio.to_thread(client_tasks.reopen_task, task_id, actor)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.post("/api/client-tasks/{task_id}/cancel")
+async def cancel_client_task_api(task_id: str, request: Request):
+    from backend import client_tasks, permissions
+    actor = permissions.require(request, permissions.CLIENTS_TASKS_EDIT)
+    try:
+        return await asyncio.to_thread(client_tasks.cancel_task, task_id, actor)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.delete("/api/client-tasks/{task_id}")
+async def delete_client_task_api(task_id: str, request: Request):
+    from backend import client_tasks, permissions
+    permissions.require(request, permissions.CLIENTS_TASKS_EDIT)
+    try:
+        await asyncio.to_thread(client_tasks.delete_task, task_id)
+    except Exception as exc:
+        raise _client_error(exc)
+    return {"status": "success", "id": task_id}
+
+
+# ── CRM: client notes ────────────────────────────────────────────────────────
+
+@app.get("/api/clients/{client_id}/notes")
+async def list_client_notes_api(client_id: str, request: Request):
+    from backend import client_notes, permissions
+    permissions.require(request, permissions.CLIENTS_NOTES_VIEW)
+    return await asyncio.to_thread(client_notes.list_notes, client_id)
+
+
+@app.post("/api/clients/{client_id}/notes")
+async def create_client_note_api(client_id: str, payload: ClientNoteRequest, request: Request):
+    from backend import client_notes, permissions
+    actor = permissions.require(request, permissions.CLIENTS_NOTES_EDIT)
+    try:
+        return await asyncio.to_thread(
+            client_notes.create_note, client_id, payload.body, payload.author, payload.pinned, actor,
+        )
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.patch("/api/client-notes/{note_id}")
+async def update_client_note_api(note_id: str, payload: ClientNoteUpdateRequest, request: Request):
+    from backend import client_notes, permissions
+    permissions.require(request, permissions.CLIENTS_NOTES_EDIT)
+    try:
+        return await asyncio.to_thread(client_notes.update_note, note_id, payload.body, payload.pinned)
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.delete("/api/client-notes/{note_id}")
+async def delete_client_note_api(note_id: str, request: Request):
+    from backend import client_notes, permissions
+    permissions.require(request, permissions.CLIENTS_NOTES_EDIT)
+    try:
+        await asyncio.to_thread(client_notes.delete_note, note_id)
+    except Exception as exc:
+        raise _client_error(exc)
+    return {"status": "success", "id": note_id}
 
 
 @app.websocket("/api/ws")

@@ -207,3 +207,89 @@ export interface ClientActivityEntry {
   actor_id: string | null;
   created_at: string;
 }
+
+// ── CRM: sales pipeline ──────────────────────────────────────────────────────
+
+export type DealStage =
+  | 'NEW' | 'CONTACTED' | 'QUALIFIED' | 'PROPOSAL' | 'NEGOTIATION' | 'WON' | 'LOST';
+
+export interface Deal {
+  id: string;
+  title: string;
+  stage: DealStage;
+  clientId: string | null;
+  contactName: string;
+  contactEmail: string;
+  contactPhone: string;
+  companyName: string;
+  /** Decimal string, never pre-converted — same rule as ClientService.amount. */
+  value: string | null;
+  currency: string;
+  source: string;
+  responsibleUserId: string | null;
+  expectedCloseDate: string | null;
+  lostReason: string;
+  createdAt: string;
+  updatedAt: string;
+  stageChangedAt: string;
+  wonAt: string | null;
+  lostAt: string | null;
+}
+
+export interface DealStageAggregate {
+  count: number;
+  valueUsd: string;
+}
+
+export interface PipelineSummary {
+  currency: string;
+  baseCurrency: string;
+  openCount: number;
+  openValue: MoneyPair;
+  wonCount: number;
+  lostCount: number;
+  winRate: number | null;
+  wonThisMonthCount: number;
+  wonThisMonthValue: MoneyPair;
+  byStage: Record<DealStage, DealStageAggregate>;
+}
+
+// ── CRM: tasks and follow-ups ────────────────────────────────────────────────
+
+export type TaskStatus = 'OPEN' | 'DONE' | 'CANCELLED';
+export type TaskPriority = 'LOW' | 'NORMAL' | 'HIGH';
+
+export interface ClientTask {
+  id: string;
+  clientId: string | null;
+  dealId: string | null;
+  title: string;
+  description: string;
+  dueAt: string | null;
+  status: TaskStatus;
+  priority: TaskPriority;
+  assignee: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  /** Computed by the backend against today's date, not stored. */
+  overdue: boolean;
+}
+
+export interface TaskStats {
+  open: number;
+  overdue: number;
+  dueToday: number;
+}
+
+// ── CRM: client notes ────────────────────────────────────────────────────────
+
+export interface ClientNote {
+  id: string;
+  clientId: string;
+  author: string;
+  body: string;
+  pinned: boolean;
+  createdAt: string;
+  updatedAt: string;
+}

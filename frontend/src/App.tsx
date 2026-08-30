@@ -28,7 +28,9 @@ import {
   FileText,
   Wallet,
   Factory,
-  Megaphone
+  Megaphone,
+  Target,
+  ListChecks
 } from 'lucide-react';
 
 import type { AppSettings, ChatMessage, ChatSession, DecisionLog, ActivityLog, SystemConfig, AgentModel, Project, SystemStats } from './types';
@@ -107,8 +109,14 @@ export default function App() {
     return (savedTab && legacySettingsTabs.includes(savedTab) ? savedTab : 'config') as any;
   });
   /** Which pane of the Клиенты section is open — set from the sidebar's
-   *  submenu, read back there to highlight the active item. */
-  const [clientsPane, setClientsPane] = useState<ClientsPane>('clients');
+   *  submenu, read back there to highlight the active item. Defaults to the
+   *  pipeline: a CRM opens on "what needs working", not a static list. */
+  const [clientsPane, setClientsPane] = useState<ClientsPane>('deals');
+  /** Overdue-task count for the "Задачи" sidebar badge — polled independently
+   *  of ClientsTab (same reason AppHeader polls its own approvals count):
+   *  the badge has to stay live while the user is on an entirely different
+   *  tab, where ClientsTab itself is unmounted. */
+  const [overdueTaskCount, setOverdueTaskCount] = useState(0);
   const [vexaTranscriptOpen, setVexaTranscriptOpen] = useState(false);
   /** Which bottom-nav destination is open as a floating window over the Vexa dashboard. */
   const [vexaFloatingPanel, setVexaFloatingPanel] = useState<Exclude<DashboardRoute, 'terminal'> | null>(null);
@@ -1022,6 +1030,20 @@ export default function App() {
       return res;
     });
   }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated) return undefined;
+    let cancelled = false;
+    const load = () => {
+      fetchWithAuth('/api/client-tasks/stats')
+        .then(res => (res.ok ? res.json() : null))
+        .then(data => { if (!cancelled && data) setOverdueTaskCount(data.overdue || 0); })
+        .catch(() => {});
+    };
+    load();
+    const interval = setInterval(load, 60000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [isAuthenticated, fetchWithAuth]);
 
   const handleRequestOtp = async () => {
     setAuthStatus('sending');
@@ -2411,6 +2433,13 @@ export default function App() {
             <div className="sidebar-submenu" role="group" aria-label={t('navClients')}>
               <button
                 type="button"
+                className={clientsPane === 'deals' ? 'is-active' : ''}
+                onClick={() => { setClientsPane('deals'); setSidebarOpen(false); }}
+              >
+                <Target size={14} /><span>Сделки</span>
+              </button>
+              <button
+                type="button"
                 className={clientsPane === 'clients' ? 'is-active' : ''}
                 onClick={() => { setClientsPane('clients'); setSidebarOpen(false); }}
               >
@@ -2436,6 +2465,14 @@ export default function App() {
                 onClick={() => { setClientsPane('payments'); setSidebarOpen(false); }}
               >
                 <Wallet size={14} /><span>Платежи</span>
+              </button>
+              <button
+                type="button"
+                className={clientsPane === 'tasks' ? 'is-active' : ''}
+                onClick={() => { setClientsPane('tasks'); setSidebarOpen(false); }}
+              >
+                <ListChecks size={14} /><span>Задачи</span>
+                {overdueTaskCount > 0 && <span className="sidebar-submenu-badge">{overdueTaskCount}</span>}
               </button>
             </div>
           )}
