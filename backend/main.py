@@ -34,6 +34,12 @@ class ConfigUpdate(BaseModel):
     model: str | None = None
     fast_mode: bool | None = None
     max_history_len: int | None = None
+    # The dashboard has had these two controls since the condenser landed, but
+    # they were missing here (and from App.tsx's request body), so the checkbox
+    # flipped, Save reported success, and the value was dropped on the floor —
+    # the response then snapped the box back to its old state.
+    condenser_enabled: bool | None = None
+    condense_trigger_extra: int | None = None
     max_tokens: int | None = None
     tool_max_tokens: int | None = None
     temperature: float | None = None
@@ -235,11 +241,35 @@ async def lifespan(app: FastAPI):
     from backend.price_monitor import price_monitor
     price_monitor.start()
 
+    # Puts the LLM back in VRAM after an Ollama restart and keeps it there —
+    # keep_alive alone cannot do that, see backend/model_keeper.py.
+    model_keeper_task = None
+    from backend import model_keeper
+    if model_keeper.keep_resident_enabled():
+        model_keeper_task = asyncio.create_task(model_keeper.keeper_loop())
+
     # Durable dev-runs worker: resumes unfinished runs after restart.
     dev_runs_worker_task = None
     if os.getenv("DEV_RUNS_WORKER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
         from backend import dev_runs
         dev_runs_worker_task = asyncio.create_task(dev_runs.worker_loop())
+
+    # Content Factory: additive schema, its agent roster, and the pipeline
+    # worker that resumes interrupted runs. Every step is guarded — a failure
+    # here disables content production, it must not stop the whole backend.
+    content_factory_worker_task = None
+    try:
+        from backend.content_factory import agents as cf_agents
+        from backend.content_factory.schema import ensure_schema as cf_ensure_schema
+        cf_ensure_schema()
+        seeded = cf_agents.seed_agents()
+        if seeded:
+            logger.info("Content Factory: seeded agents %s", ", ".join(seeded))
+        if os.getenv("CONTENT_FACTORY_WORKER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
+            from backend.content_factory import execution as cf_execution
+            content_factory_worker_task = asyncio.create_task(cf_execution.worker_loop())
+    except Exception:
+        logger.exception("Content Factory startup failed — the module is unavailable this run")
 
     bot_app = await init_bot()
 
@@ -257,6 +287,18 @@ async def lifespan(app: FastAPI):
 
     from backend import agent_email_channel
     await agent_email_channel.manager.start_all_active()
+
+    # SMM Factory social channels. VK polls like the messengers above; the Meta
+    # ones only register what is active — their messages arrive at
+    # backend/social_webhooks.py, so there is nothing to start.
+    from backend import agent_vk_bot
+    await agent_vk_bot.manager.start_all_active()
+
+    from backend import agent_meta_channel
+    await agent_meta_channel.manager.start_all_active()
+
+    from backend import agent_whatsapp_channel
+    await agent_whatsapp_channel.manager.start_all_active()
 
     # Background Obsidian vault sync (non-blocking)
     async def _obsidian_startup_sync():
@@ -311,6 +353,15 @@ async def lifespan(app: FastAPI):
         from backend import client_billing
         client_billing_task = asyncio.create_task(client_billing.scheduler_loop())
 
+    # SMM Factory: send scheduled posts when their slot arrives. Only auto
+    # posts move — a manual one has no way out of here, so a timer must not
+    # claim it went out (backend/smm_posts.py). Minute granularity is enough:
+    # the schedule picker offers minutes, and a missed tick simply catches up.
+    smm_scheduler_task = None
+    if os.getenv("SMM_SCHEDULER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
+        from backend import smm_posts
+        smm_scheduler_task = asyncio.create_task(smm_posts.scheduler_loop())
+
     # Proactively probe every active messenger channel's stored credential so a
     # dead Matrix/Telegram/Discord/Slack/email token surfaces as a visible
     # "Ошибка" in the dashboard within minutes, not whenever someone happens to
@@ -327,10 +378,33 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_channel_health_check_task())
 
     yield
+    if smm_scheduler_task is not None:
+        smm_scheduler_task.cancel()
+        try:
+            await smm_scheduler_task
+        except asyncio.CancelledError:
+            pass
+
     if client_billing_task is not None:
         client_billing_task.cancel()
         try:
             await client_billing_task
+        except asyncio.CancelledError:
+            pass
+
+    if model_keeper_task is not None:
+        model_keeper_task.cancel()
+        try:
+            await model_keeper_task
+        except asyncio.CancelledError:
+            pass
+
+    # Content Factory worker stops before the dev-runs one: it holds provider
+    # calls that cost money, so it should stop accepting new nodes first.
+    if content_factory_worker_task is not None:
+        content_factory_worker_task.cancel()
+        try:
+            await content_factory_worker_task
         except asyncio.CancelledError:
             pass
 
@@ -353,6 +427,15 @@ async def lifespan(app: FastAPI):
     await agent_slack_bot.manager.stop_all()
     from backend import agent_email_channel
     await agent_email_channel.manager.stop_all()
+
+    from backend import agent_vk_bot
+    await agent_vk_bot.manager.stop_all()
+
+    from backend import agent_meta_channel
+    await agent_meta_channel.manager.stop_all()
+
+    from backend import agent_whatsapp_channel
+    await agent_whatsapp_channel.manager.stop_all()
     await shutdown_bot()
     
     # Stop price alert monitor background task
@@ -398,7 +481,14 @@ async def auth_middleware(request: Request, call_next):
         # raw body instead (backend/payments.handle_webhook). It grants nothing
         # on a bad signature.
         "/api/payments/webhook",
-    ) or path.startswith("/api/plots/") or path.startswith("/api/generated-images/"):
+    ) or path.startswith("/api/plots/") or path.startswith("/api/generated-images/") or (
+        # Meta social webhooks (Instagram/Facebook/WhatsApp): the provider can't
+        # hold a dashboard session either, so these routes authenticate each
+        # delivery themselves — the verify token on the GET handshake and an
+        # X-Hub-Signature-256 HMAC over the raw body on every POST
+        # (backend/social_webhooks.py). They grant nothing without that proof.
+        path.startswith("/api/social/webhook/")
+    ):
         return await call_next(request)
         
     # Apply auth only to API routes
@@ -531,6 +621,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# CONTENT FACTORY (§74). Mounted as a router rather than more @app routes: it is
+# the one module here with a versioned API surface of its own, and the auth
+# middleware above already covers every /api/ path it exposes.
+try:
+    from backend.content_factory.api import router as content_factory_router
+    app.include_router(content_factory_router)
+except Exception:
+    logger.exception("Content Factory API not mounted")
+
+
+# SMM FACTORY. Meta's webhook receiver, mounted as its own router: public by
+# design (see the auth middleware's allow-list) because it authenticates each
+# delivery by HMAC signature rather than by a dashboard session. Kept out of the
+# Content Factory try/except above so a failure there cannot silently take the
+# social channels' only inbound path down with it.
+try:
+    from backend.social_webhooks import router as social_webhooks_router
+    app.include_router(social_webhooks_router)
+except Exception:
+    logger.exception("SMM Factory social webhooks not mounted")
 
 
 @app.get("/health/live", include_in_schema=False)
@@ -712,6 +824,8 @@ async def update_config(update: ConfigUpdate):
         ollama_think=update.ollama_think,
         fast_mode=update.fast_mode,
         max_history_len=update.max_history_len,
+        condenser_enabled=update.condenser_enabled,
+        condense_trigger_extra=update.condense_trigger_extra,
         max_tokens=update.max_tokens,
         tool_max_tokens=update.tool_max_tokens,
         temperature=update.temperature,
@@ -2176,6 +2290,7 @@ class ProjectRequest(BaseModel):
     name: str
     description: str = ""
     is_active: bool = True
+    parent_id: Optional[str] = None
 
 class AgentTelegramBindingRequest(BaseModel):
     bot_token: str
@@ -2204,6 +2319,7 @@ class MessengerBindingUpdateRequest(BaseModel):
     auto_reply_disclosure: Optional[str] = None
     human_takeover_pause_minutes: Optional[int] = None
     escalation_enabled: Optional[bool] = None
+    handling_menu_enabled: Optional[bool] = None
 
 class MessengerBindingReconnectRequest(BaseModel):
     """One shape covering all 5 platforms' credential fields — the endpoint reads
@@ -2223,6 +2339,61 @@ class MessengerBindingReconnectRequest(BaseModel):
     smtp_host: Optional[str] = None
     smtp_port: Optional[int] = None
     address: Optional[str] = None
+    # Social platforms: the same free-form credential map the connect form uses.
+    credentials: Optional[Dict[str, str]] = None
+
+class AgentSocialBindingRequest(BaseModel):
+    """One shape for all four social platforms (VK, Instagram, Facebook,
+    WhatsApp). `credentials` carries exactly the fields that platform declares
+    in agent_messenger_governance.SOCIAL_PLATFORMS — the frontend renders its
+    form from that same declaration (GET /api/social-platforms), so the two
+    cannot drift apart."""
+    platform: str
+    credentials: Dict[str, str] = Field(default_factory=dict)
+    allowed_chat_ids: List[str] = Field(default_factory=list)
+    system_prompt: str = ""
+    response_mode: str = "draft"
+
+class SmmSettingsRequest(BaseModel):
+    public_base_url: Optional[str] = None
+
+class SmmPublicationRequest(BaseModel):
+    """One outbound post. `binding_id`/`target_chat_id` are only meaningful for
+    delivery_mode='auto' — that pair is what backend/smm_posts.py hands to the
+    shared per-platform sender. A 'manual' post carries no credentials at all;
+    it is a record of something the owner posts themselves."""
+    title: str
+    platform: str
+    body: str = ""
+    account: str = ""
+    binding_id: str = ""
+    target_chat_id: str = ""
+    delivery_mode: str = "manual"
+    status: str = "draft"
+    tags: List[str] = Field(default_factory=list)
+    media_url: str = ""
+    scheduled_at: Optional[str] = None
+    reach: Optional[int] = None
+    reach_delta: Optional[float] = None
+
+class SmmPublicationUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    platform: Optional[str] = None
+    body: Optional[str] = None
+    account: Optional[str] = None
+    binding_id: Optional[str] = None
+    target_chat_id: Optional[str] = None
+    delivery_mode: Optional[str] = None
+    status: Optional[str] = None
+    tags: Optional[List[str]] = None
+    media_url: Optional[str] = None
+    scheduled_at: Optional[str] = None
+    published_at: Optional[str] = None
+    reach: Optional[int] = None
+    reach_delta: Optional[float] = None
+
+class SmmPublicationBulkRequest(BaseModel):
+    ids: List[str] = Field(default_factory=list)
 
 class PendingReplySendRequest(BaseModel):
     edited_text: Optional[str] = None
@@ -2327,7 +2498,9 @@ async def list_projects_api():
 async def create_project_api(project: ProjectRequest):
     from backend.projects import create_project
     try:
-        return await asyncio.to_thread(create_project, project.name, project.description, project.is_active)
+        return await asyncio.to_thread(
+            create_project, project.name, project.description, project.is_active, project.parent_id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2338,6 +2511,7 @@ async def update_project_api(project_id: str, project: ProjectRequest):
         return await asyncio.to_thread(
             update_project, project_id,
             name=project.name, description=project.description, is_active=project.is_active,
+            parent_id=project.parent_id,
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -2559,25 +2733,228 @@ async def delete_agent_email_binding_api(binding_id: str):
     return {"status": "success", "id": binding_id}
 
 
+@app.get("/api/social-platforms")
+async def list_social_platforms_api():
+    """What each social platform needs to connect, straight from the backend's
+    own declaration — the SMM Factory connect form renders its fields from this
+    rather than hard-coding a second copy that could drift from the validator."""
+    from backend.agent_messenger_governance import SOCIAL_PLATFORMS
+
+    return [
+        {
+            "id": platform,
+            "label": spec["label"],
+            "delivery": spec["delivery"],
+            "required": list(spec["required"]),
+            "account_field": spec["account_field"],
+        }
+        for platform, spec in SOCIAL_PLATFORMS.items()
+    ]
+
+
+@app.get("/api/agents/{agent_id}/social")
+async def list_agent_social_bindings_api(agent_id: str):
+    from backend.agent_messenger_governance import list_social_bindings
+    return await asyncio.to_thread(list_social_bindings, None, agent_id)
+
+
+@app.post("/api/agents/{agent_id}/social")
+async def create_agent_social_binding_api(agent_id: str, payload: AgentSocialBindingRequest):
+    """Validates a social account credential against the provider itself and
+    creates the same single-confirmation (R3) proposal every other channel
+    goes through — nothing polls, and no webhook is honoured, until approval."""
+    from backend.agent_messenger_governance import SOCIAL_PLATFORMS, create_social_binding_proposal
+
+    if payload.platform not in SOCIAL_PLATFORMS:
+        raise HTTPException(status_code=400, detail=f"Unknown social platform: {payload.platform}")
+    try:
+        proposal = await asyncio.to_thread(
+            create_social_binding_proposal, payload.platform, agent_id, payload.credentials,
+            payload.allowed_chat_ids, payload.system_prompt, "", "", payload.response_mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "status": proposal["status"],
+        "binding_id": proposal["id"],
+        "account": proposal["bot_username"],
+        "task_id": proposal["control_task_id"],
+        "risk_class": "R3",
+        "message": "Учётные данные проверены. Канал заработает после одного подтверждения владельца.",
+    }
+
+
+@app.get("/api/messenger-bindings/{binding_id}/webhook")
+async def get_social_webhook_details_api(binding_id: str):
+    """The callback URL and verify token to paste into the Meta app console.
+    Its own endpoint because the verify token is a credential and stays out of
+    the general binding list."""
+    from backend.agent_messenger_governance import social_webhook_details
+
+    try:
+        return await asyncio.to_thread(social_webhook_details, binding_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Binding not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/smm/settings")
+async def get_smm_settings_api():
+    """SMM Factory-wide settings. Today just the public base URL the Meta
+    webhooks are reachable at — the backend cannot discover that for itself
+    behind a reverse proxy, and the connect form has to show the owner an
+    exact URL to register."""
+    from backend.database import get_setting
+
+    return {"public_base_url": await asyncio.to_thread(get_setting, "smm_public_base_url") or ""}
+
+
+@app.put("/api/smm/settings")
+async def update_smm_settings_api(payload: SmmSettingsRequest):
+    from backend.database import set_setting
+
+    if payload.public_base_url is not None:
+        await asyncio.to_thread(set_setting, "smm_public_base_url", payload.public_base_url.strip().rstrip("/"))
+    return await get_smm_settings_api()
+
+
+# ── SMM Factory: the publication register ──────────────────────────────────
+# The outbound half of the section (backend/smm_posts.py). Everything else here
+# answers people who wrote first; this is what the accounts say on their own.
+
+@app.get("/api/smm/publications")
+async def list_smm_publications_api(
+    status: str = "all",
+    platform: str = "all",
+    q: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    page: int = 1,
+    per_page: int = 10,
+    sort: str = "date",
+    direction: str = "desc",
+):
+    from backend import smm_posts
+
+    try:
+        return await asyncio.to_thread(
+            smm_posts.list_publications, status, platform, q, date_from or None,
+            date_to or None, page, per_page, sort, direction,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/smm/publications/stats")
+async def smm_publication_stats_api(platform: str = "all", date_from: str = "", date_to: str = ""):
+    """KPI row above the table, computed over the same period/platform filter
+    the table uses so the cards and the rows can never disagree."""
+    from backend import smm_posts
+
+    try:
+        return await asyncio.to_thread(
+            smm_posts.publication_stats, platform, date_from or None, date_to or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/smm/publications")
+async def create_smm_publication_api(payload: SmmPublicationRequest):
+    from backend import smm_posts
+
+    try:
+        return await asyncio.to_thread(
+            smm_posts.create_publication,
+            payload.title, payload.platform, payload.body, payload.account, payload.binding_id,
+            payload.target_chat_id, payload.delivery_mode, payload.status, payload.tags,
+            payload.media_url, payload.scheduled_at, None, payload.reach, payload.reach_delta,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/smm/publications/{post_id}")
+async def get_smm_publication_api(post_id: str):
+    from backend import smm_posts
+
+    post = await asyncio.to_thread(smm_posts.get_publication, post_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="Публикация не найдена")
+    return post
+
+
+@app.put("/api/smm/publications/{post_id}")
+async def update_smm_publication_api(post_id: str, payload: SmmPublicationUpdateRequest):
+    from backend import smm_posts
+
+    try:
+        return await asyncio.to_thread(
+            smm_posts.update_publication, post_id, **payload.model_dump(exclude_unset=True),
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Публикация не найдена")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/smm/publications/{post_id}/publish")
+async def publish_smm_publication_api(post_id: str):
+    """Sends an auto post through its bound channel now, or records that a
+    manual one went out. A provider refusal comes back as 409 with the
+    provider's own wording — the row is left 'Ошибка', never 'Опубликовано'."""
+    from backend import smm_posts
+
+    try:
+        return await smm_posts.publish_publication(post_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Публикация не найдена")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=f"Не удалось опубликовать: {exc}") from exc
+
+
+@app.delete("/api/smm/publications/{post_id}")
+async def delete_smm_publication_api(post_id: str):
+    from backend import smm_posts
+
+    try:
+        await asyncio.to_thread(smm_posts.delete_publication, post_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Публикация не найдена")
+    return {"status": "success", "id": post_id}
+
+
+@app.post("/api/smm/publications/bulk-delete")
+async def bulk_delete_smm_publications_api(payload: SmmPublicationBulkRequest):
+    from backend import smm_posts
+
+    deleted = await asyncio.to_thread(smm_posts.delete_publications, payload.ids)
+    return {"status": "success", "deleted": deleted}
+
+
 @app.get("/api/messenger-bindings")
 async def list_all_messenger_bindings_api():
     """Cross-agent, cross-platform view of every messenger binding — powers the
     central 'Каналы связи' admin page rather than each agent's own edit form."""
     from backend.agent_messenger_governance import (
         list_telegram_bindings, list_matrix_bindings, list_discord_bindings,
-        list_slack_bindings, list_email_bindings,
+        list_slack_bindings, list_email_bindings, list_social_bindings,
     )
     from backend.database import get_all_subagents
 
     names = {a["id"]: a["name"] for a in await asyncio.to_thread(get_all_subagents)}
-    telegram, matrix, discord_, slack, email_ = await asyncio.gather(
+    telegram, matrix, discord_, slack, email_, social = await asyncio.gather(
         asyncio.to_thread(list_telegram_bindings),
         asyncio.to_thread(list_matrix_bindings),
         asyncio.to_thread(list_discord_bindings),
         asyncio.to_thread(list_slack_bindings),
         asyncio.to_thread(list_email_bindings),
+        asyncio.to_thread(list_social_bindings),
     )
-    bindings = telegram + matrix + discord_ + slack + email_
+    bindings = telegram + matrix + discord_ + slack + email_ + social
     for binding in bindings:
         binding["agent_name"] = names.get(binding["subagent_id"], binding["subagent_id"])
     bindings.sort(key=lambda b: b.get("created_at", ""), reverse=True)
@@ -2612,6 +2989,7 @@ async def update_messenger_binding_api(binding_id: str, payload: MessengerBindin
             auto_reply_disclosure_text=payload.auto_reply_disclosure,
             human_takeover_pause_minutes=payload.human_takeover_pause_minutes,
             escalation_enabled=payload.escalation_enabled,
+            handling_menu_enabled=payload.handling_menu_enabled,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc) or "Binding not found") from exc
@@ -2649,8 +3027,9 @@ async def reconnect_messenger_binding_api(binding_id: str, payload: MessengerBin
     without deleting and recreating the whole channel. The new credential is
     verified live before anything is touched, same bar as connecting fresh."""
     from backend.agent_messenger_governance import (
-        get_binding, reconnect_telegram_binding, reconnect_matrix_binding,
+        SOCIAL_PLATFORMS, get_binding, reconnect_telegram_binding, reconnect_matrix_binding,
         reconnect_discord_binding, reconnect_slack_binding, reconnect_email_binding,
+        reconnect_social_binding,
     )
 
     binding = await asyncio.to_thread(get_binding, binding_id)
@@ -2685,11 +3064,100 @@ async def reconnect_messenger_binding_api(binding_id: str, payload: MessengerBin
                 binding_id, payload.imap_host, payload.imap_port or 993,
                 payload.smtp_host, payload.smtp_port or 587, payload.address, payload.password,
             )
+        if platform in SOCIAL_PLATFORMS:
+            if not payload.credentials:
+                raise HTTPException(status_code=400, detail="credentials обязательны")
+            return await reconnect_social_binding(binding_id, payload.credentials)
         raise HTTPException(status_code=400, detail=f"Unknown platform: {platform}")
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc) or "Binding not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/messenger-bindings/conversations")
+async def list_all_conversations_api(limit: int = 300):
+    """Every conversation on every active channel, newest first — the SMM
+    Factory "Диалоги" panel is cross-channel by design, and fanning this out
+    into one request per binding from the browser would be a request storm on
+    an owner with a dozen accounts."""
+    from backend.conversation_state import list_states
+    from backend.database import get_all_subagents
+
+    async def collect() -> list[dict]:
+        bindings = await list_all_messenger_bindings_api()
+        names = {a["id"]: a["name"] for a in await asyncio.to_thread(get_all_subagents)}
+        out: list[dict] = []
+        for binding in bindings:
+            if binding.get("status") not in ("active", "failed"):
+                continue
+            for state in await asyncio.to_thread(list_states, binding["id"]):
+                state["binding_id"] = binding["id"]
+                state["agent_name"] = names.get(binding["subagent_id"], binding["subagent_id"])
+                state["account"] = binding.get("bot_username", "")
+                state["response_mode"] = binding.get("response_mode", "draft")
+                out.append(state)
+        out.sort(key=lambda c: c.get("last_message_at") or c.get("updated_at") or "", reverse=True)
+        return out[: max(1, min(int(limit), 1000))]
+
+    return await collect()
+
+
+@app.get("/api/messenger-bindings/{binding_id}/conversations")
+async def list_binding_conversations_api(binding_id: str):
+    """Per-chat AI/owner handling state for this binding — see
+    backend/conversation_state.py and bot_access_gate.py's handling-mode
+    hook. Powers MessengerChannelsTab's "Диалоги" panel and its manual
+    take-over/release button."""
+    from backend.conversation_state import list_states
+
+    return await asyncio.to_thread(list_states, binding_id)
+
+
+class ConversationTakeoverRequest(BaseModel):
+    action: str  # "take_over" | "enable_ai" ("release" kept as its old alias) | "wait"
+
+
+_CONVERSATION_ACTIONS = {
+    "take_over": "owner_takeover",
+    "enable_ai": "ai",
+    "release": "ai",  # what the button was originally called
+    "wait": "waiting",
+}
+
+
+@app.post("/api/messenger-bindings/{binding_id}/conversations/{platform}/{chat_id}/takeover")
+async def takeover_conversation_api(binding_id: str, platform: str, chat_id: str, payload: ConversationTakeoverRequest):
+    """Decides who answers one specific conversation, on any channel, at any
+    moment — independent of that binding's response_mode/handling_menu_enabled.
+    'take_over' silences the bot, 'enable_ai' hands it to the agent without
+    waiting for the person to pick anything, 'wait' puts it back to silence."""
+    from backend.conversation_state import set_handling_mode
+
+    mode = _CONVERSATION_ACTIONS.get(payload.action)
+    if not mode:
+        raise HTTPException(
+            status_code=400, detail=f"action must be one of {sorted(_CONVERSATION_ACTIONS)}"
+        )
+    return await asyncio.to_thread(set_handling_mode, binding_id, platform, chat_id, mode)
+
+
+@app.get("/api/messenger-bindings/{binding_id}/conversations/{platform}/{chat_id}/history")
+async def conversation_history_api(binding_id: str, platform: str, chat_id: str, limit: int = 200):
+    """The stored conversation with one person — the same rows the agent reads
+    as its context, so what is shown here is what it actually remembers."""
+    from backend.conversation_state import history
+
+    return await asyncio.to_thread(history, binding_id, platform, chat_id, limit)
+
+
+@app.delete("/api/messenger-bindings/{binding_id}/conversations/{platform}/{chat_id}/history")
+async def clear_conversation_history_api(binding_id: str, platform: str, chat_id: str):
+    """Makes the agent forget this person: the next message starts from an empty
+    context. Irreversible — the messages are deleted, not archived."""
+    from backend.conversation_state import clear_history
+
+    return await asyncio.to_thread(clear_history, binding_id, platform, chat_id)
 
 
 @app.delete("/api/messenger-bindings/{binding_id}")

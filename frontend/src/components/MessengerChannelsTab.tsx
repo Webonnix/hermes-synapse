@@ -1,7 +1,12 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Check, ChevronDown, ChevronUp, ListTree, MessageCircle, Plus, Power, PowerOff, RefreshCw, Send, Trash2, X } from 'lucide-react';
+import { Bot, Check, ChevronDown, ChevronUp, Copy, Eraser, Hand, MessageCircle, MessageSquare, Plus, Power, PowerOff, RefreshCw, Send, Trash2, Users, X } from 'lucide-react';
 import { styles } from '../styles';
-import type { AccessPlan, AgentModel, ChannelActivityEvent, MessengerBinding, PendingChannelReply } from '../types';
+import type { AccessPlan, AgentModel, ChannelActivityEvent, ConversationMessage, ConversationState, MessengerBinding, PendingChannelReply, SocialPlatformSpec, SocialWebhookDetails } from '../types';
+import {
+  ACCESS_MODE_LABELS, CREDENTIAL_FIELDS, HANDLING_MODE_LABELS, PLATFORM_LABELS, RESPONSE_MODE_LABELS,
+  STATUS_LABELS, authHeaders, isSocialPlatform,
+  type AccessMode, type Platform, type ResponseMode,
+} from './smm/platforms';
 
 const field = (label: string, child: ReactNode) => (
   <label style={{ display: 'flex', flexDirection: 'column', gap: 6, color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 600 }}>
@@ -10,35 +15,39 @@ const field = (label: string, child: ReactNode) => (
   </label>
 );
 
-type Platform = 'telegram' | 'matrix' | 'discord' | 'slack' | 'email';
-type ResponseMode = 'draft' | 'auto_labeled';
-type AccessMode = 'owner_only' | 'token';
-
-const PLATFORM_LABELS: Record<Platform, string> = {
-  telegram: 'Telegram',
-  matrix: 'Element / Matrix',
-  discord: 'Discord',
-  slack: 'Slack',
-  email: 'Email',
-};
-
-const STATUS_LABELS: Record<string, string> = {
-  awaiting_approval: 'Ожидает подтверждения',
-  approved: 'Подтверждено',
-  active: 'Активен',
-  failed: 'Ошибка',
-  revoked: 'Отключён',
-};
-
-const RESPONSE_MODE_LABELS: Record<ResponseMode, string> = {
-  draft: 'Черновик на подтверждение',
-  auto_labeled: 'Автоответ с пометкой «ассистент»',
-};
-
-const ACCESS_MODE_LABELS: Record<AccessMode, string> = {
-  owner_only: 'Только для вас',
-  token: 'По токенам доступа',
-};
+/** The connect/reconnect fields for a social platform, rendered from the
+ *  backend's own declaration of what that platform needs (GET /api/social-platforms).
+ *  `verify_token` is offered as an optional extra rather than a required field:
+ *  leaving it empty makes the backend generate one, which is what an owner
+ *  registering a fresh webhook actually wants. */
+function SocialCredentialFields({ spec, values, onChange }: {
+  spec: SocialPlatformSpec;
+  values: Record<string, string>;
+  onChange: (next: Record<string, string>) => void;
+}) {
+  const fields = [...spec.required, ...(spec.delivery === 'webhook' ? ['verify_token'] : [])];
+  return (
+    <div className="admin-add-grid">
+      {fields.map(name => {
+        const meta = CREDENTIAL_FIELDS[name] || { label: name };
+        return (
+          <label key={name} style={{ display: 'flex', flexDirection: 'column', gap: 6, color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 600 }}>
+            {meta.label}
+            <input
+              className="form-input"
+              type={meta.secret ? 'password' : 'text'}
+              autoComplete="off"
+              placeholder={meta.placeholder || ''}
+              value={values[name] || ''}
+              onChange={e => onChange({ ...values, [name]: e.target.value })}
+            />
+            {meta.hint && <span style={styles.formHelp}>{meta.hint}</span>}
+          </label>
+        );
+      })}
+    </div>
+  );
+}
 
 /** Switching a bot to token mode is what turns it from a private line into a
  *  social bot anyone can start, so it gets its own explicit control rather than
@@ -66,11 +75,6 @@ function AccessModePicker({ value, onChange }: { value: AccessMode; onChange: (m
       ))}
     </div>
   );
-}
-
-function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem('jarvis_auth_token');
-  return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
 }
 
 const emptyTelegramForm = { bot_token: '', allowed_chat_ids: '' };
@@ -101,7 +105,7 @@ function ResponseModePicker({ value, onChange }: { value: ResponseMode; onChange
             <strong style={{ display: 'block', fontSize: '0.83rem' }}>{RESPONSE_MODE_LABELS[mode]}</strong>
             <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-dim, #8a94a6)', marginTop: 2 }}>
               {mode === 'draft'
-                ? 'Ничего не уходит собеседнику автоматически — Vexa готовит ответ, вы проверяете и отправляете сами из раздела «Черновики» ниже.'
+                ? 'Ничего не уходит собеседнику автоматически — Vexa готовит ответ, вы проверяете и отправляете сами на вкладке «Черновики».'
                 : 'Отвечает сразу, но каждое сообщение помечено как ответ ассистента — собеседник всегда знает, что говорит не Альберт лично.'}
             </span>
           </span>
@@ -232,11 +236,17 @@ function MatrixDeviceLogin({ homeserverUrl, onComplete }: {
   );
 }
 
+/** Which panel of the SMM Factory this render is. The three views are one
+ *  component because they share the channel list they describe: a draft names
+ *  the channel it came in on, a log line names the channel that received it. */
+export type ChannelsView = 'connections' | 'drafts' | 'activity';
+
 interface MessengerChannelsTabProps {
   agents: AgentModel[];
+  view: ChannelsView;
 }
 
-export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
+export function MessengerChannelsTab({ agents, view }: MessengerChannelsTabProps) {
   const [bindings, setBindings] = useState<MessengerBinding[]>([]);
   const [plans, setPlans] = useState<AccessPlan[]>([]);
   const [loading, setLoading] = useState(true);
@@ -265,17 +275,37 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
   const [editDisclosure, setEditDisclosure] = useState('');
   const [editPauseMinutes, setEditPauseMinutes] = useState(120);
   const [editEscalation, setEditEscalation] = useState(false);
+  const [editHandlingMenu, setEditHandlingMenu] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
   /** Binding id currently mid enable/disable/delete, so its row can disable its own buttons. */
   const [busyBindingId, setBusyBindingId] = useState('');
+
+  /** Binding id whose "Диалоги" panel (per-chat AI/owner handling state) is open. */
+  const [dialogsBindingId, setDialogsBindingId] = useState('');
+  const [conversations, setConversations] = useState<ConversationState[]>([]);
+  const [conversationsLoading, setConversationsLoading] = useState(false);
+  /** `${platform}|${chat_id}` currently mid action, so only that row disables its buttons. */
+  const [busyConversationKey, setBusyConversationKey] = useState('');
+  const [conversationSearch, setConversationSearch] = useState('');
+  /** Conversation whose stored transcript is expanded, plus its messages. */
+  const [openHistoryKey, setOpenHistoryKey] = useState('');
+  const [historyMessages, setHistoryMessages] = useState<ConversationMessage[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   const [replies, setReplies] = useState<PendingChannelReply[]>([]);
   const [repliesLoading, setRepliesLoading] = useState(true);
   const [editedReplyText, setEditedReplyText] = useState<Record<string, string>>({});
   const [busyReplyId, setBusyReplyId] = useState('');
 
-  const [showActivity, setShowActivity] = useState(false);
   const [activity, setActivity] = useState<ChannelActivityEvent[]>([]);
+
+  // Social platforms describe their own credential fields (GET /api/social-platforms),
+  // so the connect form is built from the backend's declaration instead of a
+  // second hard-coded copy that could drift from what it validates.
+  const [socialSpecs, setSocialSpecs] = useState<SocialPlatformSpec[]>([]);
+  const [socialForm, setSocialForm] = useState<Record<string, string>>({});
+  const [socialAllowed, setSocialAllowed] = useState('');
+  const [webhookDetails, setWebhookDetails] = useState<Record<string, SocialWebhookDetails>>({});
 
   const [reconnectingId, setReconnectingId] = useState('');
   const [reconnectForm, setReconnectForm] = useState(emptyReconnectForm);
@@ -315,16 +345,20 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
     fetchBindings();
     fetchReplies();
     fetchPlans();
+    fetch('/api/social-platforms', { headers: authHeaders() })
+      .then(res => res.json())
+      .then(data => setSocialSpecs(Array.isArray(data) ? data : []))
+      .catch(() => setSocialSpecs([]));
     const interval = setInterval(fetchReplies, 20000);
     return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
-    if (!showActivity) return;
+    if (view !== 'activity') return;
     fetchActivity();
     const interval = setInterval(fetchActivity, 3000);
     return () => clearInterval(interval);
-  }, [showActivity]);
+  }, [view]);
 
   const resetForm = () => {
     setShowForm(false);
@@ -334,13 +368,37 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
     setDiscordForm(emptyDiscordForm);
     setSlackForm(emptySlackForm);
     setEmailForm(emptyEmailForm);
+    setSocialForm({});
+    setSocialAllowed('');
     setSystemPrompt('');
     setResponseMode('draft');
     setError('');
   };
 
+  /** All four social platforms share one endpoint — they differ only in which
+   *  credential fields they declare, which the backend already knows. */
   const PLATFORM_PATHS: Record<Platform, string> = {
     telegram: 'telegram', matrix: 'matrix', discord: 'discord', slack: 'slack', email: 'email',
+    vk: 'social', instagram: 'social', facebook: 'social', whatsapp: 'social',
+  };
+
+  const socialSpec = socialSpecs.find(spec => spec.id === platform);
+
+  const addSocialBinding = async () => {
+    const response = await fetch(`/api/agents/${agentId}/social`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({
+        platform,
+        credentials: socialForm,
+        allowed_chat_ids: socialAllowed.split(',').map(s => s.trim()).filter(Boolean),
+        system_prompt: systemPrompt,
+        response_mode: responseMode,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Не удалось подключить канал');
+    return data;
   };
 
   const addBinding = async () => {
@@ -349,8 +407,15 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
     setError('');
     setNotice('');
     try {
+      if (isSocialPlatform(platform)) {
+        const data = await addSocialBinding();
+        setNotice(`${data.account} ожидает подтверждения — выполните /approve ${data.task_id} в Telegram.`);
+        resetForm();
+        fetchBindings();
+        return;
+      }
       const path = `/api/agents/${agentId}/${PLATFORM_PATHS[platform]}`;
-      const bodyByPlatform: Record<Platform, object> = {
+      const bodyByPlatform: Partial<Record<Platform, object>> = {
         telegram: {
           bot_token: telegramForm.bot_token,
           allowed_chat_ids: telegramForm.allowed_chat_ids.split(',').map(s => s.trim()).filter(Boolean),
@@ -458,6 +523,7 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
     }
     setExpandedId('');
     setReconnectingId(binding.id);
+    setSocialForm({});
     // Prefill the Matrix server from the account's own domain — the backend
     // follows .well-known delegation, so "senla.eu" resolves to matrix.senla.eu.
     const matrixDomain = binding.platform === 'matrix' ? (binding.bot_username || '').split(':')[1] : '';
@@ -493,18 +559,31 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
       const response = await fetch(`/api/messenger-bindings/${binding.id}/reconnect`, {
         method: 'POST',
         headers: authHeaders(),
-        body: JSON.stringify(bodyByPlatform[binding.platform] || {}),
+        body: JSON.stringify(
+          isSocialPlatform(binding.platform) ? { credentials: socialForm } : (bodyByPlatform[binding.platform] || {}),
+        ),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.detail || 'Не удалось переподключить канал');
       setReconnectingId('');
-      setNotice('Канал переподключён — токен теперь продлевается автоматически.');
+      setSocialForm({});
+      setNotice('Канал переподключён с новыми учётными данными.');
       fetchBindings();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось переподключить канал');
     } finally {
       setReconnecting(false);
     }
+  };
+
+  /** Callback URL + verify token for a webhook-delivered channel. Fetched only
+   *  when its card is opened: the verify token is a credential and has its own
+   *  endpoint rather than riding along in the binding list. */
+  const loadWebhookDetails = (binding: MessengerBinding) => {
+    fetch(`/api/messenger-bindings/${binding.id}/webhook`, { headers: authHeaders() })
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => { if (data) setWebhookDetails(prev => ({ ...prev, [binding.id]: data })); })
+      .catch(() => {});
   };
 
   const openEdit = (binding: MessengerBinding) => {
@@ -514,6 +593,9 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
     }
     setReconnectingId('');
     setExpandedId(binding.id);
+    if (socialSpecs.find(spec => spec.id === binding.platform)?.delivery === 'webhook') {
+      loadWebhookDetails(binding);
+    }
     setEditPrompt(binding.system_prompt_override || '');
     setEditMode((binding.response_mode as ResponseMode) || 'draft');
     setEditAccessMode((binding.access_mode as AccessMode) || 'owner_only');
@@ -525,6 +607,7 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
     setEditDisclosure(binding.auto_reply_disclosure || '');
     setEditPauseMinutes(binding.human_takeover_pause_minutes ?? 120);
     setEditEscalation(Boolean(binding.escalation_enabled));
+    setEditHandlingMenu(Boolean(binding.handling_menu_enabled));
   };
 
   const saveEdit = async (binding: MessengerBinding) => {
@@ -539,6 +622,7 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
         auto_reply_disclosure: editDisclosure,
         ...(binding.platform === 'matrix' ? { human_takeover_pause_minutes: editPauseMinutes } : {}),
         escalation_enabled: editEscalation,
+        handling_menu_enabled: editHandlingMenu,
       };
       if (editAccessMode === 'owner_only') {
         body.allowed_chat_ids = editOpenToEveryone
@@ -557,6 +641,96 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
       setError(err instanceof Error ? err.message : 'Не удалось сохранить изменения');
     } finally {
       setSavingEdit(false);
+    }
+  };
+
+  const fetchConversations = (bindingId: string) => {
+    setConversationsLoading(true);
+    fetch(`/api/messenger-bindings/${bindingId}/conversations`, { headers: authHeaders() })
+      .then(res => res.json())
+      .then(data => setConversations(Array.isArray(data) ? data : []))
+      .catch(() => setConversations([]))
+      .finally(() => setConversationsLoading(false));
+  };
+
+  const toggleDialogs = (binding: MessengerBinding) => {
+    if (dialogsBindingId === binding.id) {
+      setDialogsBindingId('');
+      return;
+    }
+    setExpandedId('');
+    setReconnectingId('');
+    setDialogsBindingId(binding.id);
+    setConversationSearch('');
+    setOpenHistoryKey('');
+    fetchConversations(binding.id);
+  };
+
+  const conversationUrl = (bindingId: string, conversation: ConversationState, suffix: string) =>
+    `/api/messenger-bindings/${bindingId}/conversations/${conversation.platform}/${encodeURIComponent(conversation.chat_id)}/${suffix}`;
+
+  const setConversationMode = async (
+    binding: MessengerBinding, conversation: ConversationState, action: 'take_over' | 'enable_ai' | 'wait',
+  ) => {
+    const key = `${conversation.platform}|${conversation.chat_id}`;
+    setBusyConversationKey(key);
+    setError('');
+    try {
+      const response = await fetch(conversationUrl(binding.id, conversation, 'takeover'), {
+        method: 'POST', headers: authHeaders(), body: JSON.stringify({ action }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || 'Не удалось переключить диалог');
+      setConversations(current => current.map(item => (item.id === conversation.id ? { ...item, handling_mode: data.handling_mode } : item)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось переключить диалог');
+    } finally {
+      setBusyConversationKey('');
+    }
+  };
+
+  const toggleHistory = async (binding: MessengerBinding, conversation: ConversationState) => {
+    const key = `${conversation.platform}|${conversation.chat_id}`;
+    if (openHistoryKey === key) {
+      setOpenHistoryKey('');
+      return;
+    }
+    setOpenHistoryKey(key);
+    setHistoryMessages([]);
+    setHistoryLoading(true);
+    try {
+      const response = await fetch(conversationUrl(binding.id, conversation, 'history?limit=200'), { headers: authHeaders() });
+      const data = await response.json();
+      setHistoryMessages(Array.isArray(data.messages) ? data.messages : []);
+    } catch {
+      setHistoryMessages([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const clearConversationHistory = async (binding: MessengerBinding, conversation: ConversationState) => {
+    const who = conversation.display_name || conversation.chat_id;
+    if (!window.confirm(`Очистить переписку с «${who}»? Агент забудет весь контекст этого диалога — восстановить нельзя. Режим ответа (кто отвечает) не изменится.`)) return;
+    const key = `${conversation.platform}|${conversation.chat_id}`;
+    setBusyConversationKey(key);
+    setError('');
+    try {
+      const response = await fetch(conversationUrl(binding.id, conversation, 'history'), {
+        method: 'DELETE', headers: authHeaders(),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || 'Не удалось очистить переписку');
+      }
+      setHistoryMessages([]);
+      setConversations(current => current.map(item => (item.id === conversation.id
+        ? { ...item, messages_count: 0, last_message_preview: '', last_message_role: '', last_message_at: '' }
+        : item)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось очистить переписку');
+    } finally {
+      setBusyConversationKey('');
     }
   };
 
@@ -592,6 +766,9 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
   };
 
   const canSubmit = !agentId ? false : (
+    // A social platform is ready when every field the backend declared required
+    // has a value — no per-platform list to keep in step here.
+    isSocialPlatform(platform) ? Boolean(socialSpec && socialSpec.required.every(f => (socialForm[f] || '').trim())) :
     platform === 'telegram' ? Boolean(telegramForm.bot_token) :
     platform === 'matrix' ? Boolean(matrixForm.device_flow_id || (matrixForm.user_id && (matrixForm.password || matrixForm.access_token))) :
     platform === 'discord' ? Boolean(discordForm.bot_token) :
@@ -600,25 +777,16 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
   );
 
   return (
-    <div style={styles.tabWrapper}>
-      <div style={styles.tabHeader}>
-        <div>
-          <h2 className="glow-text-cyan" style={styles.tabTitle}>КАНАЛЫ СВЯЗИ</h2>
-          <p style={styles.tabSubtitle}>Все подключения агентов к мессенджерам в одном месте — Telegram, Element/Matrix и другие по мере добавления</p>
-        </div>
-        <div style={{ display: 'flex', gap: 10 }}>
-          <button type="button" className="btn-ghost" onClick={() => setShowActivity(v => !v)}>
-            <ListTree size={14} /><span>{showActivity ? 'Скрыть журнал' : 'Журнал сообщений'}</span>
+    <div>
+      {view === 'connections' && !showForm && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 14 }}>
+          <button type="button" className="btn-primary" onClick={() => setShowForm(true)}>
+            <Plus size={14} /><span>Подключить канал</span>
           </button>
-          {!showForm && (
-            <button type="button" className="btn-primary" onClick={() => setShowForm(true)}>
-              <Plus size={14} /><span>Подключить канал</span>
-            </button>
-          )}
         </div>
-      </div>
+      )}
 
-      {showActivity && (
+      {view === 'activity' && (
         <div className="glass-panel" style={{ padding: '16px', marginBottom: '18px', display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <strong style={{ fontSize: '0.9rem' }}>Журнал сообщений (все каналы)</strong>
@@ -658,7 +826,7 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
         </div>
       )}
 
-      {replies.length > 0 && (
+      {view === 'drafts' && replies.length > 0 && (
         <div className="glass-panel" style={{ padding: '16px', marginBottom: '18px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
           <strong style={{ fontSize: '0.9rem' }}>Черновики, ожидающие отправки ({replies.length})</strong>
           {replies.map(reply => (
@@ -685,11 +853,11 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
           ))}
         </div>
       )}
-      {!repliesLoading && replies.length === 0 && (
+      {view === 'drafts' && !repliesLoading && replies.length === 0 && (
         <p style={{ color: 'var(--text-dim, #8a94a6)', fontSize: '0.8rem', marginBottom: '14px' }}>Черновиков на подтверждение сейчас нет.</p>
       )}
 
-      {showForm && (
+      {view === 'connections' && showForm && (
         <div className="glass-panel" style={{ padding: '16px', marginBottom: '18px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <strong style={{ fontSize: '0.9rem' }}>Новое подключение</strong>
@@ -704,6 +872,7 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
                 <option value="discord">Discord</option>
                 <option value="slack">Slack</option>
                 <option value="email">Email</option>
+                {socialSpecs.map(spec => <option key={spec.id} value={spec.id}>{spec.label}</option>)}
               </select>
             ))}
             {field('Агент', (
@@ -833,6 +1002,21 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
             </div>
           )}
 
+          {socialSpec && (
+            <>
+              <SocialCredentialFields spec={socialSpec} values={socialForm} onChange={setSocialForm} />
+              {field('Разрешённые id собеседников (через запятую)', (
+                <input className="form-input" value={socialAllowed}
+                  onChange={e => setSocialAllowed(e.target.value)} placeholder="без ограничений, если пусто" />
+              ))}
+              <p style={{ ...styles.formHelp, margin: 0 }}>
+                {socialSpec.delivery === 'webhook'
+                  ? 'Сообщения приходят вебхуком: после подтверждения канал покажет адрес и verify token, которые нужно зарегистрировать в приложении Meta. Пока этот бэкенд не доступен из интернета, входящих не будет — учётные данные при этом рабочие.'
+                  : 'Сообщения забираются опросом (Bots Long Poll) — ничего публиковать в интернет не нужно.'}
+              </p>
+            </>
+          )}
+
           {field('Системный промпт для этого канала (необязательно)', (
             <textarea className="form-input" rows={3} value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)}
               placeholder="Оставьте пустым, чтобы использовать промпт выбранного агента без изменений. Здесь можно задать особый тон/роль именно для этого канала." />
@@ -851,7 +1035,7 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
       {error && <div className="glass-panel" style={{ padding: '10px 14px', marginBottom: '14px', color: 'var(--danger)', fontSize: '0.85rem' }}>{error}</div>}
       {notice && <div className="glass-panel" style={{ padding: '10px 14px', marginBottom: '14px', color: 'var(--success)', fontSize: '0.85rem' }}>{notice}</div>}
 
-      {loading ? (
+      {view !== 'connections' ? null : loading ? (
         <p style={{ color: 'var(--text-dim, #8a94a6)' }}>Загрузка...</p>
       ) : bindings.length === 0 ? (
         <p style={{ color: 'var(--text-dim, #8a94a6)' }}>Пока нет ни одного подключённого канала.</p>
@@ -879,6 +1063,11 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
                   {binding.status === 'active' && (
                     <button type="button" className="icon-btn" title="Настроить промпт/режим" onClick={() => openEdit(binding)}>
                       {expandedId === binding.id ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                    </button>
+                  )}
+                  {binding.status === 'active' && (
+                    <button type="button" className="icon-btn" title="Диалоги — кто с кем сейчас говорит, взять диалог на себя" onClick={() => toggleDialogs(binding)}>
+                      <Users size={14} />
                     </button>
                   )}
                   {binding.status === 'active' && (
@@ -1022,6 +1211,20 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
                       ))}
                     </>
                   )}
+                  {isSocialPlatform(binding.platform) && (() => {
+                    const spec = socialSpecs.find(item => item.id === binding.platform);
+                    return spec ? (
+                      <>
+                        <SocialCredentialFields spec={spec} values={socialForm} onChange={setSocialForm} />
+                        {spec.delivery === 'webhook' && (
+                          <p style={{ ...styles.formHelp, margin: 0 }}>
+                            Verify token можно не заполнять — уже зарегистрированный в Meta останется прежним,
+                            чтобы вебхук не пришлось подтверждать заново.
+                          </p>
+                        )}
+                      </>
+                    ) : null;
+                  })()}
                   <button type="button" className="btn-primary" disabled={reconnecting} onClick={() => void submitReconnect(binding)} style={{ alignSelf: 'flex-start' }}>
                     <RefreshCw size={13} /><span>{reconnecting ? '...' : 'Переподключить'}</span>
                   </button>
@@ -1030,6 +1233,39 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
 
               {expandedId === binding.id && (
                 <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,.07)', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {webhookDetails[binding.id] && (() => {
+                    const details = webhookDetails[binding.id];
+                    return (
+                      <div style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid rgba(255,255,255,.09)', background: 'rgba(255,255,255,.02)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        <strong style={{ fontSize: '0.82rem' }}>Вебхук в приложении Meta</strong>
+                        <span style={styles.formHelp}>
+                          Впишите это в Meta for Developers → приложение → Webhooks и подпишите аккаунт на события
+                          сообщений. Пока это не сделано, канал активен, но входящих не получает.
+                        </span>
+                        {([
+                          ['Callback URL', details.callback_url],
+                          ['Verify token', details.verify_token],
+                          ['ID аккаунта', details.account_id],
+                        ] as [string, string][]).map(([label, value]) => (
+                          <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.78rem' }}>
+                            <span style={{ color: 'var(--text-dim, #8a94a6)', minWidth: 110 }}>{label}</span>
+                            <code style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value || '—'}</code>
+                            {value && (
+                              <button type="button" className="icon-btn" title="Скопировать"
+                                onClick={() => void navigator.clipboard?.writeText(value)}>
+                                <Copy size={13} />
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                        {!details.base_url_configured && (
+                          <span style={{ fontSize: '0.75rem', color: '#f0b23c' }}>
+                            Публичный адрес не задан — укажите его в «SMM Factory → Настройки», иначе URL выше неполный.
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })()}
                   {field('Системный промпт для этого канала', (
                     <textarea className="form-input" rows={3} value={editPrompt} onChange={e => setEditPrompt(e.target.value)}
                       placeholder="Пусто — использовать промпт агента как есть" />
@@ -1046,6 +1282,22 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
                         При согласии собеседника Альберту придёт уведомление в Telegram — реального звонка нет,
                         только уведомление. Это оценка модели, не гарантия: иногда сработает на пустом месте,
                         иногда пропустит то, что стоило бы эскалировать.
+                      </span>
+                    </span>
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: '0.85rem', color: 'var(--text-muted)', cursor: 'pointer' }}>
+                    <input type="checkbox" checked={editHandlingMenu} style={{ marginTop: 3 }}
+                      onChange={e => setEditHandlingMenu(e.target.checked)} />
+                    <span>
+                      Предлагать выбор при первом сообщении: «ИИ сейчас», «подождать» или «срочно»
+                      <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-dim, #8a94a6)', marginTop: 2 }}>
+                        Новому собеседнику вместо тишины (в режиме «черновик») бот напишет, что вы загружены
+                        другими задачами, и предложит три варианта: пообщаться с ИИ-ассистентом прямо сейчас
+                        (с пометкой, что его обучает Альберт); просто подождать вас лично — тогда бот замолкает;
+                        либо, если вопрос срочный, сразу прислать вам уведомление в Telegram через Vexa
+                        (не чаще раза в 10 минут на диалог). Выбор запоминается для этого чата и сбрасывается сам,
+                        если переписка надолго затихла. Взять диалог на себя в любой момент можно кнопкой
+                        «Диалоги» — независимо от этой настройки.
                       </span>
                     </span>
                   </label>
@@ -1127,6 +1379,122 @@ export function MessengerChannelsTab({ agents }: MessengerChannelsTabProps) {
                   <button type="button" className="btn-primary" disabled={savingEdit} onClick={() => void saveEdit(binding)} style={{ alignSelf: 'flex-start' }}>
                     <Check size={13} /><span>{savingEdit ? '...' : 'Сохранить'}</span>
                   </button>
+                </div>
+              )}
+
+              {dialogsBindingId === binding.id && (
+                <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,.07)', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <span style={styles.formHelp}>
+                    Кто пишет в этот канал и кто ему отвечает. 🤖 — подключить ИИ к этому человеку сразу,
+                    не дожидаясь его выбора; ✋ — взять диалог на себя, бот замолчит; 💬 — показать переписку,
+                    которую помнит агент; 🧽 — очистить её. Переписка сохраняется всегда, даже пока бот молчит,
+                    так что ИИ продолжит разговор с того же места.
+                  </span>
+                  {conversations.length > 5 && (
+                    <input
+                      className="form-input"
+                      value={conversationSearch}
+                      onChange={e => setConversationSearch(e.target.value)}
+                      placeholder={`Поиск среди ${conversations.length} диалогов — имя или id чата`}
+                    />
+                  )}
+                  {conversationsLoading ? (
+                    <span style={{ fontSize: '0.8rem', color: 'var(--text-dim, #8a94a6)' }}>Загрузка...</span>
+                  ) : conversations.length === 0 ? (
+                    <span style={{ fontSize: '0.8rem', color: 'var(--text-dim, #8a94a6)' }}>Пока никто не писал.</span>
+                  ) : (() => {
+                    const needle = conversationSearch.trim().toLowerCase();
+                    const shown = needle
+                      ? conversations.filter(c => `${c.display_name} ${c.chat_id}`.toLowerCase().includes(needle))
+                      : conversations;
+                    if (shown.length === 0) {
+                      return <span style={{ fontSize: '0.8rem', color: 'var(--text-dim, #8a94a6)' }}>Никто не найден.</span>;
+                    }
+                    return (
+                      // Capped height so a binding with hundreds of people can't
+                      // push the rest of the channel list off the screen.
+                      <div className="admin-item-list" style={{ maxHeight: 460, overflowY: 'auto' }}>
+                        {shown.map(conversation => {
+                          const key = `${conversation.platform}|${conversation.chat_id}`;
+                          const busy = busyConversationKey === key;
+                          const takenOver = conversation.handling_mode === 'owner_takeover';
+                          const aiOn = conversation.handling_mode === 'ai';
+                          return (
+                            <div key={conversation.id} className="admin-item-row" style={{ display: 'block' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                                <div style={{ minWidth: 0 }}>
+                                  <strong style={{ fontSize: '0.85rem' }}>{conversation.display_name || conversation.chat_id}</strong>
+                                  <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-dim, #8a94a6)' }}>
+                                    {PLATFORM_LABELS[conversation.platform as Platform] || conversation.platform} · {conversation.chat_id}
+                                  </span>
+                                  <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-dim, #8a94a6)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                    {conversation.messages_count > 0
+                                      ? `${conversation.messages_count} сообщ.${conversation.last_message_preview ? ` · ${conversation.last_message_role === 'assistant' ? 'бот' : 'он'}: ${conversation.last_message_preview}` : ''}`
+                                      : 'переписка пуста'}
+                                  </span>
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                                  <span className={`admin-status-chip ${takenOver ? 'is-active' : ''}`}>
+                                    {HANDLING_MODE_LABELS[conversation.handling_mode] || conversation.handling_mode}
+                                  </span>
+                                  {!aiOn && (
+                                    <button type="button" className="icon-btn" title="Подключить ИИ — пусть агент отвечает этому человеку" disabled={busy}
+                                      onClick={() => void setConversationMode(binding, conversation, 'enable_ai')}>
+                                      <Bot size={14} />
+                                    </button>
+                                  )}
+                                  {!takenOver && (
+                                    <button type="button" className="icon-btn" title="Взять диалог на себя — бот замолчит" disabled={busy}
+                                      onClick={() => void setConversationMode(binding, conversation, 'take_over')}>
+                                      <Hand size={14} />
+                                    </button>
+                                  )}
+                                  <button type="button" className="icon-btn" title="Показать переписку, которую помнит агент" disabled={busy}
+                                    onClick={() => void toggleHistory(binding, conversation)}>
+                                    <MessageSquare size={14} />
+                                  </button>
+                                  <button type="button" className="icon-btn danger" title="Очистить переписку — агент забудет контекст" disabled={busy || conversation.messages_count === 0}
+                                    onClick={() => void clearConversationHistory(binding, conversation)}>
+                                    <Eraser size={14} />
+                                  </button>
+                                </div>
+                              </div>
+
+                              {openHistoryKey === key && (
+                                <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,.07)' }}>
+                                  {historyLoading ? (
+                                    <span style={{ fontSize: '0.78rem', color: 'var(--text-dim, #8a94a6)' }}>Загрузка переписки...</span>
+                                  ) : historyMessages.length === 0 ? (
+                                    <span style={{ fontSize: '0.78rem', color: 'var(--text-dim, #8a94a6)' }}>
+                                      Пусто — агент ничего не помнит об этом человеке.
+                                    </span>
+                                  ) : (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 320, overflowY: 'auto' }}>
+                                      {historyMessages.map(message => (
+                                        <div key={message.id} style={{
+                                          alignSelf: message.role === 'assistant' ? 'flex-end' : 'flex-start',
+                                          maxWidth: '82%', padding: '7px 10px', borderRadius: 10, fontSize: '0.8rem',
+                                          whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                                          background: message.role === 'assistant' ? 'rgba(46,179,139,.10)' : 'rgba(255,255,255,.04)',
+                                          border: `1px solid ${message.role === 'assistant' ? 'rgba(77,222,180,.22)' : 'rgba(255,255,255,.08)'}`,
+                                        }}>
+                                          <span style={{ display: 'block', fontSize: '0.68rem', color: 'var(--text-dim, #8a94a6)', marginBottom: 2 }}>
+                                            {message.role === 'assistant' ? 'Бот' : 'Собеседник'}
+                                            {message.timestamp ? ` · ${message.timestamp.slice(0, 16).replace('T', ' ')}` : ''}
+                                          </span>
+                                          {message.content}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
             </div>

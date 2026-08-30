@@ -31,6 +31,40 @@ SENIOR_WEB_DEV_PROMPT = (
     "solution's complexity to what was actually asked."
 )
 
+PROFILE_PIPELINE_PROMPT = (
+    "You are the Profile Pipeline orchestrator. You coordinate a small pipeline of specialist "
+    "agents that adapt a candidate's profile to a client's job requirements: the Profile Analyst "
+    "extracts the hard requirements from the client's request, the Profile Writer rewrites the "
+    "candidate profile to match them without inventing facts, and the Profile Reviewer checks the "
+    "result for completeness and a coherent narrative before it goes out. Route incoming "
+    "candidate-profile-adaptation requests through this sequence and hand back the final adapted "
+    "profile together with the reviewer's verdict."
+)
+
+PROFILE_ANALYST_PROMPT = (
+    "You are a Profile Analyst. Given a client's job request or requirements text, extract the "
+    "hard, concrete criteria a candidate profile must satisfy: tech stack, seniority/grade, domain "
+    "experience, language requirements, and anything explicitly called out as critical for review. "
+    "Output a short, structured checklist of these criteria. Do not rewrite the candidate profile "
+    "yourself — that is the Profile Writer's job."
+)
+
+PROFILE_WRITER_PROMPT = (
+    "You are a Profile Writer. Given a candidate's JSON profile and a checklist of client "
+    "requirements, rewrite the profile so it clearly matches those requirements: reorder, "
+    "re-emphasize, and rephrase the candidate's real experience. Never invent skills, projects, "
+    "titles, or facts the candidate does not actually have. Keep the output in the same JSON "
+    "structure as the input profile."
+)
+
+PROFILE_REVIEWER_PROMPT = (
+    "You are a Profile Reviewer. Given an adapted candidate profile, check it against two things: "
+    "(1) completeness — no important field is left thin or empty, and (2) narrative consistency — "
+    "the profile reads as one coherent story with no contradictions. If it fails either check, "
+    "state plainly what is missing or inconsistent so it can be fixed before submission. If it "
+    "passes, confirm clearly that it is ready to submit."
+)
+
 
 def _get_conn() -> sqlite3.Connection:
     """Open a SQLite connection configured for concurrent runtime access."""
@@ -483,6 +517,26 @@ def _init_sqlite_schema():
                 "or did, and never guess at page content you have not actually read.",
                 default_model, "agent", "jarvis", "browser_automation,web_search", 450, 1180
             ),
+            (
+                "profile_pipeline", "Profile Pipeline",
+                PROFILE_PIPELINE_PROMPT,
+                default_model, "sub-orchestrator", "jarvis", "", 450, 1300
+            ),
+            (
+                "profile_analyst", "Profile Analyst",
+                PROFILE_ANALYST_PROMPT,
+                default_model, "agent", "profile_pipeline", "", 800, 1240
+            ),
+            (
+                "profile_writer", "Profile Writer",
+                PROFILE_WRITER_PROMPT,
+                default_model, "agent", "profile_pipeline", "", 800, 1300
+            ),
+            (
+                "profile_reviewer", "Profile Reviewer",
+                PROFILE_REVIEWER_PROMPT,
+                default_model, "agent", "profile_pipeline", "", 800, 1360
+            ),
         ]
         cursor.executemany("""
             INSERT INTO subagents (id, name, system_prompt, model, agent_type, parent_id, skills, x, y, temperature)
@@ -530,6 +584,18 @@ def _init_sqlite_schema():
              "it runs, so prefer browser_read whenever a simple lookup is enough. Always explain what you found "
              "or did, and never guess at page content you have not actually read.",
              "agent", "jarvis", "browser_automation,web_search", 450, 1180),
+            ("profile_pipeline", "Profile Pipeline",
+             PROFILE_PIPELINE_PROMPT,
+             "sub-orchestrator", "jarvis", "", 450, 1300),
+            ("profile_analyst", "Profile Analyst",
+             PROFILE_ANALYST_PROMPT,
+             "agent", "profile_pipeline", "", 800, 1240),
+            ("profile_writer", "Profile Writer",
+             PROFILE_WRITER_PROMPT,
+             "agent", "profile_pipeline", "", 800, 1300),
+            ("profile_reviewer", "Profile Reviewer",
+             PROFILE_REVIEWER_PROMPT,
+             "agent", "profile_pipeline", "", 800, 1360),
         ]
         default_model = os.environ.get("LLM_MODEL", "qwen3:8b")
         for agent_id, name, prompt, agent_type, parent_id, skills, x, y in upserts:
@@ -1180,6 +1246,26 @@ def _get_default_agents(default_model: str) -> list:
             "or did, and never guess at page content you have not actually read.",
             default_model, "agent", "jarvis", "browser_automation,web_search", 450, 1060
         ),
+        (
+            "profile_pipeline", "Profile Pipeline",
+            PROFILE_PIPELINE_PROMPT,
+            default_model, "sub-orchestrator", "jarvis", "", 450, 1180
+        ),
+        (
+            "profile_analyst", "Profile Analyst",
+            PROFILE_ANALYST_PROMPT,
+            default_model, "agent", "profile_pipeline", "", 800, 1120
+        ),
+        (
+            "profile_writer", "Profile Writer",
+            PROFILE_WRITER_PROMPT,
+            default_model, "agent", "profile_pipeline", "", 800, 1180
+        ),
+        (
+            "profile_reviewer", "Profile Reviewer",
+            PROFILE_REVIEWER_PROMPT,
+            default_model, "agent", "profile_pipeline", "", 800, 1240
+        ),
     ]
 
 
@@ -1277,6 +1363,18 @@ def _get_default_agents_migrations() -> list:
          "it runs, so prefer browser_read whenever a simple lookup is enough. Always explain what you found "
          "or did, and never guess at page content you have not actually read.",
          "agent", "jarvis", "browser_automation,web_search", 450, 1060),
+        ("profile_pipeline", "Profile Pipeline",
+         PROFILE_PIPELINE_PROMPT,
+         "sub-orchestrator", "jarvis", "", 450, 1180),
+        ("profile_analyst", "Profile Analyst",
+         PROFILE_ANALYST_PROMPT,
+         "agent", "profile_pipeline", "", 800, 1120),
+        ("profile_writer", "Profile Writer",
+         PROFILE_WRITER_PROMPT,
+         "agent", "profile_pipeline", "", 800, 1180),
+        ("profile_reviewer", "Profile Reviewer",
+         PROFILE_REVIEWER_PROMPT,
+         "agent", "profile_pipeline", "", 800, 1240),
     ]
 
 
@@ -1339,6 +1437,69 @@ def clear_chat_history(session_id: str):
         logger.info(f"Cleared database history for session: {session_id}")
     except Exception as e:
         logger.error(f"Error clearing chat history: {e}")
+
+
+def get_session_transcript(session_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+    """Like get_chat_history, but for a human reading a channel conversation in
+    the dashboard: carries the timestamp, and deliberately not the run metadata
+    that get_chat_history's callers feed into the model prompt."""
+    try:
+        rows = _execute("""
+            SELECT id, role, content, timestamp FROM (
+                SELECT id, role, content, timestamp FROM messages
+                WHERE session_id = ?
+                ORDER BY id DESC LIMIT ?
+            ) ORDER BY id ASC
+        """, (session_id, limit))
+        return [
+            {"id": r[0], "role": r[1], "content": r[2], "timestamp": str(r[3] or "")}
+            for r in rows
+        ]
+    except Exception as e:
+        logger.error(f"Error retrieving session transcript: {e}")
+        return []
+
+
+def get_session_message_stats(session_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Message count, last activity and a preview of the newest message for many
+    sessions at once. The channel dashboard lists every conversation a binding
+    has ever had, so this must not become one query per person — it groups in
+    chunks well under SQLite's variable limit instead."""
+    stats: Dict[str, Dict[str, Any]] = {}
+    ids = [str(s) for s in session_ids if s]
+    if not ids:
+        return stats
+    try:
+        for start in range(0, len(ids), 400):
+            chunk = ids[start:start + 400]
+            marks = ",".join(["?"] * len(chunk))
+            newest_ids: Dict[Any, str] = {}
+            for row in _execute(
+                f"""SELECT session_id, COUNT(*), MAX(timestamp), MAX(id)
+                      FROM messages WHERE session_id IN ({marks}) GROUP BY session_id""",
+                tuple(chunk),
+            ):
+                stats[row[0]] = {
+                    "messages_count": row[1] or 0,
+                    "last_message_at": str(row[2] or ""),
+                    "last_message_preview": "",
+                    "last_message_role": "",
+                }
+                if row[3] is not None:
+                    newest_ids[row[3]] = row[0]
+            if newest_ids:
+                id_marks = ",".join(["?"] * len(newest_ids))
+                for row in _execute(
+                    f"SELECT id, role, content FROM messages WHERE id IN ({id_marks})",
+                    tuple(newest_ids),
+                ):
+                    entry = stats.get(newest_ids.get(row[0], ""))
+                    if entry is not None:
+                        entry["last_message_role"] = row[1] or ""
+                        entry["last_message_preview"] = (row[2] or "").strip().replace("\n", " ")[:160]
+    except Exception as e:
+        logger.error(f"Error retrieving session message stats: {e}")
+    return stats
 
 
 def get_keep_from_message_id(session_id: str, keep_n: int) -> Optional[int]:
@@ -2208,6 +2369,29 @@ def get_session_project_id(session_id: str) -> Optional[str]:
     except Exception as e:
         logger.error(f"Error retrieving session project ID for {session_id}: {e}")
         return None
+
+def reassign_project_sessions(old_project_id: str, new_project_id: Optional[str]) -> int:
+    """Bulk-moves every session pointed at old_project_id to new_project_id.
+
+    Used when a project folder is deleted, to promote its chats to the
+    parent project (or unassign them, new_project_id=None) instead of
+    orphaning session_metadata rows with a project_id that no longer exists.
+    Unlike save_session_metadata, this always overwrites — there is no
+    "None means leave unchanged" ambiguity here, since the whole point is a
+    bulk rewrite.
+    """
+    try:
+        affected = _execute(
+            "SELECT session_id FROM session_metadata WHERE project_id = ?", (old_project_id,)
+        )
+        _execute(
+            "UPDATE session_metadata SET project_id = ?, updated_at = CURRENT_TIMESTAMP WHERE project_id = ?",
+            (new_project_id, old_project_id),
+        )
+        return len(affected)
+    except Exception as e:
+        logger.error(f"Error reassigning sessions from project {old_project_id} to {new_project_id}: {e}")
+        return 0
 
 def get_session_title(session_id: str) -> Optional[str]:
     """Retrieves the custom title of a session, if exists."""

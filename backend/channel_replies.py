@@ -209,6 +209,21 @@ async def send_to_channel(binding_id: str, platform: str, chat_id: str, final_te
             credentials, thread["to"], thread.get("subject", ""), final_text,
             thread.get("message_id", ""), thread.get("references", ""),
         )
+    elif reply["platform"] == "vk":
+        from backend import agent_vk_bot
+
+        await agent_vk_bot.manager.send_text(reply["binding_id"], reply["chat_id"], final_text)
+    elif reply["platform"] in ("instagram", "facebook"):
+        from backend import agent_meta_channel
+
+        # Meta only accepts a free-form reply inside the 24-hour window that the
+        # person's own last message opened. A draft reviewed after that fails
+        # here with Meta's own wording rather than silently vanishing.
+        await agent_meta_channel.manager.send_text(reply["binding_id"], reply["chat_id"], final_text)
+    elif reply["platform"] == "whatsapp":
+        from backend import agent_whatsapp_channel
+
+        await agent_whatsapp_channel.manager.send_text(reply["binding_id"], reply["chat_id"], final_text)
     else:
         raise ValueError(f"Unknown platform: {reply['platform']}")
 
@@ -238,7 +253,7 @@ def _notify_owner_new_draft(reply: dict[str, Any]) -> None:
             text = (
                 f"✉️ Новый черновик ответа ждёт подтверждения ({reply['platform']}, от {reply.get('incoming_from') or 'неизвестно'}):\n\n"
                 f"{preview}\n\n"
-                f"Проверьте и отправьте в разделе «Каналы связи» дашборда."
+                f"Проверьте и отправьте в разделе «SMM Factory» дашборда."
             )
             await bot.telegram_app.bot.send_message(chat_id=int(chat_id), text=text)
         except Exception as exc:

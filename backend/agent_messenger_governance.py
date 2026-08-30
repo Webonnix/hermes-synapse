@@ -124,6 +124,9 @@ def _runtime_module_for_platform(platform: str):
         "discord": "backend.agent_discord_bot",
         "slack": "backend.agent_slack_bot",
         "email": "backend.agent_email_channel",
+        # The social channels declare their own runtime in SOCIAL_PLATFORMS
+        # (below) so adding one is a single dict entry, not an edit here too.
+        **{name: spec["runtime"] for name, spec in SOCIAL_PLATFORMS.items()},
     }
     module_name = module_by_platform.get(platform)
     if not module_name:
@@ -193,6 +196,22 @@ def _init_schema() -> None:
             connection.execute(
                 "ALTER TABLE agent_messenger_bindings ADD COLUMN escalation_enabled INTEGER NOT NULL DEFAULT 0"
             )
+        # Off by default — bot_access_gate.py only shows the "talk to the AI
+        # now / wait for the owner" first-contact menu (see conversation_state.py)
+        # when a binding opts in, so every existing draft-mode binding keeps
+        # its current silent-until-reviewed behaviour unchanged.
+        if "handling_menu_enabled" not in existing_columns:
+            connection.execute(
+                "ALTER TABLE agent_messenger_bindings ADD COLUMN handling_menu_enabled INTEGER NOT NULL DEFAULT 0"
+            )
+        # The account id the provider itself uses (VK community id, Facebook
+        # page id, Instagram business id, WhatsApp phone number id). Webhook
+        # platforms carry it in every payload, and it is the only thing an
+        # incoming event can be routed to a binding by — see
+        # find_social_binding_by_account. Public information, unlike the
+        # credential, so it lives in SQL next to the row it identifies.
+        if "external_account_id" not in existing_columns:
+            connection.execute("ALTER TABLE agent_messenger_bindings ADD COLUMN external_account_id TEXT")
 
 
 def _verify_bot_token(bot_token: str) -> str:
@@ -304,41 +323,55 @@ def _notify_owner_access_mode_changed(binding: dict[str, Any], new_mode: str) ->
         pass
 
 
-def notify_owner_escalation(binding: dict[str, Any], platform: str, chat_id: str, requester: str, excerpt: str) -> None:
-    """Pings the owner on the main Telegram bot when bot_access_gate's
-    escalation classifier decided a conversation needs them personally and the
-    other person confirmed. Despite the "Позвонить?" wording shown to that
-    person (backend/bot_access_gate.py's _ESCALATION_OFFER_TEXT) there is no
-    telephony integration anywhere in this codebase — this notification is
-    what actually happens, same best-effort admin-ping channel used for new
-    drafts (channel_replies.py) and dev-run failures (dev_runs.py).
+def notify_owner_escalation(
+    binding: dict[str, Any], platform: str, chat_id: str, requester: str, excerpt: str, reason: str = "",
+) -> bool:
+    """Pings the owner on the main Telegram bot when a conversation needs them
+    personally: either bot_access_gate's escalation classifier decided so and
+    the other person confirmed (the default ``reason``), or that person picked
+    "срочно" from the handling menu themselves (which passes its own
+    ``reason``). Despite the "Позвонить?" wording shown to them
+    (backend/bot_access_gate.py's _ESCALATION_OFFER_TEXT) there is no telephony
+    integration anywhere in this codebase — this notification is what actually
+    happens, same best-effort admin-ping channel used for new drafts
+    (channel_replies.py) and dev-run failures (dev_runs.py).
+
+    Returns whether the ping actually went out, so a caller that promises the
+    other person "уведомил Альберта" can tell the truth about it.
 
     Called from bot_access_gate.authorize(), which runs inside a worker thread
     (asyncio.to_thread from the channel manager) — there is no running event
     loop to schedule a task on, so this blocks briefly on its own loop instead
     of the fire-and-forget pattern _notify_owner_access_mode_changed uses.
     """
-    async def _send() -> None:
+    async def _send() -> bool:
         try:
             import backend.bot as bot
 
             chat_ids = [c.strip() for c in os.getenv("TELEGRAM_CHAT_ID", "").split(",") if c.strip()]
             if not chat_ids or not getattr(bot, "telegram_app", None) or not bot.telegram_app.bot:
-                return
+                return False
             preview = (excerpt or "").strip().replace("\n", " ")[:300]
-            text = (
-                f"📞 {requester or 'Собеседник'} ({platform}, {binding.get('bot_username') or binding['id']}) "
+            why = reason or (
                 f"просит связаться лично — агент «{binding.get('subagent_id')}» предложил позвать вас, "
-                f"собеседник согласился.\n\n«{preview}»"
+                "собеседник согласился"
             )
+            text = (
+                f"📞 {requester or 'Собеседник'} ({platform}, {binding.get('bot_username') or binding['id']}) {why}."
+            )
+            if preview:
+                text += f"\n\n«{preview}»"
             await bot.telegram_app.bot.send_message(chat_id=int(chat_ids[0]), text=text)
+            return True
         except Exception as exc:
             logger.warning("Escalation owner notification failed: %s", exc)
+            return False
 
     try:
-        asyncio.run(_send())
+        return asyncio.run(_send())
     except Exception:
         logger.exception("Escalation owner notification crashed for binding %s", binding.get("id"))
+        return False
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -873,6 +906,7 @@ async def update_binding_settings(
     auto_reply_disclosure_text: Optional[str] = None,
     human_takeover_pause_minutes: Optional[int] = None,
     escalation_enabled: Optional[bool] = None,
+    handling_menu_enabled: Optional[bool] = None,
 ) -> dict[str, Any]:
     """Edits an existing binding's per-channel prompt and/or response mode in
     place. Doesn't touch the bot token/credential or require a new owner
@@ -909,6 +943,8 @@ async def update_binding_settings(
         updates["human_takeover_pause_minutes"] = _clean_pause_minutes(human_takeover_pause_minutes)
     if escalation_enabled is not None:
         updates["escalation_enabled"] = 1 if escalation_enabled else 0
+    if handling_menu_enabled is not None:
+        updates["handling_menu_enabled"] = 1 if handling_menu_enabled else 0
     if default_plan_id is not None:
         clean_plan_id = default_plan_id.strip() or None
         if clean_plan_id:
@@ -1019,6 +1055,8 @@ async def enable_binding(binding_id: str) -> dict[str, Any]:
             credential_or_token = resolve_slack_binding_credentials(binding_id)
         elif platform == "email":
             credential_or_token = resolve_email_binding_credentials(binding_id)
+        elif platform in SOCIAL_PLATFORMS:
+            credential_or_token = resolve_social_binding_credentials(binding_id)
         else:
             raise ValueError(f"Unknown platform: {platform}")
         if not credential_or_token:
@@ -1772,6 +1810,491 @@ def resolve_email_binding_credentials(binding_id: str) -> Optional[dict[str, Any
     return json.loads(credentials_json) if credentials_json else None
 
 
+# ── Social networks: VK, Instagram, Facebook, WhatsApp ──────────────────────
+#
+# The five messenger platforms above each carry their own hand-written
+# create/get/execute/list/resolve quartet. Four more copies of that shape would
+# be ~800 lines of near-identical code, so the social channels are declared as
+# data here and share one generic implementation. Everything around them is
+# deliberately unchanged: the same R3 owner approval, the same Valkey-only
+# secret, the same draft/auto-labeled disclosure rule, the same access gate.
+# An Instagram account reaching an agent is exactly the capability grant a
+# Telegram bot reaching it is, and is governed identically.
+#
+# The one structural difference is *how messages arrive*. VK is polled (Bots
+# Long Poll, works behind NAT like every other channel here). The three Meta
+# platforms have no polling API at all — they push to a webhook, so those
+# bindings only receive anything once backend/social_webhooks.py is reachable
+# from the internet and the account id is registered in the Meta app. That is
+# a deployment fact, not a binding state: such a binding still activates, and
+# its health check still proves the credential works.
+
+GRAPH_API_VERSION = "v21.0"
+GRAPH_API_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
+VK_API_VERSION = "5.199"
+VK_API_BASE = "https://api.vk.com/method"
+
+# Per-platform declaration. `account_field` is the credential that identifies
+# the account to the outside world — for the webhook platforms it is also the
+# id Meta puts in the payload, which is how an incoming event finds its binding
+# (see find_social_binding_by_account).
+SOCIAL_PLATFORMS: dict[str, dict[str, Any]] = {
+    "vk": {
+        "label": "VKontakte",
+        "id_prefix": "vkbind",
+        "secret_prefix": "agent_vk_secret",
+        "runtime": "backend.agent_vk_bot",
+        "required": ("access_token", "group_id"),
+        "account_field": "group_id",
+        "delivery": "poll",
+        "credential_note": "Ключ доступа сообщества и его id хранятся только в Valkey, никогда в SQL",
+    },
+    "instagram": {
+        "label": "Instagram",
+        "id_prefix": "igbind",
+        "secret_prefix": "agent_instagram_secret",
+        "runtime": "backend.agent_meta_channel",
+        "required": ("access_token", "ig_user_id", "app_secret"),
+        "account_field": "ig_user_id",
+        "delivery": "webhook",
+        "credential_note": "Page access token и app secret хранятся только в Valkey, никогда в SQL",
+    },
+    "facebook": {
+        "label": "Facebook",
+        "id_prefix": "fbbind",
+        "secret_prefix": "agent_facebook_secret",
+        "runtime": "backend.agent_meta_channel",
+        "required": ("access_token", "page_id", "app_secret"),
+        "account_field": "page_id",
+        "delivery": "webhook",
+        "credential_note": "Page access token и app secret хранятся только в Valkey, никогда в SQL",
+    },
+    "whatsapp": {
+        "label": "WhatsApp Business",
+        "id_prefix": "wabind",
+        "secret_prefix": "agent_whatsapp_secret",
+        "runtime": "backend.agent_whatsapp_channel",
+        "required": ("access_token", "phone_number_id", "app_secret"),
+        "account_field": "phone_number_id",
+        "delivery": "webhook",
+        "credential_note": "Cloud API token и app secret хранятся только в Valkey, никогда в SQL",
+    },
+}
+
+SOCIAL_PLATFORM_IDS = tuple(SOCIAL_PLATFORMS)
+
+
+def is_social_platform(platform: str) -> bool:
+    return platform in SOCIAL_PLATFORMS
+
+
+def _graph_get(path: str, access_token: str, params: dict[str, Any], what: str) -> dict[str, Any]:
+    """One Graph API read with Meta's error envelope turned into a ValueError the
+    dashboard can show verbatim — Meta's `error.message` already says exactly
+    what is wrong (expired token, missing permission, wrong id)."""
+    try:
+        response = httpx.get(
+            f"{GRAPH_API_BASE}/{path.lstrip('/')}",
+            params={**params, "access_token": access_token},
+            timeout=15,
+        )
+        data = response.json()
+    except Exception as exc:
+        raise ValueError(f"Не удалось связаться с Meta Graph API для проверки {what}: {exc}") from exc
+    if isinstance(data, dict) and data.get("error"):
+        message = (data["error"] or {}).get("message") or "unknown error"
+        raise ValueError(f"Meta отклонила эти данные ({what}): {message}")
+    if not isinstance(data, dict):
+        raise ValueError(f"Meta вернула неожиданный ответ при проверке {what}")
+    return data
+
+
+def _verify_vk_credentials(credentials: dict[str, Any]) -> tuple[str, str]:
+    """groups.getById with the community key — proves the key is live, belongs to
+    this community, and returns its human-readable name for the binding row."""
+    access_token = str(credentials.get("access_token") or "").strip()
+    group_id = str(credentials.get("group_id") or "").strip().lstrip("-")
+    if not access_token or not group_id:
+        raise ValueError("Нужны access_token сообщества и group_id")
+    try:
+        response = httpx.get(
+            f"{VK_API_BASE}/groups.getById",
+            params={"group_id": group_id, "access_token": access_token, "v": VK_API_VERSION},
+            timeout=15,
+        )
+        data = response.json()
+    except Exception as exc:
+        raise ValueError(f"Не удалось связаться с VK API для проверки ключа: {exc}") from exc
+    if data.get("error"):
+        message = (data["error"] or {}).get("error_msg") or "unknown error"
+        raise ValueError(f"VK отклонил этот ключ доступа: {message}")
+    # VK 5.199 returns {"response": {"groups": [...]}}; older shapes returned a
+    # bare list. Both are accepted so a pinned API version elsewhere can't break
+    # connecting a channel.
+    payload = data.get("response") or {}
+    groups = payload.get("groups") if isinstance(payload, dict) else payload
+    if not groups:
+        raise ValueError("VK принял ключ, но не вернул сообщество — проверьте group_id")
+    group = groups[0]
+    name = group.get("name") or group.get("screen_name") or group_id
+    resolved_id = str(group.get("id") or group_id)
+    return f"{name} (@{group.get('screen_name') or resolved_id})", resolved_id
+
+
+def _verify_instagram_credentials(credentials: dict[str, Any]) -> tuple[str, str]:
+    access_token = str(credentials.get("access_token") or "").strip()
+    ig_user_id = str(credentials.get("ig_user_id") or "").strip()
+    if not access_token or not ig_user_id:
+        raise ValueError("Нужны access_token и ig_user_id (Instagram Business account id)")
+    data = _graph_get(ig_user_id, access_token, {"fields": "username,name"}, "аккаунта Instagram")
+    username = data.get("username") or data.get("name")
+    if not username:
+        raise ValueError("Meta приняла токен, но не вернула username — это точно Instagram Business аккаунт?")
+    return f"@{username}", ig_user_id
+
+
+def _verify_facebook_credentials(credentials: dict[str, Any]) -> tuple[str, str]:
+    access_token = str(credentials.get("access_token") or "").strip()
+    page_id = str(credentials.get("page_id") or "").strip()
+    if not access_token or not page_id:
+        raise ValueError("Нужны page access token и page_id")
+    data = _graph_get(page_id, access_token, {"fields": "name"}, "страницы Facebook")
+    name = data.get("name")
+    if not name:
+        raise ValueError("Meta приняла токен, но не вернула название страницы")
+    return name, page_id
+
+
+def _verify_whatsapp_credentials(credentials: dict[str, Any]) -> tuple[str, str]:
+    access_token = str(credentials.get("access_token") or "").strip()
+    phone_number_id = str(credentials.get("phone_number_id") or "").strip()
+    if not access_token or not phone_number_id:
+        raise ValueError("Нужны access_token и phone_number_id из WhatsApp Cloud API")
+    data = _graph_get(
+        phone_number_id, access_token, {"fields": "display_phone_number,verified_name"}, "номера WhatsApp"
+    )
+    phone = data.get("display_phone_number") or phone_number_id
+    name = data.get("verified_name")
+    return f"{phone}{f' ({name})' if name else ''}", phone_number_id
+
+
+_SOCIAL_VERIFIERS = {
+    "vk": _verify_vk_credentials,
+    "instagram": _verify_instagram_credentials,
+    "facebook": _verify_facebook_credentials,
+    "whatsapp": _verify_whatsapp_credentials,
+}
+
+
+def _social_spec(platform: str) -> dict[str, Any]:
+    spec = SOCIAL_PLATFORMS.get(platform)
+    if not spec:
+        raise ValueError(f"Unknown social platform: {platform}")
+    return spec
+
+
+def _clean_social_credentials(platform: str, credentials: dict[str, Any]) -> dict[str, Any]:
+    """Whitespace-trims every field, drops empties, and fails loudly on a missing
+    required one — so a half-filled form never reaches the provider as a
+    confusing 'invalid OAuth token' from Meta."""
+    spec = _social_spec(platform)
+    clean = {key: str(value).strip() for key, value in (credentials or {}).items() if str(value or "").strip()}
+    missing = [field for field in spec["required"] if not clean.get(field)]
+    if missing:
+        raise ValueError(f"Не заполнены обязательные поля: {', '.join(missing)}")
+    if spec["delivery"] == "webhook" and not clean.get("verify_token"):
+        # Meta asks for a verify token when the webhook is registered; there is
+        # nothing for the owner to choose here, so one is generated rather than
+        # made a form field they have to invent a value for.
+        clean["verify_token"] = uuid.uuid4().hex
+    return clean
+
+
+def verify_social_credentials(platform: str, credentials: dict[str, Any]) -> tuple[str, str]:
+    """(display identity, external account id) — raises ValueError if the
+    provider rejects the credential. Same live-check bar every other platform
+    clears before a proposal is even created."""
+    return _SOCIAL_VERIFIERS[platform](_clean_social_credentials(platform, credentials))
+
+
+def create_social_binding_proposal(
+    platform: str,
+    subagent_id: str,
+    credentials: dict[str, Any],
+    allowed_chat_ids: Optional[list[str]] = None,
+    system_prompt_override: str = "",
+    model_override: str = "",
+    model_provider_override: str = "",
+    response_mode: str = DEFAULT_RESPONSE_MODE,
+) -> dict[str, Any]:
+    """Validates the account credential live, then opens the same single-owner
+    (R3) approval every other channel goes through. Nothing is polled, no
+    webhook is honoured, and no message is answered until that is approved."""
+    _init_schema()
+    spec = _social_spec(platform)
+    from backend.database import get_subagent
+
+    subagent = get_subagent(subagent_id)
+    if not subagent:
+        raise ValueError(f"No such agent: {subagent_id}")
+    _check_messenger_allowed(subagent)
+
+    clean_response_mode = _clean_response_mode(response_mode)
+    clean_credentials = _clean_social_credentials(platform, credentials)
+    identity, account_id = _SOCIAL_VERIFIERS[platform](clean_credentials)
+    clean_chat_ids = [str(c).strip() for c in (allowed_chat_ids or []) if str(c).strip()]
+
+    with _connect() as connection:
+        existing = connection.execute(
+            "SELECT * FROM agent_messenger_bindings WHERE subagent_id = ? AND platform = ? "
+            "AND status IN ('awaiting_approval', 'active') ORDER BY created_at DESC LIMIT 1",
+            (subagent_id, platform),
+        ).fetchone()
+    if existing:
+        raise ValueError(
+            f"Agent '{subagent_id}' already has a {dict(existing)['status']} {spec['label']} binding — revoke it first"
+        )
+
+    from backend.control_plane import create_review_task
+
+    binding_id = f"{spec['id_prefix']}-{uuid.uuid4().hex[:12]}"
+    secret_key = f"{spec['secret_prefix']}:{binding_id}"
+
+    mode_note = (
+        "DRAFT — every reply is queued for the owner to review and send by hand; nothing reaches the other person automatically."
+        if clean_response_mode == "draft"
+        else "AUTO-LABELED — replies send automatically, each one tagged as coming from the Vexa assistant, never silently as the owner."
+    )
+    task = create_review_task(
+        goal=f"Connect agent '{subagent['name']}' to the {spec['label']} account {identity}",
+        arguments={
+            "subagent_id": subagent_id,
+            "subagent_name": subagent["name"],
+            "platform": spec["label"],
+            "account": identity,
+            "account_id": account_id,
+            "delivery": (
+                "Bots Long Poll — the backend polls the community, nothing has to be reachable from the internet"
+                if spec["delivery"] == "poll"
+                else "Meta webhook — messages only arrive once this backend is reachable from the internet and the "
+                     "account is subscribed in the Meta app"
+            ),
+            "allowed_chat_ids": clean_chat_ids or "unrestricted — anyone who writes to this account can reach the agent",
+            "response_mode": mode_note,
+            "secret_policy": spec["credential_note"],
+        },
+        risk_class="R3",
+        acceptance=[
+            f"{spec['label']} confirmed the credential belongs to this account",
+            "Credentials never appear in the SQL database or application logs",
+            "Once active, messages to this account are answered ONLY by this one agent",
+            "No reply is ever sent under the owner's identity without either a human send-click (draft mode) or an explicit assistant disclosure (auto-labeled mode)",
+        ],
+        rollback=f"Revoke the {spec['label']} binding for '{subagent['name']}' — stops the channel and deletes its credentials.",
+        requester="autonomy:agent_messenger",
+    )
+
+    from backend.valkey_client import set_value
+
+    now = _now()
+    set_value(secret_key, json.dumps(clean_credentials), ttl_seconds=_PENDING_SECRET_TTL_SECONDS)
+    with _connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO agent_messenger_bindings
+                (id, subagent_id, platform, bot_username, valkey_secret_key, allowed_chat_ids,
+                 status, control_task_id, created_at, updated_at,
+                 system_prompt_override, model_override, model_provider_override, response_mode,
+                 external_account_id)
+            VALUES (?, ?, ?, ?, ?, ?, 'awaiting_approval', ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                binding_id, subagent_id, platform, identity, secret_key, json.dumps(clean_chat_ids),
+                task["id"], now, now,
+                system_prompt_override.strip() or None, model_override.strip() or None,
+                model_provider_override.strip() or None, clean_response_mode, account_id,
+            ),
+        )
+        row = connection.execute("SELECT * FROM agent_messenger_bindings WHERE id = ?", (binding_id,)).fetchone()
+    result = _row_to_dict(row)
+    result["control_task"] = task
+    return result
+
+
+def get_social_binding_proposal(control_task_id: str) -> Optional[dict[str, Any]]:
+    """One lookup covering all four social platforms — approval_dispatch asks
+    this once instead of four times."""
+    _init_schema()
+    placeholders = ", ".join("?" for _ in SOCIAL_PLATFORM_IDS)
+    with _connect() as connection:
+        row = connection.execute(
+            f"SELECT * FROM agent_messenger_bindings WHERE control_task_id = ? AND platform IN ({placeholders}) "
+            "ORDER BY created_at DESC LIMIT 1",
+            (control_task_id, *SOCIAL_PLATFORM_IDS),
+        ).fetchone()
+    return _row_to_dict(row) if row else None
+
+
+async def execute_approved_social_binding(control_task_id: str) -> dict[str, Any]:
+    _init_schema()
+    placeholders = ", ".join("?" for _ in SOCIAL_PLATFORM_IDS)
+    with _connect() as connection:
+        row = connection.execute(
+            f"SELECT * FROM agent_messenger_bindings WHERE control_task_id = ? AND platform IN ({placeholders}) "
+            "ORDER BY created_at DESC LIMIT 1",
+            (control_task_id, *SOCIAL_PLATFORM_IDS),
+        ).fetchone()
+    if not row:
+        raise KeyError(control_task_id)
+    binding = dict(row)
+    platform = binding["platform"]
+    spec = _social_spec(platform)
+
+    from backend.control_plane import finish_task, get_task, start_task
+
+    task = get_task(control_task_id)
+    if not task or task["status"] != "approved":
+        raise PermissionError(f"{spec['label']} binding is not approved")
+    if binding["status"] not in {"awaiting_approval", "approved", "failed"}:
+        raise ValueError(f"{spec['label']} binding cannot activate from status {binding['status']}")
+
+    start_task(control_task_id)
+    try:
+        from backend.valkey_client import get_value, set_value
+
+        credentials_json = get_value(binding["valkey_secret_key"])
+        if not credentials_json:
+            raise RuntimeError("Credentials expired before approval — re-create the binding")
+        set_value(binding["valkey_secret_key"], credentials_json, ttl_seconds=None)
+        _set_status(binding["id"], "active")
+
+        runtime = _runtime_module_for_platform(platform)
+        overrides = {
+            "system_prompt": binding.get("system_prompt_override"),
+            "model": binding.get("model_override"),
+            "model_provider": binding.get("model_provider_override"),
+        }
+        await runtime.manager.start(
+            binding["id"], binding["subagent_id"], json.loads(credentials_json),
+            json.loads(binding.get("allowed_chat_ids") or "[]"), overrides,
+            _clean_response_mode(binding.get("response_mode")),
+        )
+        result = {"status": "active", "id": binding["id"], "account": binding["bot_username"]}
+    except Exception as exc:
+        mark_binding_failed(binding["id"], str(exc))
+        finish_task(control_task_id, "", error=str(exc))
+        raise
+    finish_task(control_task_id, json.dumps(result, ensure_ascii=False))
+    return result
+
+
+def list_social_bindings(platform: Optional[str] = None, subagent_id: Optional[str] = None) -> list[dict[str, Any]]:
+    """Every social binding, or only one platform's / one agent's."""
+    _init_schema()
+    platforms = (platform,) if platform else SOCIAL_PLATFORM_IDS
+    placeholders = ", ".join("?" for _ in platforms)
+    query = f"SELECT * FROM agent_messenger_bindings WHERE platform IN ({placeholders})"
+    params: list[Any] = list(platforms)
+    if subagent_id:
+        query += " AND subagent_id = ?"
+        params.append(subagent_id)
+    with _connect() as connection:
+        rows = connection.execute(query + " ORDER BY created_at DESC", params).fetchall()
+    return [_row_to_dict(row) for row in rows]
+
+
+def resolve_social_binding_credentials(binding_id: str) -> Optional[dict[str, Any]]:
+    """The stored credential dict, and only for a binding that is currently
+    active — same guard the other platforms' resolvers use, so a disabled
+    channel's secret stays unreadable to the rest of the backend."""
+    with _connect() as connection:
+        row = connection.execute("SELECT * FROM agent_messenger_bindings WHERE id = ?", (binding_id,)).fetchone()
+    if not row or dict(row)["status"] != "active":
+        return None
+    from backend.valkey_client import get_value
+
+    credentials_json = get_value(dict(row)["valkey_secret_key"])
+    return json.loads(credentials_json) if credentials_json else None
+
+
+def find_social_binding_by_account(platform: str, external_account_id: str) -> Optional[dict[str, Any]]:
+    """Which binding owns an incoming webhook event. Only ever returns an active
+    one: a revoked account must not keep answering just because Meta is still
+    delivering to the old subscription."""
+    _init_schema()
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM agent_messenger_bindings WHERE platform = ? AND external_account_id = ? "
+            "AND status = 'active' ORDER BY created_at DESC LIMIT 1",
+            (platform, str(external_account_id)),
+        ).fetchone()
+    return _row_to_dict(row) if row else None
+
+
+def social_webhook_verify_token(platform: str, token: str) -> Optional[dict[str, Any]]:
+    """The binding whose registered verify token matches — Meta's GET handshake
+    carries no account id, so this is the only thing it can be matched on."""
+    candidate = str(token or "").strip()
+    if not candidate:
+        return None
+    for binding in list_social_bindings(platform):
+        if binding.get("status") != "active":
+            continue
+        credentials = resolve_social_binding_credentials(binding["id"]) or {}
+        if credentials.get("verify_token") and credentials["verify_token"] == candidate:
+            return binding
+    return None
+
+
+def social_webhook_details(binding_id: str) -> dict[str, Any]:
+    """What the owner has to paste into the Meta app console: the callback URL
+    and this binding's verify token. Deliberately its own call rather than a
+    field on the binding row — the verify token is a credential and stays out
+    of the general list endpoint."""
+    binding = _binding_or_raise(binding_id)
+    platform = binding["platform"]
+    spec = _social_spec(platform)
+    if spec["delivery"] != "webhook":
+        raise ValueError(f"{spec['label']} не использует webhook — сообщения забираются опросом")
+    credentials = resolve_social_binding_credentials(binding_id) or {}
+
+    from backend.database import get_setting
+
+    base_url = (get_setting("smm_public_base_url") or "").strip().rstrip("/")
+    path = f"/api/social/webhook/{platform}"
+    return {
+        "platform": platform,
+        "callback_url": f"{base_url}{path}" if base_url else path,
+        "base_url_configured": bool(base_url),
+        "verify_token": credentials.get("verify_token", ""),
+        "account_id": binding.get("external_account_id") or "",
+        "app_secret_set": bool(credentials.get("app_secret")),
+    }
+
+
+async def reconnect_social_binding(binding_id: str, credentials: dict[str, Any]) -> dict[str, Any]:
+    """Swaps in a fresh credential (an expired Meta token, a rotated VK key) and
+    restarts the channel — no new owner approval, same reasoning as
+    _reconnect_binding for the messenger platforms."""
+    binding = _binding_or_raise(binding_id)
+    platform = binding["platform"]
+    spec = _social_spec(platform)
+    clean = _clean_social_credentials(platform, credentials)
+    # A regenerated verify token would silently break an already-registered
+    # webhook, so the existing one is carried over unless it was given explicitly.
+    if spec["delivery"] == "webhook" and not str((credentials or {}).get("verify_token") or "").strip():
+        existing = resolve_social_binding_credentials(binding_id) or {}
+        if existing.get("verify_token"):
+            clean["verify_token"] = existing["verify_token"]
+    identity, account_id = _SOCIAL_VERIFIERS[platform](clean)
+    with _connect() as connection:
+        connection.execute(
+            "UPDATE agent_messenger_bindings SET external_account_id = ?, updated_at = ? WHERE id = ?",
+            (account_id, _now(), binding_id),
+        )
+    return await _reconnect_binding(binding_id, platform, clean, identity, json.dumps(clean))
+
+
 async def health_check_all_active() -> None:
     """Periodic liveness probe for every active binding across all 5 platforms
     — catches a dead credential (an expired Matrix token, a revoked bot token)
@@ -1797,6 +2320,15 @@ async def health_check_all_active() -> None:
             ),
         ),
     ]
+    # The social channels share one verifier signature, so they are appended
+    # from their own registry rather than spelled out four more times.
+    for social_platform in SOCIAL_PLATFORM_IDS:
+        checks.append((
+            social_platform,
+            lambda platform=social_platform: list_social_bindings(platform),
+            resolve_social_binding_credentials,
+            lambda creds, platform=social_platform: _SOCIAL_VERIFIERS[platform](creds),
+        ))
     for platform, list_fn, resolve_fn, verify_fn in checks:
         for binding in list_fn():
             if binding.get("status") != "active":

@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from backend import bot_access, bot_access_gate, database
+from backend import bot_access, bot_access_gate, conversation_state, database
 
 
 @pytest.fixture()
@@ -12,6 +12,7 @@ def gate_db(tmp_path, monkeypatch):
     monkeypatch.setattr(bot_access, "DB_PATH", db_path)
     monkeypatch.setattr(bot_access, "_local_rate_buckets", {})
     monkeypatch.setattr(bot_access, "_valkey_unavailable_until", float("inf"))
+    monkeypatch.setattr(conversation_state, "DB_PATH", db_path)
     database.init_db()
     bot_access._init_schema()
     return db_path
@@ -353,11 +354,16 @@ def test_a_rate_limited_customer_is_not_upsold(gate_db, billing, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _reset_escalation_state():
-    """_ESCALATION_OFFERED is process-wide by design (must survive between
-    turns), so tests must reset it or they leak into each other."""
-    bot_access_gate._ESCALATION_OFFERED.clear()
+    """These caches are process-wide by design (they must survive between
+    turns), so tests must reset them or they leak into each other."""
+    def _clear():
+        bot_access_gate._ESCALATION_OFFERED.clear()
+        bot_access_gate._URGENT_NOTIFIED.clear()
+        bot_access_gate._HANDLING_FIRST_MESSAGE.clear()
+
+    _clear()
     yield
-    bot_access_gate._ESCALATION_OFFERED.clear()
+    _clear()
 
 def _bind_with_escalation(monkeypatch, notified: list, **overrides):
     """Like _bind(), but the stub module also carries the two governance
@@ -455,3 +461,302 @@ def test_ambiguous_reply_to_the_offer_still_proceeds_without_notifying(gate_db, 
     decision = bot_access_gate.authorize("bind-1", "telegram", "999", "расскажи мне анекдот")
     assert decision.action == bot_access_gate.PROCEED
     assert notified == []
+
+
+# ── Handling mode: "talk to the AI now / wait for the owner" + manual takeover ──
+
+def _bind_with_handling_menu(monkeypatch, notified: list = None, delivered: bool = True, **overrides):
+    """Like _bind_with_escalation: the stub module also needs auto_reply_disclosure
+    (appended to the AI-confirmation reply) and notify_owner_escalation, which
+    the "срочно" option reuses to ping the owner on Telegram."""
+    binding = _bind(monkeypatch, handling_menu_enabled=True, **overrides)
+    module = __import__("sys").modules["backend.agent_messenger_governance"]
+    module.auto_reply_disclosure = staticmethod(lambda binding_id: "\n\n— личный AI-ассистент.")
+
+    def _notify(binding, platform, chat_id, requester, excerpt, reason=""):
+        if notified is not None:
+            notified.append({"platform": platform, "chat_id": chat_id, "requester": requester,
+                             "excerpt": excerpt, "reason": reason})
+        return delivered
+
+    module.notify_owner_escalation = staticmethod(_notify)
+    return binding
+
+
+def test_handling_menu_disabled_by_default_leaves_behaviour_unchanged(gate_db, monkeypatch):
+    _bind(monkeypatch, allowed_chat_ids=[])  # handling_menu_enabled omitted -> falsy
+    decision = bot_access_gate.authorize("bind-1", "telegram", "999", "Привет")
+    assert decision.action == bot_access_gate.PROCEED
+    assert conversation_state.get_state("bind-1", "telegram", "999") is None
+
+
+def test_first_message_gets_the_menu_and_waits_for_a_choice(gate_db, monkeypatch):
+    _bind_with_handling_menu(monkeypatch, allowed_chat_ids=[])
+    decision = bot_access_gate.authorize("bind-1", "telegram", "999", "Здравствуйте")
+    assert decision.action == bot_access_gate.REPLY
+    assert decision.reply_text == bot_access_gate._HANDLING_MENU_TEXT
+    assert conversation_state.get_state("bind-1", "telegram", "999")["handling_mode"] == "pending_choice"
+
+
+def test_choosing_the_ai_confirms_then_proceeds_normally_next_turn(gate_db, monkeypatch):
+    _bind_with_handling_menu(monkeypatch, allowed_chat_ids=[])
+    bot_access_gate.authorize("bind-1", "telegram", "999", "Здравствуйте")
+
+    chosen = bot_access_gate.authorize("bind-1", "telegram", "999", "1")
+    assert chosen.action == bot_access_gate.REPLY
+    assert chosen.reply_text.startswith(bot_access_gate._HANDLING_AI_CONFIRM_TEXT)
+    assert chosen.reply_text.endswith("личный AI-ассистент.")
+    assert conversation_state.get_state("bind-1", "telegram", "999")["handling_mode"] == "ai"
+
+    following = bot_access_gate.authorize("bind-1", "telegram", "999", "У меня вопрос")
+    assert following.action == bot_access_gate.PROCEED
+
+
+def test_choosing_to_wait_then_silences_further_messages(gate_db, monkeypatch):
+    _bind_with_handling_menu(monkeypatch, allowed_chat_ids=[])
+    bot_access_gate.authorize("bind-1", "telegram", "999", "Здравствуйте")
+
+    chosen = bot_access_gate.authorize("bind-1", "telegram", "999", "2")
+    assert chosen.action == bot_access_gate.REPLY
+    assert chosen.reply_text == bot_access_gate._HANDLING_WAIT_CONFIRM_TEXT
+    assert conversation_state.get_state("bind-1", "telegram", "999")["handling_mode"] == "waiting"
+
+    following = bot_access_gate.authorize("bind-1", "telegram", "999", "Ау, вы тут?")
+    assert following.action == bot_access_gate.IGNORE
+
+
+def test_someone_who_chose_to_wait_can_change_their_mind(gate_db, monkeypatch):
+    """The mute used to be permanent: "1" was swallowed by the waiting branch
+    like any other message, and touch_state refreshed updated_at on every
+    incoming one, so the inactivity reset never came either — the conversation
+    could only be revived by the owner from the dashboard."""
+    _bind_with_handling_menu(monkeypatch, allowed_chat_ids=[])
+    bot_access_gate.authorize("bind-1", "telegram", "999", "Здравствуйте")
+    bot_access_gate.authorize("bind-1", "telegram", "999", "2")
+
+    revived = bot_access_gate.authorize("bind-1", "telegram", "999", "1")
+    assert revived.action == bot_access_gate.REPLY
+    assert revived.reply_text.startswith(bot_access_gate._HANDLING_AI_CONFIRM_TEXT)
+    assert conversation_state.get_state("bind-1", "telegram", "999")["handling_mode"] == "ai"
+    assert bot_access_gate.authorize("bind-1", "telegram", "999", "Вопрос").action == bot_access_gate.PROCEED
+
+
+def test_waiting_can_be_escalated_to_urgent_without_the_owner(gate_db, monkeypatch):
+    notified: list = []
+    _bind_with_handling_menu(monkeypatch, notified, allowed_chat_ids=[])
+    bot_access_gate.authorize("bind-1", "telegram", "999", "Упал прод")
+    bot_access_gate.authorize("bind-1", "telegram", "999", "2")
+
+    decision = bot_access_gate.authorize("bind-1", "telegram", "999", "3")
+    assert decision.reply_text == bot_access_gate._HANDLING_URGENT_CONFIRM_TEXT
+    assert len(notified) == 1
+
+
+def test_the_wait_confirmation_says_how_to_come_back(gate_db, monkeypatch):
+    """An escape hatch nobody is told about is not an escape hatch."""
+    _bind_with_handling_menu(monkeypatch, allowed_chat_ids=[])
+    bot_access_gate.authorize("bind-1", "telegram", "999", "Здравствуйте")
+
+    chosen = bot_access_gate.authorize("bind-1", "telegram", "999", "2")
+    assert "«1»" in chosen.reply_text and "«3»" in chosen.reply_text
+
+
+def test_waiting_still_ignores_anything_that_is_not_a_bare_choice(gate_db, monkeypatch):
+    """A loose match would mute-and-unmute at random: someone waiting for the
+    owner often writes sentences that start with a digit."""
+    _bind_with_handling_menu(monkeypatch, allowed_chat_ids=[])
+    bot_access_gate.authorize("bind-1", "telegram", "999", "Здравствуйте")
+    bot_access_gate.authorize("bind-1", "telegram", "999", "2")
+
+    for text in ("Ау, вы тут?", "1 вопрос всё же есть", "3 часа жду"):
+        assert bot_access_gate.authorize("bind-1", "telegram", "999", text).action == bot_access_gate.IGNORE
+    assert conversation_state.get_state("bind-1", "telegram", "999")["handling_mode"] == "waiting"
+
+
+def test_a_conversation_that_chose_the_ai_answers_directly_despite_draft_mode(gate_db, monkeypatch):
+    """Draft mode queues the answer for the owner to send by hand — which the
+    menu's "отвечу на любой вопрос" cannot survive: the scripted replies go out
+    instantly while the actual answer never arrives, so from the chat the bot
+    looks dead. Choosing the AI is consent to an automated answer, and it is
+    delivered with the disclosure attached."""
+    _bind_with_handling_menu(monkeypatch, allowed_chat_ids=[])
+    bot_access_gate.authorize("bind-1", "telegram", "999", "Здравствуйте")
+    bot_access_gate.authorize("bind-1", "telegram", "999", "1")
+
+    answered = bot_access_gate.authorize("bind-1", "telegram", "999", "Почему падает maven-jar-plugin?")
+    assert answered.action == bot_access_gate.PROCEED
+    assert bot_access_gate.effective_response_mode(answered, "draft") == "auto_labeled"
+
+
+def test_the_urgent_option_also_leaves_the_ai_able_to_answer_directly(gate_db, monkeypatch):
+    _bind_with_handling_menu(monkeypatch, allowed_chat_ids=[])
+    bot_access_gate.authorize("bind-1", "telegram", "999", "Упал прод")
+    bot_access_gate.authorize("bind-1", "telegram", "999", "3")
+
+    answered = bot_access_gate.authorize("bind-1", "telegram", "999", "Да, подскажите пока вы тут")
+    assert answered.action == bot_access_gate.PROCEED
+    assert bot_access_gate.effective_response_mode(answered, "draft") == "auto_labeled"
+
+
+def test_draft_mode_is_untouched_for_a_binding_without_the_menu(gate_db, monkeypatch):
+    """The owner's own review workflow is the default for a reason — only an
+    explicit choice by the person on the other side overrides it."""
+    _bind(monkeypatch, allowed_chat_ids=[])
+    decision = bot_access_gate.authorize("bind-1", "telegram", "999", "Привет")
+    assert decision.action == bot_access_gate.PROCEED
+    assert bot_access_gate.effective_response_mode(decision, "draft") == "draft"
+
+
+def test_an_unclear_reply_asks_again_without_losing_the_pending_choice(gate_db, monkeypatch):
+    _bind_with_handling_menu(monkeypatch, allowed_chat_ids=[])
+    bot_access_gate.authorize("bind-1", "telegram", "999", "Здравствуйте")
+
+    decision = bot_access_gate.authorize("bind-1", "telegram", "999", "не понимаю о чём вы")
+    assert decision.action == bot_access_gate.REPLY
+    assert decision.reply_text == bot_access_gate._HANDLING_UNCLEAR_TEXT
+    assert conversation_state.get_state("bind-1", "telegram", "999")["handling_mode"] == "pending_choice"
+
+
+def test_urgent_choice_pings_the_owner_and_quotes_the_original_question(gate_db, monkeypatch):
+    notified: list = []
+    _bind_with_handling_menu(monkeypatch, notified, allowed_chat_ids=[])
+    bot_access_gate.authorize("bind-1", "telegram", "999", "Упал прод, нужен Альберт", display_name="@ivan")
+
+    decision = bot_access_gate.authorize("bind-1", "telegram", "999", "3")
+    assert decision.action == bot_access_gate.REPLY
+    assert decision.reply_text == bot_access_gate._HANDLING_URGENT_CONFIRM_TEXT
+    assert conversation_state.get_state("bind-1", "telegram", "999")["handling_mode"] == "notified"
+
+    assert len(notified) == 1
+    assert notified[0]["requester"] == "@ivan"
+    # The bare "3" is worthless to the owner — the ping quotes what was asked.
+    assert notified[0]["excerpt"] == "Упал прод, нужен Альберт"
+    assert "срочн" in notified[0]["reason"]
+
+
+def test_urgent_reply_admits_when_the_ping_could_not_be_delivered(gate_db, monkeypatch):
+    _bind_with_handling_menu(monkeypatch, delivered=False, allowed_chat_ids=[])
+    bot_access_gate.authorize("bind-1", "telegram", "999", "Здравствуйте")
+
+    decision = bot_access_gate.authorize("bind-1", "telegram", "999", "3")
+    assert decision.reply_text == bot_access_gate._HANDLING_URGENT_FAILED_TEXT
+
+
+def test_repeated_urgent_requests_do_not_spam_the_owner(gate_db, monkeypatch):
+    notified: list = []
+    _bind_with_handling_menu(monkeypatch, notified, allowed_chat_ids=[])
+    bot_access_gate.authorize("bind-1", "telegram", "999", "Здравствуйте")
+
+    for _ in range(3):
+        decision = bot_access_gate.authorize("bind-1", "telegram", "999", "3")
+        assert decision.reply_text == bot_access_gate._HANDLING_URGENT_CONFIRM_TEXT
+    assert len(notified) == 1  # the cooldown swallowed the repeats
+
+
+def test_after_the_urgent_ping_a_bare_digit_still_re_picks(gate_db, monkeypatch):
+    _bind_with_handling_menu(monkeypatch, allowed_chat_ids=[])
+    bot_access_gate.authorize("bind-1", "telegram", "999", "Здравствуйте")
+    bot_access_gate.authorize("bind-1", "telegram", "999", "3")
+
+    decision = bot_access_gate.authorize("bind-1", "telegram", "999", "2")
+    assert decision.reply_text == bot_access_gate._HANDLING_WAIT_CONFIRM_TEXT
+    assert conversation_state.get_state("bind-1", "telegram", "999")["handling_mode"] == "waiting"
+
+
+def test_after_the_urgent_ping_a_real_question_is_answered_by_the_ai(gate_db, monkeypatch):
+    """The person was offered help while the owner is on the way — taking it up
+    must reach the agent, not another menu."""
+    _bind_with_handling_menu(monkeypatch, allowed_chat_ids=[])
+    bot_access_gate.authorize("bind-1", "telegram", "999", "Здравствуйте")
+    bot_access_gate.authorize("bind-1", "telegram", "999", "3")
+
+    decision = bot_access_gate.authorize("bind-1", "telegram", "999", "Да, подскажите про 2 сервера")
+    assert decision.action == bot_access_gate.PROCEED
+    assert conversation_state.get_state("bind-1", "telegram", "999")["handling_mode"] == "ai"
+
+
+def test_urgent_wording_is_recognised_without_the_digit(gate_db, monkeypatch):
+    notified: list = []
+    _bind_with_handling_menu(monkeypatch, notified, allowed_chat_ids=[])
+    bot_access_gate.authorize("bind-1", "telegram", "999", "Здравствуйте")
+
+    # Contains "Альберт" too, which on its own would read as "wait" — urgency wins.
+    decision = bot_access_gate.authorize("bind-1", "telegram", "999", "Это срочно, нужен Альберт")
+    assert decision.reply_text == bot_access_gate._HANDLING_URGENT_CONFIRM_TEXT
+    assert len(notified) == 1
+
+
+def test_handling_menu_only_applies_to_owner_scope_conversations(gate_db, monkeypatch):
+    """Token subscribers already get an instant disclosed AI reply — the
+    owner-availability menu would be redundant friction for a paid flow."""
+    binding = _bind_with_handling_menu(monkeypatch, access_mode="token", allowed_chat_ids=["100"])
+    binding.setdefault("response_mode", "auto_labeled")
+    token = bot_access.issue_token("bind-1", "agent-consult")
+    bot_access.redeem("bind-1", "telegram", "999", token["plaintext"])
+
+    decision = bot_access_gate.authorize("bind-1", "telegram", "999", "вопрос")
+    assert decision.action == bot_access_gate.PROCEED
+    assert decision.scope == "public"
+    assert conversation_state.get_state("bind-1", "telegram", "999") is None
+
+
+def test_the_question_that_triggered_the_menu_is_kept_for_the_agent(gate_db, monkeypatch):
+    """The whole point of picking "1" is to get help with what was already
+    asked — so the menu exchange must be in the history the agent then reads."""
+    _bind_with_handling_menu(monkeypatch, allowed_chat_ids=[])
+    bot_access_gate.authorize("bind-1", "telegram", "999", "Упал прод, что делать?")
+
+    session_id = conversation_state.session_id_for_conversation("bind-1", "telegram", "999")
+    stored = database.get_session_transcript(session_id)
+    assert [m["role"] for m in stored] == ["user", "assistant"]
+    assert stored[0]["content"] == "Упал прод, что делать?"
+    assert stored[1]["content"] == bot_access_gate._HANDLING_MENU_TEXT
+
+
+def test_messages_sent_while_the_bot_is_silent_are_still_recorded(gate_db, monkeypatch):
+    """Waiting for the owner must not lose what the person says meanwhile —
+    otherwise switching them to the AI later starts from nothing."""
+    _bind_with_handling_menu(monkeypatch, allowed_chat_ids=[])
+    bot_access_gate.authorize("bind-1", "telegram", "999", "Здравствуйте")
+    bot_access_gate.authorize("bind-1", "telegram", "999", "2")
+
+    silenced = bot_access_gate.authorize("bind-1", "telegram", "999", "Ещё деталь: база на реплике")
+    assert silenced.action == bot_access_gate.IGNORE
+
+    session_id = conversation_state.session_id_for_conversation("bind-1", "telegram", "999")
+    assert "Ещё деталь: база на реплике" in [m["content"] for m in database.get_session_transcript(session_id)]
+
+
+def test_the_agent_is_left_to_record_its_own_turns(gate_db, monkeypatch):
+    """On PROCEED the agent itself writes the turn — recording it here too would
+    duplicate every message the bot actually answers."""
+    _bind(monkeypatch, allowed_chat_ids=[])
+    decision = bot_access_gate.authorize("bind-1", "telegram", "999", "Привет")
+    assert decision.action == bot_access_gate.PROCEED
+    assert database.get_session_transcript(decision.session_id) == []
+
+
+def test_owner_takeover_records_what_is_said_while_albert_handles_it(gate_db, monkeypatch):
+    _bind(monkeypatch, allowed_chat_ids=[])
+    conversation_state.set_handling_mode("bind-1", "telegram", "999", "owner_takeover")
+
+    bot_access_gate.authorize("bind-1", "telegram", "999", "Пишу, пока отвечает Альберт")
+
+    session_id = conversation_state.session_id_for_conversation("bind-1", "telegram", "999")
+    assert [m["content"] for m in database.get_session_transcript(session_id)] == [
+        "Пишу, пока отвечает Альберт"
+    ]
+
+
+def test_owner_takeover_silences_the_bot_until_released(gate_db, monkeypatch):
+    """The admin dashboard's take-over/release button — independent of
+    handling_menu_enabled, and works even mid-menu."""
+    _bind(monkeypatch, allowed_chat_ids=[])  # handling_menu_enabled omitted -> plain draft binding
+    conversation_state.set_handling_mode("bind-1", "telegram", "999", "owner_takeover")
+
+    silenced = bot_access_gate.authorize("bind-1", "telegram", "999", "Есть кто?")
+    assert silenced.action == bot_access_gate.IGNORE
+
+    conversation_state.set_handling_mode("bind-1", "telegram", "999", "ai")
+    resumed = bot_access_gate.authorize("bind-1", "telegram", "999", "Есть кто?")
+    assert resumed.action == bot_access_gate.PROCEED

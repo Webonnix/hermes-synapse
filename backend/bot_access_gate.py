@@ -29,6 +29,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Optional
 
 from backend import bot_access
@@ -80,6 +81,240 @@ _NEGATIVE_WORDS = (
     "no", "not needed",
 )
 
+# ── Handling mode: "talk to the AI now / wait for the owner" first-contact
+# menu, plus a manual owner takeover the admin dashboard can flip at any time.
+# Opt-in per binding (agent_messenger_bindings.handling_menu_enabled) for the
+# menu; the takeover check itself is unconditional — see conversation_state.py.
+_HANDLING_MENU_TEXT = (
+    "Альберт сейчас загружен другими задачами и пока не может ответить лично. "
+    "Чтобы вы не ждали впустую, вот что я могу:\n\n"
+    "1️⃣ Помочь сам, как ИИ-ассистент — отвечу на любой вопрос и помогу с техническими темами "
+    "(Альберт меня обучает и развивает).\n"
+    "2️⃣ Просто подождать Альберта — тогда отвечать за него не буду, он напишет, как освободится.\n"
+    "3️⃣ Если вопрос срочный — сразу уведомлю Альберта, чтобы он подключился быстрее.\n\n"
+    "Напишите «1», «2» или «3»."
+)
+_HANDLING_AI_CONFIRM_TEXT = (
+    "Отлично, тогда я на связи.\n\n"
+    "Я ИИ-ассистент Альберта — он меня обучает, так что разбираюсь в его темах, включая технические.\n\n"
+    "Расскажите своими словами, в чём вопрос — постараюсь помочь."
+)
+_HANDLING_WAIT_CONFIRM_TEXT = (
+    "Понял, жду вместе с вами — Альберт ответит лично, как освободится.\n\n"
+    "Если передумаете: «1» — помогу сам прямо сейчас, «3» — сразу уведомлю его, что вопрос срочный."
+)
+_HANDLING_URGENT_CONFIRM_TEXT = (
+    "Отправил Альберту уведомление — он увидит, что вопрос срочный.\n\n"
+    "Могу пока чем-то помочь сам? Если нет — напишите «2», и я не буду вмешиваться, дождётесь его лично."
+)
+_HANDLING_URGENT_FAILED_TEXT = (
+    "Не получилось отправить уведомление прямо сейчас, но Альберт увидит переписку, как освободится.\n\n"
+    "Могу пока помочь сам? Если нет — напишите «2», и я не буду вмешиваться."
+)
+_HANDLING_UNCLEAR_TEXT = (
+    "Не понял выбор. Напишите «1» — пообщаться с ИИ сейчас, «2» — подождать Альберта, "
+    "или «3», если вопрос срочный и его нужно уведомить."
+)
+HANDLING_MODE_RESET_SECONDS = 12 * 60 * 60  # a long gap counts as a fresh "first message"
+_HANDLING_ACTIVE_MODES = {"pending_choice", "ai", "waiting", "notified"}
+_HANDLING_AI_WORDS = ("ии", "ai", "ассистент", "бот", "давай")
+_HANDLING_WAIT_WORDS = ("жд", "альберт", "человек", "потом")
+_HANDLING_URGENT_WORDS = ("срочн", "urgent", "сроч")
+_CHOICE_BY_DIGIT = {"1": "ai", "2": "wait", "3": "urgent"}
+
+# Paging the owner is the one option here with a cost outside the chat, so a
+# person mashing "3" must not turn into a burst of Telegram pings. Process
+# memory only, same lifetime/scope as _ESCALATION_OFFERED above.
+_URGENT_NOTIFY_COOLDOWN_SECONDS = 10 * 60
+_URGENT_NOTIFIED: dict[str, float] = {}
+# {f"{binding_id}|{chat_id}": first message that opened the conversation} — kept
+# so an urgent ping tells the owner what the matter actually is, rather than
+# quoting the bare "3" that requested it.
+_HANDLING_FIRST_MESSAGE: dict[str, str] = {}
+
+
+def _parse_bare_choice(text: str) -> Optional[str]:
+    """Strictly one digit and nothing else. Used after the urgent notification,
+    where the person was invited to "just write a number" but is equally likely
+    to ask a real question instead — a loose match there would silently mute a
+    conversation because an answer happened to start with "2"."""
+    stripped = (text or "").replace("️", "").replace("⃣", "").strip().strip(".,!) ")
+    return _CHOICE_BY_DIGIT.get(stripped)
+
+
+def _parse_handling_choice(text: str) -> Optional[str]:
+    """'ai' | 'wait' | 'urgent', or None when the reply isn't a choice at all."""
+    bare = _parse_bare_choice(text)
+    if bare:
+        return bare
+    stripped = (text or "").strip().lower()
+    # Urgency is checked first: "срочно нужен Альберт" also contains a wait word.
+    if stripped.startswith("3") or any(word in stripped for word in _HANDLING_URGENT_WORDS):
+        return "urgent"
+    if stripped.startswith("1") or any(word in stripped for word in _HANDLING_AI_WORDS):
+        return "ai"
+    if stripped.startswith("2") or any(word in stripped for word in _HANDLING_WAIT_WORDS):
+        return "wait"
+    return None
+
+
+def _notify_owner_urgent(
+    binding: dict[str, Any], platform: str, chat_id: str, requester: str, key: str,
+) -> bool:
+    """Pings the owner on Telegram (through Vexa, see
+    agent_messenger_governance.notify_owner_escalation) because the person
+    themselves marked their question urgent. Returns False only when the ping
+    could not be delivered, so the reply doesn't promise something that didn't
+    happen. Inside the cooldown it reports success without re-sending."""
+    now = time.time()
+    last = _URGENT_NOTIFIED.get(key)
+    if last and now - last < _URGENT_NOTIFY_COOLDOWN_SECONDS:
+        return True
+    from backend.agent_messenger_governance import notify_owner_escalation
+
+    sent = notify_owner_escalation(
+        binding, platform, chat_id, requester, _HANDLING_FIRST_MESSAGE.get(key, ""),
+        reason="отметил свой вопрос как срочный и попросил уведомить вас",
+    )
+    if sent:
+        _URGENT_NOTIFIED[key] = now
+    return sent
+
+
+def _apply_handling_mode(
+    binding: dict[str, Any], platform: str, chat_id: str, text: str,
+    external_user_id: str, display_name: str, decision: "GateDecision",
+) -> Optional["GateDecision"]:
+    """Runs only after the base gate already said PROCEED, right before
+    _apply_escalation — never overrides an ignore/reply/token-flow decision.
+    Returns a replacement REPLY/IGNORE decision to short-circuit the normal
+    agent answer, or None to let it (and then escalation) proceed as usual."""
+    if decision.scope != "owner" or not binding.get("handling_menu_enabled"):
+        return None
+
+    from backend import conversation_state
+
+    binding_id = binding["id"]
+    key = f"{binding_id}|{chat_id}"
+    state = conversation_state.get_state(binding_id, platform, chat_id)
+    mode = (state or {}).get("handling_mode")
+    try:
+        updated_at = datetime.fromisoformat(state["updated_at"]).timestamp() if state else 0.0
+    except Exception:
+        updated_at = 0.0
+    if not state or mode not in _HANDLING_ACTIVE_MODES or (time.time() - updated_at) > HANDLING_MODE_RESET_SECONDS:
+        mode = "undecided"
+
+    def reply(text_out: str) -> GateDecision:
+        return GateDecision(
+            action=REPLY, reply_text=text_out,
+            session_id=decision.session_id, scope=decision.scope, subscriber=decision.subscriber,
+        )
+
+    def choose(choice: str) -> Optional[GateDecision]:
+        if choice == "ai":
+            conversation_state.set_handling_mode(binding_id, platform, chat_id, "ai", display_name)
+            from backend.agent_messenger_governance import auto_reply_disclosure
+
+            return reply(_HANDLING_AI_CONFIRM_TEXT + auto_reply_disclosure(binding_id))
+        if choice == "wait":
+            conversation_state.set_handling_mode(binding_id, platform, chat_id, "waiting", display_name)
+            return reply(_HANDLING_WAIT_CONFIRM_TEXT)
+        if choice == "urgent":
+            # The choice itself ("3") often carries no display name, so fall back
+            # to the one stored when the conversation opened.
+            requester = display_name or external_user_id or (state or {}).get("display_name") or ""
+            sent = _notify_owner_urgent(binding, platform, chat_id, requester, key)
+            # Either way the AI stays available for the next turn — the person
+            # was just asked whether it can help while the owner is on the way.
+            conversation_state.set_handling_mode(binding_id, platform, chat_id, "notified", display_name)
+            return reply(_HANDLING_URGENT_CONFIRM_TEXT if sent else _HANDLING_URGENT_FAILED_TEXT)
+        return None
+
+    if mode == "undecided":
+        _HANDLING_FIRST_MESSAGE[key] = (text or "").strip()[:1000]
+        conversation_state.set_handling_mode(binding_id, platform, chat_id, "pending_choice", display_name)
+        return reply(_HANDLING_MENU_TEXT)
+
+    if mode == "pending_choice":
+        chosen = choose(_parse_handling_choice(text) or "")
+        if chosen:
+            return chosen
+        conversation_state.touch_state(binding_id, platform, chat_id, display_name)
+        return reply(_HANDLING_UNCLEAR_TEXT)
+
+    if mode == "waiting":
+        # Silence, but not a door without a handle: the person asked to wait for
+        # the owner and can change their mind. Only a bare digit re-picks (same
+        # rule as "notified" below) — everything else stays silent, which is
+        # what they asked for. Without this the mute was permanent in practice:
+        # "1" landed here and was swallowed, and touch_state below refreshes
+        # updated_at on every message, so the inactivity reset that would
+        # eventually clear the mode never fires while they keep writing.
+        chosen = choose(_parse_bare_choice(text) or "")
+        if chosen:
+            return chosen
+        conversation_state.touch_state(binding_id, platform, chat_id, display_name)
+        return GateDecision(action=IGNORE, session_id=decision.session_id, scope=decision.scope)
+
+    if mode == "notified":
+        # The invitation to "just write a number" is live for exactly this one
+        # turn: a bare digit re-picks, anything else is a real question and the
+        # conversation settles into ordinary AI handling.
+        chosen = choose(_parse_bare_choice(text) or "")
+        if chosen:
+            return chosen
+        conversation_state.set_handling_mode(binding_id, platform, chat_id, "ai", display_name)
+        decision.handling_mode = "ai"
+        return None
+
+    conversation_state.touch_state(binding_id, platform, chat_id, display_name)
+    decision.handling_mode = mode
+    return None
+
+
+def _check_owner_takeover(binding_id: str, platform: str, chat_id: str) -> Optional["GateDecision"]:
+    """The owner can, at any moment, take a specific conversation over from
+    the admin dashboard (POST /api/messenger-bindings/{id}/conversations/...
+    /takeover) — the bot then stays silent on it, on any platform, regardless
+    of that binding's response_mode/handling_menu_enabled, until released."""
+    try:
+        from backend import conversation_state
+
+        state = conversation_state.get_state(binding_id, platform, chat_id)
+    except Exception:
+        logger.exception("Owner-takeover check failed for binding %s — proceeding normally", binding_id)
+        return None
+    if state and state.get("handling_mode") == "owner_takeover":
+        # Carries the session id even though nothing is sent back, so what the
+        # person writes while the owner handles them personally still lands in
+        # the stored conversation — see _persist_gate_turn.
+        return GateDecision(
+            action=IGNORE, session_id=bot_access.session_id_for(platform, binding_id, chat_id)
+        )
+    return None
+
+
+def _persist_gate_turn(decision: "GateDecision", text: str) -> None:
+    """A REPLY or IGNORE never reaches the agent, and the agent is what normally
+    writes a turn into backend/database.py. Without this, everything said while
+    the bot is deliberately quiet — waiting for the owner, taken over by them —
+    plus the very question that triggered the handling menu would be missing
+    from the history the agent reads once it does pick the conversation up."""
+    if decision.action == PROCEED or not decision.session_id:
+        return
+    try:
+        from backend.database import save_message
+
+        incoming = (text or "").strip()
+        if incoming:
+            save_message(decision.session_id, "user", incoming[:8000])
+        if decision.action == REPLY and (decision.reply_text or "").strip():
+            save_message(decision.session_id, "assistant", decision.reply_text)
+    except Exception:
+        logger.exception("Could not store the gate-handled turn for session %s", decision.session_id)
+
+
 REDEEMED_MESSAGE = (
     "Токен принят — доступ открыт. Задавайте вопрос, я помогу.\n"
     "Всё, что вы напишете здесь, сохраняется в вашей карточке, чтобы я помнил контекст."
@@ -98,6 +333,10 @@ class GateDecision:
     session_id: str = ""
     scope: str = "owner"  # "owner" | "public"
     subscriber: Optional[dict[str, Any]] = None
+    # Set by _apply_handling_mode when the conversation has an active choice
+    # ("ai"/"notified"), so effective_response_mode below can tell a person who
+    # was promised an answer from a person who never asked for one.
+    handling_mode: str = ""
     token: Optional[dict[str, Any]] = None
     plan: Optional[dict[str, Any]] = None
     limits: dict[str, Any] = field(default_factory=dict)
@@ -220,18 +459,29 @@ def authorize(
     """Decides what to do with one incoming message, and records the outcome in
     backend/channel_activity.py so the admin can see whether messages are
     reaching a bound bot at all — see MessengerChannelsTab's activity log."""
-    decision = _authorize(binding_id, platform, chat_id, text, external_user_id, display_name)
-    if decision.action == PROCEED:
-        try:
-            from backend.agent_messenger_governance import get_binding
+    decision = _check_owner_takeover(binding_id, platform, chat_id)
+    if decision is None:
+        decision = _authorize(binding_id, platform, chat_id, text, external_user_id, display_name)
+        if decision.action == PROCEED:
+            try:
+                from backend.agent_messenger_governance import get_binding
 
-            binding = get_binding(binding_id)
-            if binding:
-                escalated = _apply_escalation(binding, platform, chat_id, text, external_user_id, display_name, decision)
-                if escalated:
-                    decision = escalated
-        except Exception:
-            logger.exception("Escalation check failed for binding %s — proceeding normally", binding_id)
+                binding = get_binding(binding_id)
+                if binding:
+                    handled = _apply_handling_mode(
+                        binding, platform, chat_id, text, external_user_id, display_name, decision
+                    )
+                    if handled:
+                        decision = handled
+                    else:
+                        escalated = _apply_escalation(
+                            binding, platform, chat_id, text, external_user_id, display_name, decision
+                        )
+                        if escalated:
+                            decision = escalated
+            except Exception:
+                logger.exception("Handling-mode/escalation check failed for binding %s — proceeding normally", binding_id)
+    _persist_gate_turn(decision, text)
     try:
         from backend import channel_activity
 
@@ -623,5 +873,18 @@ def record_turn(
 def effective_response_mode(decision: GateDecision, configured_mode: str) -> str:
     """A public token holder can't wait for the owner to hand-approve every
     answer, so a token-scoped turn always uses the disclosed auto-reply mode.
-    Owner-scoped turns keep whatever the binding is configured with."""
-    return "auto_labeled" if decision.scope == "public" else configured_mode
+
+    The handling menu makes the same promise explicitly — "1️⃣ Помочь сам, как
+    ИИ-ассистент — отвечу на любой вопрос" — and draft mode cannot keep it: the
+    answer would sit in the dashboard queue while the person, who just chose to
+    be helped now, gets silence. (The gate's own scripted replies go out
+    directly, so from the chat it looks like the bot answered the menu and then
+    died.) A conversation that picked the AI therefore answers directly, with
+    the automation disclosure attached — the same trade update_binding_settings
+    already makes when a binding switches to token access.
+
+    Owner-scoped turns with no such choice keep whatever the binding is
+    configured with, draft included."""
+    if decision.scope == "public" or decision.handling_mode in ("ai", "notified"):
+        return "auto_labeled"
+    return configured_mode

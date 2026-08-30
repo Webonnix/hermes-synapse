@@ -66,7 +66,12 @@ async def test_native_chat_sends_numeric_keep_alive_as_number():
 
 
 @pytest.mark.asyncio
-async def test_native_chat_places_options_and_normalizes_response():
+async def test_native_chat_places_options_and_normalizes_response(monkeypatch):
+    # Pinned, not inherited: these two live in the deployment's environment
+    # (docker-compose sets both), so a test that asserts on the exact options
+    # dict passes on a laptop and fails inside the backend container.
+    monkeypatch.delenv("OLLAMA_NUM_BATCH", raising=False)
+    monkeypatch.setenv("OLLAMA_NUM_CTX", "8192")
     captured = {}
 
     async def handler(request: httpx.Request):
@@ -151,7 +156,9 @@ async def test_native_chat_reports_midstream_error():
 
 
 @pytest.mark.asyncio
-async def test_model_lifecycle_endpoints_use_native_api():
+async def test_model_lifecycle_endpoints_use_native_api(monkeypatch):
+    monkeypatch.delenv("OLLAMA_NUM_BATCH", raising=False)
+    monkeypatch.setenv("OLLAMA_NUM_CTX", "8192")
     calls = []
 
     async def handler(request: httpx.Request):
@@ -166,10 +173,38 @@ async def test_model_lifecycle_endpoints_use_native_api():
         models = await client.list_models()
         await client.delete_model("alpha")
         await client.unload_model("zeta")
+        await client.load_model("zeta")
 
     assert [model["name"] for model in models] == ["alpha", "zeta"]
     assert ("DELETE", "/api/delete", {"model": "alpha"}) in calls
     assert ("POST", "/api/generate", {"model": "zeta", "prompt": "", "stream": False, "keep_alive": 0}) in calls
+    # Loading is the same empty-prompt call with the opposite keep_alive: it
+    # moves the weights into VRAM and generates nothing.
+    assert ("POST", "/api/generate",
+            {"model": "zeta", "prompt": "", "stream": False, "keep_alive": -1,
+             "options": {"num_ctx": 8192}}) in calls
+
+
+@pytest.mark.asyncio
+async def test_preload_and_chat_agree_on_what_defines_a_runner(monkeypatch):
+    """Ollama rebuilds the runner (30-60s) when num_ctx or num_batch changes, so
+    a preload that disagrees with the chat that follows buys nothing and costs a
+    reload. Both must send the same pair."""
+    monkeypatch.setenv("OLLAMA_NUM_BATCH", "1024")
+    captured = []
+
+    async def handler(request: httpx.Request):
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={"model": "zeta", "message": {"role": "assistant", "content": "ok"}, "done": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = OllamaClient("http://ollama:11434", client=http_client)
+        await client.load_model("zeta", num_ctx=65536)
+        await client.chat(model="zeta", messages=[{"role": "user", "content": "hi"}], num_ctx=65536)
+
+    preload, chat = captured
+    assert preload["options"] == {"num_ctx": 65536, "num_batch": 1024}
+    assert chat["options"]["num_ctx"] == 65536 and chat["options"]["num_batch"] == 1024
 
 
 @pytest.mark.asyncio

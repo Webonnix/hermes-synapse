@@ -96,6 +96,16 @@ SANDBOX_UID = 10001
 SANDBOX_GID = 10001
 
 
+class SandboxNotWritable(RuntimeError):
+    """The sandbox came up, but its /dev-repo is not writable by the runner uid.
+
+    Worth its own type because it is unrecoverable from inside the sandbox (the
+    agent has no CAP_CHOWN and is not root) and pointless to retry: every
+    dev_write_file would keep failing with PermissionError until the run burned
+    its whole budget, which is exactly how this failure showed up in production
+    before the checks below existed."""
+
+
 def _safe_run_id(run_id: str) -> str:
     if not _RUN_ID_RE.match(run_id or ""):
         raise ValueError(f"Refusing to sandbox a malformed run id: {run_id!r}")
@@ -207,12 +217,59 @@ def _checkpoint_parent(parent_path: Path) -> None:
     ], timeout=60)
 
 
-def _chown_to_sandbox(target: Path) -> None:
-    """Hands the checkout to the sandbox uid — see SANDBOX_UID above for why."""
+def _chown_to_sandbox(target: Path, recursive: bool = True) -> None:
+    """Hands a directory to the sandbox uid — see SANDBOX_UID above for why.
+
+    recursive=False is for containers of checkouts (RUNS_ROOT) rather than a
+    checkout itself: the runs root only needs to be traversable, and walking
+    every existing run's tree on each new run would be pure waste."""
     subprocess.run(
-        ["chown", "-R", f"{SANDBOX_UID}:{SANDBOX_GID}", str(target)],
-        check=True, capture_output=True, text=True, timeout=30,
+        ["chown", *(["-R"] if recursive else []), f"{SANDBOX_UID}:{SANDBOX_GID}", str(target)],
+        check=True, capture_output=True, text=True, timeout=60,
     )
+
+
+def ensure_shared_repo_writable() -> None:
+    """Prepares the *shared* dev-repo the static dev-runner container mounts.
+
+    Per-run sandboxes get their checkout from _prepare_repo_copy below, but the
+    static `dev-runner` service bind-mounts ./data/dev-repo from the host
+    directly — used by plain chat's dev_* tools and by the serialized fallback
+    in dev_runs._run_with_sandbox when a per-run sandbox can't be created. If
+    that host directory doesn't exist when the container starts, the Docker
+    daemon creates it root:root 0755, and because a bind mount masks whatever
+    ownership the image gave /dev-repo (Dockerfile.dev-runner chowns it to
+    `runner`), the sandbox lands on a directory it can read but never write.
+    Creating and chowning it here — from the backend, which is root and has
+    the same directory mounted at BASE_REPO_PATH — is what stops that.
+
+    Best-effort by design: a backend that can't chown (not root) should still
+    start, and the writability check below turns any leftover breakage into
+    one clear run-level error instead of a silent grind."""
+    try:
+        BASE_REPO_PATH.mkdir(parents=True, exist_ok=True)
+        if not (BASE_REPO_PATH / ".git").exists():
+            # An empty directory is not clonable, so _prepare_repo_copy would
+            # fail every run until someone seeded it by hand.
+            _git(["init", "-q", "-b", "main", str(BASE_REPO_PATH)], timeout=30)
+        _chown_to_sandbox(BASE_REPO_PATH)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("Could not prepare the shared dev-repo at %s: %s", BASE_REPO_PATH, exc)
+
+
+async def repo_writable(base_url: str) -> Optional[bool]:
+    """Whether the runner behind `base_url` can write its /dev-repo.
+
+    None when the question can't be answered — the runner is unreachable, or
+    is an older image whose /health predates the `writable` field — so callers
+    can tell "known bad" from "unknown" and only fail a run on the former."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            payload = (await client.get(f"{base_url}/health")).json()
+    except (httpx.HTTPError, ValueError):
+        return None
+    value = payload.get("writable") if isinstance(payload, dict) else None
+    return value if isinstance(value, bool) else None
 
 
 def _prepare_repo_copy(run_id: str, parent_run_id: Optional[str] = None) -> Path:
@@ -229,8 +286,14 @@ def _prepare_repo_copy(run_id: str, parent_run_id: Optional[str] = None) -> Path
     run_id = _safe_run_id(run_id)
     target = RUNS_ROOT / run_id
     if target.exists():
+        # Re-assert ownership on reuse (a resumed or retried run) rather than
+        # trusting it: the directory may predate this chown, or have been
+        # created empty and root-owned by the Docker daemon when an earlier
+        # attempt started the container before the clone landed.
+        _chown_to_sandbox(target)
         return target
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
+    _chown_to_sandbox(RUNS_ROOT, recursive=False)
 
     source = BASE_REPO_PATH
     if parent_run_id:
@@ -315,24 +378,50 @@ def _blocking_ensure_container(run_id: str, parent_run_id: Optional[str] = None)
     return name
 
 
+async def _await_health(base_url: str) -> bool:
+    deadline = asyncio.get_event_loop().time() + HEALTH_TIMEOUT_S
+    async with httpx.AsyncClient(timeout=3.0) as client:
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                if (await client.get(f"{base_url}/health")).status_code == 200:
+                    return True
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(1.0)
+    return False
+
+
 async def ensure_sandbox(run_id: str, parent_run_id: Optional[str] = None) -> str:
     """Creates (or reuses) the run's sandbox container and returns its base URL.
 
     `parent_run_id` makes this a continuation: the checkout is cloned from that
     run's working tree, so the agent opens the previous revision's code rather
-    than an empty repo."""
+    than an empty repo.
+
+    Raises rather than returning a sandbox the agent cannot actually work in:
+    one that never answered /health (every tool call would come back
+    "unreachable"), or one whose /dev-repo it cannot write. Both used to be
+    returned as if fine, and the run only discovered it step by step."""
     name = await asyncio.to_thread(_blocking_ensure_container, run_id, parent_run_id)
     base_url = f"http://{name}:{RUNNER_PORT}"
-    deadline = asyncio.get_event_loop().time() + HEALTH_TIMEOUT_S
-    async with httpx.AsyncClient(timeout=3.0) as client:
-        while asyncio.get_event_loop().time() < deadline:
-            try:
-                response = await client.get(f"{base_url}/health")
-                if response.status_code == 200:
-                    break
-            except httpx.HTTPError:
-                pass
-            await asyncio.sleep(1.0)
+    if not await _await_health(base_url):
+        await asyncio.to_thread(_blocking_release, run_id)
+        raise RuntimeError(f"Sandbox {name} did not become healthy within {HEALTH_TIMEOUT_S:.0f}s")
+    if await repo_writable(base_url) is False:
+        # One repair attempt: chown lands on the very inode the container has
+        # bind-mounted, so it takes effect live — no restart, no re-clone.
+        # Covers a checkout that predates the chown in _prepare_repo_copy and
+        # one the daemon created itself before the clone got there.
+        try:
+            await asyncio.to_thread(_chown_to_sandbox, RUNS_ROOT / _safe_run_id(run_id))
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.warning("Sandbox %s: chown repair failed: %s", name, exc)
+        if await repo_writable(base_url) is False:
+            await asyncio.to_thread(_blocking_release, run_id)
+            raise SandboxNotWritable(
+                f"{RUNS_ROOT / run_id} is not writable by the sandbox user "
+                f"(uid {SANDBOX_UID}) and the backend could not chown it."
+            )
     return base_url
 
 

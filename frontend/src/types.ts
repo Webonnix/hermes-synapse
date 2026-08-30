@@ -166,6 +166,8 @@ export interface Project {
   is_active: boolean;
   created_at: string;
   updated_at: string;
+  /** Parent project id for a sub-project; null/absent = top-level. */
+  parent_id?: string | null;
 }
 
 // A named preset of feature-flag defaults an agent can be assigned to — backend/agent_tiers.py.
@@ -209,7 +211,7 @@ export interface AgentMatrixBinding {
 }
 
 // Cross-agent, cross-platform row from GET /api/messenger-bindings — powers the
-// central "Каналы связи" admin page (MessengerChannelsTab.tsx).
+// SMM Factory's "Подключения" panel (MessengerChannelsTab.tsx).
 export interface MessengerBinding {
   id: string;
   subagent_id: string;
@@ -237,7 +239,79 @@ export interface MessengerBinding {
   /** When true, a message that looks like it needs the owner personally gets
    * a scripted offer to notify them, instead of the usual agent answer. */
   escalation_enabled?: boolean;
+  /** When true, a new owner-scope conversation is greeted with a menu asking
+   * whether to talk to the AI now or wait for the owner, instead of silently
+   * queuing (draft mode) or auto-replying (auto_labeled). See ConversationState. */
+  handling_menu_enabled?: boolean;
   last_error?: string | null;
+  /** The id the provider itself uses for this account (VK community id,
+   * Facebook page id, Instagram business id, WhatsApp phone number id). Only
+   * set for the social platforms — it is what routes an incoming webhook to
+   * this binding. */
+  external_account_id?: string | null;
+}
+
+// One social platform's connect requirements — GET /api/social-platforms. The
+// connect form renders its fields from this rather than hard-coding a second
+// copy of what the backend validates.
+export interface SocialPlatformSpec {
+  id: string;
+  label: string;
+  /** 'poll' works from a machine with no inbound route; 'webhook' only receives
+   * anything once this backend is publicly reachable and the account is
+   * subscribed in the provider's app console. */
+  delivery: 'poll' | 'webhook' | string;
+  required: string[];
+  account_field: string;
+}
+
+// GET /api/messenger-bindings/{id}/webhook — what to paste into the Meta app
+// console for a webhook-delivered channel.
+export interface SocialWebhookDetails {
+  platform: string;
+  callback_url: string;
+  base_url_configured: boolean;
+  verify_token: string;
+  account_id: string;
+  app_secret_set: boolean;
+}
+
+// GET /api/messenger-bindings/conversations — every conversation on every
+// channel in one list, for the SMM Factory "Диалоги" panel.
+export interface SmmConversation extends ConversationState {
+  agent_name: string;
+  account: string;
+  response_mode: string;
+}
+
+// One row from GET /api/messenger-bindings/{id}/conversations — backend/conversation_state.py's
+// per-chat AI/owner handling state. Powers MessengerChannelsTab's "Диалоги" panel.
+export interface ConversationState {
+  id: string;
+  binding_id: string;
+  platform: string;
+  chat_id: string;
+  display_name: string;
+  /** 'undecided'/'pending_choice'/'notified' only appear when handling_menu_enabled
+   * is on; 'owner_takeover' can be set from any binding via the take-over button. */
+  handling_mode: 'undecided' | 'pending_choice' | 'ai' | 'waiting' | 'notified' | 'owner_takeover' | string;
+  updated_at: string;
+  created_at: string;
+  /** Key into the shared `messages` table — the very context the agent answers
+   * from, which is why the panel can show it verbatim. */
+  session_id: string;
+  messages_count: number;
+  last_message_at: string;
+  last_message_preview: string;
+  last_message_role: string;
+}
+
+// One stored message of a channel conversation — GET .../conversations/{platform}/{chat_id}/history
+export interface ConversationMessage {
+  id: number;
+  role: 'user' | 'assistant' | string;
+  content: string;
+  timestamp: string;
 }
 
 // One entry from GET /api/messenger-bindings/activity — backend/channel_activity.py's

@@ -18,7 +18,12 @@ import {
   Lock,
   Edit2,
   FileText,
-  X as XIcon
+  X as XIcon,
+  Folder,
+  FolderOpen,
+  FolderPlus,
+  ChevronRight,
+  ChevronDown
 } from 'lucide-react';
 import type { ChatMessage, SystemConfig, ChatSession, Project } from '../types';
 import { styles } from '../styles';
@@ -71,6 +76,7 @@ interface ChatTabProps {
   handleSetSessionAgent?: (sessionId: string, agentId: string) => void;
   projects?: Project[];
   handleSetSessionProject?: (sessionId: string, projectId: string) => void;
+  fetchProjects?: () => void;
   /** Latest dev-run event (when a dev-run was launched from this dialog) —
    * renders a compact status card above the message stream. */
   activeDevRun?: { run_id: string; status: string; event: string; summary: string } | null;
@@ -117,6 +123,7 @@ export function ChatTab({
   handleSetSessionAgent = () => undefined,
   projects = [],
   handleSetSessionProject = () => undefined,
+  fetchProjects = () => undefined,
   activeDevRun = null,
   onOpenDevRuns
 }: ChatTabProps) {
@@ -126,6 +133,16 @@ export function ChatTab({
   const [sessionFilter, setSessionFilter] = React.useState('');
   const [editingSessionId, setEditingSessionId] = React.useState<string | null>(null);
   const [editingSessionTitle, setEditingSessionTitle] = React.useState('');
+
+  // Project folder tree: which folders are expanded, which is mid-rename,
+  // and the "create new (sub-)project" inline form (open when non-null;
+  // '' means a top-level project, otherwise the parent folder's id).
+  const [expandedProjects, setExpandedProjects] = React.useState<Set<string>>(new Set());
+  const [projectMenuOpenId, setProjectMenuOpenId] = React.useState<string | null>(null);
+  const [renamingProjectId, setRenamingProjectId] = React.useState<string | null>(null);
+  const [renamingProjectName, setRenamingProjectName] = React.useState('');
+  const [creatingProjectParent, setCreatingProjectParent] = React.useState<string | null | undefined>(undefined);
+  const [newProjectName, setNewProjectName] = React.useState('');
   const tr = React.useCallback((key: string, fallback: string) => {
     const value = t ? t(key) : key;
     return value === key ? fallback : value;
@@ -190,6 +207,445 @@ export function ChatTab({
     if (response.ok) fetchChatSessions();
   };
 
+  // ─── Project folders ──────────────────────────────────────────────────
+  type ProjectNode = Project & { children: ProjectNode[] };
+
+  const projectTree = React.useMemo<ProjectNode[]>(() => {
+    const byId = new Map<string, ProjectNode>();
+    projects.forEach(p => byId.set(p.id, { ...p, children: [] }));
+    const roots: ProjectNode[] = [];
+    byId.forEach(node => {
+      const parent = node.parent_id ? byId.get(node.parent_id) : undefined;
+      if (parent) parent.children.push(node); else roots.push(node);
+    });
+    return roots;
+  }, [projects]);
+
+  // Depth of each project in the tree, used to indent options in the flat
+  // "move to folder" <select> below (a <select> can't render a real tree).
+  const projectDepth = React.useMemo(() => {
+    const depth = new Map<string, number>();
+    const walk = (nodes: ProjectNode[], d: number) => {
+      nodes.forEach(n => { depth.set(n.id, d); walk(n.children, d + 1); });
+    };
+    walk(projectTree, 0);
+    return depth;
+  }, [projectTree]);
+
+  const sessionsByProject = React.useMemo(() => {
+    const map = new Map<string, ChatSession[]>();
+    chatSessions.forEach(session => {
+      if (session.id === 'dashboard') return;
+      const pid = session.project_id || '';
+      if (!map.has(pid)) map.set(pid, []);
+      map.get(pid)!.push(session);
+    });
+    return map;
+  }, [chatSessions]);
+
+  const toggleProjectExpanded = (projectId: string) => {
+    setExpandedProjects(prev => {
+      const next = new Set(prev);
+      if (next.has(projectId)) next.delete(projectId); else next.add(projectId);
+      return next;
+    });
+  };
+
+  const submitNewProject = async () => {
+    const name = newProjectName.trim();
+    if (!name || creatingProjectParent === undefined) return;
+    const res = await fetch('/api/projects', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ name, parent_id: creatingProjectParent || null }),
+    });
+    if (res.ok) {
+      if (creatingProjectParent) setExpandedProjects(prev => new Set(prev).add(creatingProjectParent));
+      fetchProjects();
+    }
+    setCreatingProjectParent(undefined);
+    setNewProjectName('');
+  };
+
+  const submitRenameProject = async (projectId: string) => {
+    const name = renamingProjectName.trim();
+    const project = projects.find(p => p.id === projectId);
+    if (!name || !project) { setRenamingProjectId(null); return; }
+    const res = await fetch(`/api/projects/${projectId}`, {
+      method: 'PUT',
+      headers: authHeaders(),
+      body: JSON.stringify({
+        name, description: project.description, is_active: project.is_active,
+        parent_id: project.parent_id ?? null,
+      }),
+    });
+    if (res.ok) fetchProjects();
+    setRenamingProjectId(null);
+  };
+
+  const deleteProjectFolder = async (projectId: string, name: string) => {
+    if (!window.confirm(`Delete folder "${name}"? Chats and sub-folders inside move up one level — nothing is deleted.`)) return;
+    const res = await fetch(`/api/projects/${projectId}`, { method: 'DELETE', headers: authHeaders() });
+    if (res.ok) {
+      fetchProjects();
+      fetchChatSessions();
+    }
+  };
+
+  const renderNewProjectRow = (depth: number) => (
+    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', paddingLeft: `${depth * 16 + 8}px`, marginBottom: '2px' }}>
+      <FolderPlus size={13} style={{ color: 'var(--accent-violet)', flexShrink: 0 }} />
+      <input
+        autoFocus
+        value={newProjectName}
+        onChange={(e) => setNewProjectName(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') submitNewProject();
+          else if (e.key === 'Escape') { setCreatingProjectParent(undefined); setNewProjectName(''); }
+        }}
+        onBlur={submitNewProject}
+        placeholder="Folder name…"
+        style={{ fontSize: '0.78rem', background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(155, 136, 255, 0.5)', borderRadius: '4px', color: '#fff', padding: '3px 6px', width: '100%', outline: 'none' }}
+      />
+    </div>
+  );
+
+  /** Renders a session's row. Extracted to a function (not a .map JSX
+   * literal) so both the flat search view and the project-folder tree can
+   * call it for the same session without duplicating ~200 lines of menu
+   * markup. */
+  const renderSessionRow = (session: ChatSession, depth: number = 0) => {
+              const s = session.id;
+              const isActive = currentChatId === s;
+              const label = session.title || getSessionLabel(s);
+              const isDashboard = s === 'dashboard';
+
+              return (
+                <div
+                  key={session.id}
+                  onMouseLeave={() => setActiveMenu(null)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: isDashboard ? '10px 12px' : '8px 12px',
+                    paddingLeft: `${depth * 16 + (isDashboard ? 12 : 12)}px`,
+                    borderRadius: '8px',
+                    border: isDashboard
+                      ? (isActive ? '1px solid rgba(0, 240, 255, 0.7)' : '1px solid rgba(0, 240, 255, 0.25)')
+                      : (isActive ? '1px solid rgba(0, 240, 255, 0.4)' : '1px solid rgba(255, 255, 255, 0.03)'),
+                    backgroundColor: isDashboard
+                      ? (isActive ? 'rgba(0, 240, 255, 0.08)' : 'rgba(0, 240, 255, 0.02)')
+                      : (isActive ? 'rgba(0, 240, 255, 0.04)' : 'rgba(255, 255, 255, 0.01)'),
+                    cursor: 'pointer',
+                    transition: 'all 0.2s',
+                    position: 'relative',
+                    boxShadow: isDashboard ? '0 0 10px rgba(0, 240, 255, 0.04)' : 'none'
+                  }}
+                  onClick={() => {
+                    if (editingSessionId !== s) {
+                      selectChat(s);
+                    }
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, minWidth: 0 }}>
+                    {isDashboard ? (
+                      <Cpu size={14} style={{ color: 'var(--accent-cyan)', flexShrink: 0 }} />
+                    ) : (
+                      <MessageSquare size={14} style={{ color: isActive ? 'var(--accent-cyan)' : 'var(--text-dim)', flexShrink: 0 }} />
+                    )}
+                    <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px', minWidth: 0, width: '100%' }}>
+                        {editingSessionId === s ? (
+                          <input
+                            value={editingSessionTitle}
+                            onChange={(e) => setEditingSessionTitle(e.target.value)}
+                            onKeyDown={async (e) => {
+                              if (e.key === 'Enter') {
+                                await handleRenameSession(s, editingSessionTitle);
+                                setEditingSessionId(null);
+                              } else if (e.key === 'Escape') {
+                                setEditingSessionId(null);
+                              }
+                            }}
+                            onBlur={async () => {
+                              await handleRenameSession(s, editingSessionTitle);
+                              setEditingSessionId(null);
+                            }}
+                            autoFocus
+                            onClick={(e) => e.stopPropagation()}
+                            style={{
+                              fontSize: '0.8rem',
+                              background: 'rgba(0, 0, 0, 0.4)',
+                              border: '1px solid rgba(0, 240, 255, 0.5)',
+                              borderRadius: '4px',
+                              color: '#fff',
+                              padding: '2px 6px',
+                              width: '100%',
+                              outline: 'none',
+                            }}
+                          />
+                        ) : (
+                          <span style={{ fontSize: '0.8rem', fontWeight: (isActive || isDashboard) ? 600 : 500, color: (isActive || isDashboard) ? '#fff' : 'var(--text-dim)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {label}
+                          </span>
+                        )}
+                        {isDashboard && (
+                          <span title="Protected core session" style={{ display: 'flex', alignItems: 'center' }}>
+                            <Lock size={10} style={{ color: 'rgba(0, 240, 255, 0.4)', flexShrink: 0 }} />
+                          </span>
+                        )}
+                      </div>
+                      {isDashboard && (
+                        <span style={{ fontSize: '0.6rem', color: 'rgba(0, 240, 255, 0.65)', fontWeight: 500, letterSpacing: '0.5px' }}>MAIN ORCHESTRATOR</span>
+                      )}
+                    </div>
+                  </div>
+                  <div style={{ position: 'relative' }}>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveMenu(activeMenu === s ? null : s);
+                      }}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: 'var(--text-dim)',
+                        cursor: 'pointer',
+                        padding: '4px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        borderRadius: '4px'
+                      }}
+                      title="Session options"
+                    >
+                      <MoreVertical size={14} />
+                    </button>
+
+                    {activeMenu === s && (
+                      <div style={{
+                        position: 'absolute',
+                        right: '0',
+                        top: '100%',
+                        marginTop: '4px',
+                        background: 'rgba(15, 20, 25, 0.95)',
+                        border: '1px solid rgba(0, 240, 255, 0.2)',
+                        borderRadius: '8px',
+                        padding: '4px',
+                        zIndex: 100,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        minWidth: '160px',
+                        boxShadow: '0 4px 12px rgba(0,0,0,0.5)'
+                      }}>
+                        {!isDashboard && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setActiveMenu(null);
+                              setEditingSessionId(s);
+                              setEditingSessionTitle(label);
+                            }}
+                            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.05)'}
+                            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                            style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', color: '#fff', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderRadius: '4px', fontSize: '0.75rem', transition: 'background-color 0.2s' }}
+                          ><Edit2 size={12}/> Rename</button>
+                        )}
+                        {!isDashboard && (
+                          <div onClick={(e) => e.stopPropagation()} style={{ padding: '4px 10px 6px' }}>
+                            <div style={{ fontSize: '0.65rem', color: 'var(--text-dim)', marginBottom: '3px' }}>Move to folder</div>
+                            <select
+                              value={session.project_id || ''}
+                              onChange={(e) => { handleSetSessionProject(s, e.target.value); setActiveMenu(null); }}
+                              style={{ width: '100%', fontSize: '0.72rem', background: 'rgba(0,0,0,0.35)', color: '#fff', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '4px', padding: '3px 4px' }}
+                            >
+                              <option value="" style={{ background: '#0b0f19' }}>— No folder —</option>
+                              {projects.map(p => (
+                                <option key={p.id} value={p.id} style={{ background: '#0b0f19' }}>
+                                  {'  '.repeat(projectDepth.get(p.id) || 0)}{p.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
+                        <button
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            setActiveMenu(null);
+                            try {
+                              const res = await fetch(`/api/history/${s}/fork`, { method: 'POST', headers: authHeaders() });
+                              if (res.ok) {
+                                const data = await res.json();
+                                fetchChatSessions();
+                                setTimeout(() => selectChat(data.new_session_id), 100);
+                              }
+                            } catch(err) { console.error(err); }
+                          }}
+                          onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.05)'}
+                          onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                          style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', color: '#fff', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderRadius: '4px', fontSize: '0.75rem', transition: 'background-color 0.2s' }}
+                        ><Copy size={12}/> Fork</button>
+
+                        {s === 'dashboard' ? (
+                          <button
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              setActiveMenu(null);
+                              if (window.confirm('Albert, are you sure you want to completely purge the history of the Main Terminal?')) {
+                                try {
+                                  const res = await fetch(`/api/history/dashboard`, { method: 'DELETE', headers: authHeaders() });
+                                  if (res.ok) {
+                                    selectChat('dashboard');
+                                  }
+                                } catch(err) { console.error(err); }
+                              }
+                            }}
+                            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(239,68,68,0.1)'}
+                            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                            style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', color: 'rgba(239,68,68,0.9)', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderRadius: '4px', fontSize: '0.75rem', transition: 'background-color 0.2s' }}
+                          ><Trash2 size={12}/> Purge</button>
+                        ) : (
+                          <>
+                            <button
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                setActiveMenu(null);
+                                if (window.confirm(`Archive session "${label}"?`)) {
+                                  try {
+                                    const res = await fetch(`/api/history/${s}/archive`, { method: 'POST', headers: authHeaders() });
+                                    if (res.ok) {
+                                      if (currentChatId === s) selectChat('dashboard');
+                                      fetchChatSessions();
+                                    }
+                                  } catch(err) { console.error(err); }
+                                }
+                              }}
+                              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.05)'}
+                              onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                              style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', color: '#fff', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderRadius: '4px', fontSize: '0.75rem', transition: 'background-color 0.2s' }}
+                            ><Archive size={12}/> Archive</button>
+
+                            <button
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                setActiveMenu(null);
+                                if (window.confirm(`Are you sure you want to delete session "${label}"?`)) {
+                                  try {
+                                    const res = await fetch(`/api/history/${s}`, { method: 'DELETE', headers: authHeaders() });
+                                    if (res.ok) {
+                                      if (currentChatId === s) selectChat('dashboard');
+                                      fetchChatSessions();
+                                    }
+                                  } catch (err) { console.error(err); }
+                                }
+                              }}
+                              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(239,68,68,0.1)'}
+                              onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                              style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', color: 'rgba(239,68,68,0.9)', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderRadius: '4px', fontSize: '0.75rem', transition: 'background-color 0.2s' }}
+                            ><Trash2 size={12}/> Delete</button>
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+  };
+
+  /** Renders one project folder row plus (if expanded) its nested
+   * sub-folders and chats, recursively. */
+  const renderProjectNode = (node: ProjectNode, depth: number): React.ReactNode => {
+    const isExpanded = expandedProjects.has(node.id);
+    const isRenaming = renamingProjectId === node.id;
+    const ownSessions = sessionsByProject.get(node.id) || [];
+    return (
+      <React.Fragment key={node.id}>
+        <div
+          onMouseLeave={() => setProjectMenuOpenId(null)}
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '6px 8px', paddingLeft: `${depth * 16 + 4}px`,
+            borderRadius: '6px', cursor: 'pointer', position: 'relative',
+          }}
+          onClick={() => toggleProjectExpanded(node.id)}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flex: 1, minWidth: 0 }}>
+            {isExpanded ? <ChevronDown size={12} style={{ color: 'var(--text-dim)', flexShrink: 0 }} /> : <ChevronRight size={12} style={{ color: 'var(--text-dim)', flexShrink: 0 }} />}
+            {isExpanded ? <FolderOpen size={14} style={{ color: 'var(--accent-violet)', flexShrink: 0 }} /> : <Folder size={14} style={{ color: 'var(--accent-violet)', flexShrink: 0 }} />}
+            {isRenaming ? (
+              <input
+                autoFocus
+                value={renamingProjectName}
+                onChange={(e) => setRenamingProjectName(e.target.value)}
+                onClick={(e) => e.stopPropagation()}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') submitRenameProject(node.id);
+                  else if (e.key === 'Escape') setRenamingProjectId(null);
+                }}
+                onBlur={() => submitRenameProject(node.id)}
+                style={{ fontSize: '0.8rem', background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(155, 136, 255, 0.5)', borderRadius: '4px', color: '#fff', padding: '2px 6px', width: '100%', outline: 'none' }}
+              />
+            ) : (
+              <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-dim)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{node.name}</span>
+            )}
+          </div>
+          <div style={{ position: 'relative' }}>
+            <button
+              onClick={(e) => { e.stopPropagation(); setProjectMenuOpenId(projectMenuOpenId === node.id ? null : node.id); }}
+              style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', padding: '4px', display: 'flex', alignItems: 'center', borderRadius: '4px' }}
+              title="Folder options"
+            >
+              <MoreVertical size={13} />
+            </button>
+            {projectMenuOpenId === node.id && (
+              <div style={{
+                position: 'absolute', right: 0, top: '100%', marginTop: '4px',
+                background: 'rgba(15, 20, 25, 0.95)', border: '1px solid rgba(155, 136, 255, 0.25)',
+                borderRadius: '8px', padding: '4px', zIndex: 100, display: 'flex',
+                flexDirection: 'column', minWidth: '150px', boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+              }}>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation(); setProjectMenuOpenId(null);
+                    setExpandedProjects(prev => new Set(prev).add(node.id));
+                    setCreatingProjectParent(node.id); setNewProjectName('');
+                  }}
+                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.05)'}
+                  onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                  style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', color: '#fff', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderRadius: '4px', fontSize: '0.75rem' }}
+                ><FolderPlus size={12}/> New sub-folder</button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); setProjectMenuOpenId(null); setRenamingProjectId(node.id); setRenamingProjectName(node.name); }}
+                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.05)'}
+                  onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                  style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', color: '#fff', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderRadius: '4px', fontSize: '0.75rem' }}
+                ><Edit2 size={12}/> Rename</button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); setProjectMenuOpenId(null); deleteProjectFolder(node.id, node.name); }}
+                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(239,68,68,0.1)'}
+                  onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                  style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', color: 'rgba(239,68,68,0.9)', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderRadius: '4px', fontSize: '0.75rem' }}
+                ><Trash2 size={12}/> Delete folder</button>
+              </div>
+            )}
+          </div>
+        </div>
+        {isExpanded && (
+          <>
+            {creatingProjectParent === node.id && renderNewProjectRow(depth + 1)}
+            {node.children.map((child: ProjectNode) => renderProjectNode(child, depth + 1))}
+            {ownSessions.map(session => renderSessionRow(session, depth + 1))}
+            {node.children.length === 0 && ownSessions.length === 0 && creatingProjectParent !== node.id && (
+              <div style={{ paddingLeft: `${(depth + 1) * 16 + 8}px`, fontSize: '0.72rem', color: 'var(--text-dim)', opacity: 0.6, padding: '2px 0 4px' }}>Empty</div>
+            )}
+          </>
+        )}
+      </React.Fragment>
+    );
+  };
+
+  const unassignedSessions = sessionsByProject.get('') || [];
+
   const devRunActive = activeDevRun && !['done', 'failed', 'cancelled'].includes(activeDevRun.status);
 
   return (
@@ -246,7 +702,7 @@ export function ChatTab({
                   >
                     <option value="" style={{ background: '#0b0f19', color: '#fff' }}>— No project —</option>
                     {projects.map(p => (
-                      <option key={p.id} value={p.id} style={{ background: '#0b0f19', color: '#fff' }}>{p.name}</option>
+                      <option key={p.id} value={p.id} style={{ background: '#0b0f19', color: '#fff' }}>{'  '.repeat(projectDepth.get(p.id) || 0)}{p.name}</option>
                     ))}
                   </select>
                 </div>
@@ -409,6 +865,13 @@ export function ChatTab({
 
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '10px', marginBottom: '5px' }}>
             <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600, letterSpacing: '1px' }}>ACTIVE SESSIONS</span>
+            <button
+              onClick={() => { setCreatingProjectParent(null); setNewProjectName(''); }}
+              title="New folder"
+              style={{ background: 'none', border: 'none', color: 'var(--accent-violet)', cursor: 'pointer', padding: '2px', display: 'flex', alignItems: 'center' }}
+            >
+              <FolderPlus size={14} />
+            </button>
           </div>
 
           <input
@@ -422,225 +885,22 @@ export function ChatTab({
           />
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', flex: 1, overflowY: 'auto', paddingRight: '4px' }}>
-            {filteredSessions.map(session => {
-              const s = session.id;
-              const isActive = currentChatId === s;
-              const label = session.title || getSessionLabel(s);
-              const isDashboard = s === 'dashboard';
-              
-              return (
-                <div 
-                  key={session.id}
-                  onMouseLeave={() => setActiveMenu(null)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    padding: isDashboard ? '10px 12px' : '8px 12px',
-                    borderRadius: '8px',
-                    border: isDashboard
-                      ? (isActive ? '1px solid rgba(0, 240, 255, 0.7)' : '1px solid rgba(0, 240, 255, 0.25)')
-                      : (isActive ? '1px solid rgba(0, 240, 255, 0.4)' : '1px solid rgba(255, 255, 255, 0.03)'),
-                    backgroundColor: isDashboard
-                      ? (isActive ? 'rgba(0, 240, 255, 0.08)' : 'rgba(0, 240, 255, 0.02)')
-                      : (isActive ? 'rgba(0, 240, 255, 0.04)' : 'rgba(255, 255, 255, 0.01)'),
-                    cursor: 'pointer',
-                    transition: 'all 0.2s',
-                    position: 'relative',
-                    boxShadow: isDashboard ? '0 0 10px rgba(0, 240, 255, 0.04)' : 'none'
-                  }}
-                  onClick={() => {
-                    if (editingSessionId !== s) {
-                      selectChat(s);
-                    }
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, minWidth: 0 }}>
-                    {isDashboard ? (
-                      <Cpu size={14} style={{ color: 'var(--accent-cyan)', flexShrink: 0 }} />
-                    ) : (
-                      <MessageSquare size={14} style={{ color: isActive ? 'var(--accent-cyan)' : 'var(--text-dim)', flexShrink: 0 }} />
-                    )}
-                    <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px', minWidth: 0, width: '100%' }}>
-                        {editingSessionId === s ? (
-                          <input
-                            value={editingSessionTitle}
-                            onChange={(e) => setEditingSessionTitle(e.target.value)}
-                            onKeyDown={async (e) => {
-                              if (e.key === 'Enter') {
-                                await handleRenameSession(s, editingSessionTitle);
-                                setEditingSessionId(null);
-                              } else if (e.key === 'Escape') {
-                                setEditingSessionId(null);
-                              }
-                            }}
-                            onBlur={async () => {
-                              await handleRenameSession(s, editingSessionTitle);
-                              setEditingSessionId(null);
-                            }}
-                            autoFocus
-                            onClick={(e) => e.stopPropagation()}
-                            style={{
-                              fontSize: '0.8rem',
-                              background: 'rgba(0, 0, 0, 0.4)',
-                              border: '1px solid rgba(0, 240, 255, 0.5)',
-                              borderRadius: '4px',
-                              color: '#fff',
-                              padding: '2px 6px',
-                              width: '100%',
-                              outline: 'none',
-                            }}
-                          />
-                        ) : (
-                          <span style={{ fontSize: '0.8rem', fontWeight: (isActive || isDashboard) ? 600 : 500, color: (isActive || isDashboard) ? '#fff' : 'var(--text-dim)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                            {label}
-                          </span>
-                        )}
-                        {isDashboard && (
-                          <span title="Protected core session" style={{ display: 'flex', alignItems: 'center' }}>
-                            <Lock size={10} style={{ color: 'rgba(0, 240, 255, 0.4)', flexShrink: 0 }} />
-                          </span>
-                        )}
-                      </div>
-                      {isDashboard && (
-                        <span style={{ fontSize: '0.6rem', color: 'rgba(0, 240, 255, 0.65)', fontWeight: 500, letterSpacing: '0.5px' }}>MAIN ORCHESTRATOR</span>
-                      )}
-                    </div>
-                  </div>
-                  <div style={{ position: 'relative' }}>
-                    <button 
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setActiveMenu(activeMenu === s ? null : s);
-                      }}
-                      style={{
-                        background: 'none',
-                        border: 'none',
-                        color: 'var(--text-dim)',
-                        cursor: 'pointer',
-                        padding: '4px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        borderRadius: '4px'
-                      }}
-                      title="Session options"
-                    >
-                      <MoreVertical size={14} />
-                    </button>
-                    
-                    {activeMenu === s && (
-                      <div style={{
-                        position: 'absolute',
-                        right: '0',
-                        top: '100%',
-                        marginTop: '4px',
-                        background: 'rgba(15, 20, 25, 0.95)',
-                        border: '1px solid rgba(0, 240, 255, 0.2)',
-                        borderRadius: '8px',
-                        padding: '4px',
-                        zIndex: 100,
-                        display: 'flex',
-                        flexDirection: 'column',
-                        minWidth: '120px',
-                        boxShadow: '0 4px 12px rgba(0,0,0,0.5)'
-                      }}>
-                        {!isDashboard && (
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setActiveMenu(null);
-                              setEditingSessionId(s);
-                              setEditingSessionTitle(label);
-                            }}
-                            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.05)'}
-                            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                            style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', color: '#fff', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderRadius: '4px', fontSize: '0.75rem', transition: 'background-color 0.2s' }}
-                          ><Edit2 size={12}/> Rename</button>
-                        )}
-                        <button
-                          onClick={async (e) => {
-                            e.stopPropagation();
-                            setActiveMenu(null);
-                            try {
-                              const res = await fetch(`/api/history/${s}/fork`, { method: 'POST', headers: authHeaders() });
-                              if (res.ok) {
-                                const data = await res.json();
-                                fetchChatSessions();
-                                setTimeout(() => selectChat(data.new_session_id), 100);
-                              }
-                            } catch(err) { console.error(err); }
-                          }}
-                          onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.05)'}
-                          onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                          style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', color: '#fff', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderRadius: '4px', fontSize: '0.75rem', transition: 'background-color 0.2s' }}
-                        ><Copy size={12}/> Fork</button>
-                        
-                        {s === 'dashboard' ? (
-                          <button
-                            onClick={async (e) => {
-                              e.stopPropagation();
-                              setActiveMenu(null);
-                              if (window.confirm('Albert, are you sure you want to completely purge the history of the Main Terminal?')) {
-                                try {
-                                  const res = await fetch(`/api/history/dashboard`, { method: 'DELETE', headers: authHeaders() });
-                                  if (res.ok) {
-                                    selectChat('dashboard');
-                                  }
-                                } catch(err) { console.error(err); }
-                              }
-                            }}
-                            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(239,68,68,0.1)'}
-                            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                            style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', color: 'rgba(239,68,68,0.9)', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderRadius: '4px', fontSize: '0.75rem', transition: 'background-color 0.2s' }}
-                          ><Trash2 size={12}/> Purge</button>
-                        ) : (
-                          <>
-                            <button
-                              onClick={async (e) => {
-                                e.stopPropagation();
-                                setActiveMenu(null);
-                                if (window.confirm(`Archive session "${label}"?`)) {
-                                  try {
-                                    const res = await fetch(`/api/history/${s}/archive`, { method: 'POST', headers: authHeaders() });
-                                    if (res.ok) {
-                                      if (currentChatId === s) selectChat('dashboard');
-                                      fetchChatSessions();
-                                    }
-                                  } catch(err) { console.error(err); }
-                                }
-                              }}
-                              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.05)'}
-                              onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                              style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', color: '#fff', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderRadius: '4px', fontSize: '0.75rem', transition: 'background-color 0.2s' }}
-                            ><Archive size={12}/> Archive</button>
-
-                            <button
-                              onClick={async (e) => {
-                                e.stopPropagation();
-                                setActiveMenu(null);
-                                if (window.confirm(`Are you sure you want to delete session "${label}"?`)) {
-                                  try {
-                                    const res = await fetch(`/api/history/${s}`, { method: 'DELETE', headers: authHeaders() });
-                                    if (res.ok) {
-                                      if (currentChatId === s) selectChat('dashboard');
-                                      fetchChatSessions();
-                                    }
-                                  } catch (err) { console.error(err); }
-                                }
-                              }}
-                              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(239,68,68,0.1)'}
-                              onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                              style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', color: 'rgba(239,68,68,0.9)', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderRadius: '4px', fontSize: '0.75rem', transition: 'background-color 0.2s' }}
-                            ><Trash2 size={12}/> Delete</button>
-                          </>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
+            {(() => {
+              const dashboard = chatSessions.find(sess => sess.id === 'dashboard');
+              return dashboard ? renderSessionRow(dashboard) : null;
+            })()}
+            {sessionFilter.trim() ? (
+              filteredSessions.filter(sess => sess.id !== 'dashboard').map(session => renderSessionRow(session))
+            ) : (
+              <>
+                {creatingProjectParent === null && renderNewProjectRow(0)}
+                {projectTree.map(node => renderProjectNode(node, 0))}
+                {projectTree.length > 0 && unassignedSessions.length > 0 && (
+                  <div style={{ fontSize: '0.65rem', color: 'var(--text-dim)', opacity: 0.6, marginTop: '4px', marginBottom: '2px', paddingLeft: '8px' }}>NO FOLDER</div>
+                )}
+                {unassignedSessions.map(session => renderSessionRow(session))}
+              </>
+            )}
           </div>
         </div>
 

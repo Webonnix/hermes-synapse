@@ -1775,6 +1775,39 @@ _LEGACY_SANDBOX_LOCK = asyncio.Lock()
 _legacy_sandbox_warned = False
 
 
+async def _fail_if_sandbox_unusable(run_id: str, base_url: str, dedicated: bool) -> bool:
+    """Stops a run up front when its sandbox cannot be written to.
+
+    Without this, an unwritable /dev-repo is discovered one tool call at a
+    time: every dev_write_file comes back "Write failed: PermissionError",
+    which the executor records as a failing step, and the run either trips the
+    consecutive-failure breaker several minutes later or — when the model keeps
+    finding new things to try — grinds through its whole iteration budget
+    before reporting BLOCKED. Neither outcome tells the owner the one thing
+    that would fix it, so say it here instead, once, in the run's own status.
+
+    Only a definite `False` from the runner stops the run: an unreachable or
+    older runner answers None, and those are the executor's problem to report
+    normally, not a reason to refuse to start."""
+    from backend import dev_sandbox
+
+    if await dev_sandbox.repo_writable(base_url) is not False:
+        return False
+    where = "its own sandbox checkout" if dedicated else "the shared dev-repo"
+    summary = (
+        f"Sandbox unusable: {where} is not writable by the runner user "
+        f"(uid {dev_sandbox.SANDBOX_UID}), so every file write would fail. Fix the "
+        f"ownership of the dev-repo directory on the host — "
+        f"`chown -R {dev_sandbox.SANDBOX_UID}:{dev_sandbox.SANDBOX_GID} <data>/dev-repo "
+        f"<data>/dev-repo-runs` — then restart this run."
+    )
+    logger.error("Dev-run %s: %s", run_id, summary)
+    add_step(run_id, "observe", "", summary, "failed")
+    update_run(run_id, status="failed", status_reason=summary[:500])
+    await _emit_event(run_id, "failed", summary, "failed")
+    return True
+
+
 async def _run_with_sandbox(run_id: str) -> None:
     """Provisions this run's own ephemeral sandbox, points the dev_* tools at
     it for the run's whole lifetime, drives it to completion, then tears the
@@ -1798,6 +1831,10 @@ async def _run_with_sandbox(run_id: str) -> None:
     except Exception as exc:
         dedicated = False
         base_url = _DEFAULT_DEV_RUNNER_URL
+        # The shared checkout is a host directory the Docker daemon may have
+        # created root-owned; the agent inside the runner cannot fix that, so
+        # prepare it here (root, same directory mounted) before handing it over.
+        await asyncio.to_thread(dev_sandbox.ensure_shared_repo_writable)
         if not _legacy_sandbox_warned:
             _legacy_sandbox_warned = True
             logger.warning(
@@ -1813,6 +1850,8 @@ async def _run_with_sandbox(run_id: str) -> None:
     url_token = DEV_RUNNER_BASE_URL.set(base_url)
     run_id_token = CURRENT_DEV_RUN_ID.set(run_id)
     try:
+        if await _fail_if_sandbox_unusable(run_id, base_url, dedicated):
+            return
         await process_run(run_id)
     except Exception:
         logger.exception("Dev-run %s crashed inside its sandbox", run_id)
@@ -1841,6 +1880,10 @@ async def worker_loop() -> None:
 
     logger.info("Dev-runs worker started (poll every %.1fs, up to %d concurrent).",
                 POLL_SECONDS, dev_sandbox.MAX_CONCURRENT_SANDBOXES)
+    # The static dev-runner's bind-mounted checkout is shared with plain chat's
+    # dev_* tools, which never pass through _run_with_sandbox — prepare it once
+    # here so it is owned by the runner uid before anything writes to it.
+    await asyncio.to_thread(dev_sandbox.ensure_shared_repo_writable)
     in_flight: Dict[str, asyncio.Task] = {}
     while True:
         try:

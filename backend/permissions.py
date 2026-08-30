@@ -45,6 +45,19 @@ CLIENTS_FINANCIALS_VIEW = "clients.financials.view"
 SETTINGS_CURRENCY_VIEW = "settings.currency.view"
 SETTINGS_CURRENCY_EDIT = "settings.currency.edit"
 
+# Content Factory (§81). The spec's OWNER/ADMIN/EDITOR/REVIEWER/VIEWER ladder is
+# expressed with these permissions rather than a second role system: reviewing
+# and publishing are separated from editing, because approving a video for the
+# owner's channel is a different kind of authority from changing a prompt.
+CF_VIEW = "content_factory.view"
+CF_PIPELINE_EDIT = "content_factory.pipeline.edit"
+CF_RUN_START = "content_factory.run.start"
+CF_RUN_CANCEL = "content_factory.run.cancel"
+CF_CONTENT_REVIEW = "content_factory.content.review"
+CF_PUBLISH = "content_factory.publish"
+CF_CHANNELS_MANAGE = "content_factory.channels.manage"
+CF_SETTINGS_EDIT = "content_factory.settings.edit"
+
 ALL_PERMISSIONS: tuple = (
     CLIENTS_VIEW, CLIENTS_CREATE, CLIENTS_EDIT, CLIENTS_ARCHIVE,
     CLIENTS_AGENTS_VIEW, CLIENTS_AGENTS_CONNECT, CLIENTS_AGENTS_DISCONNECT,
@@ -54,6 +67,8 @@ ALL_PERMISSIONS: tuple = (
     CLIENTS_PAYMENTS_VIEW, CLIENTS_PAYMENTS_CREATE,
     CLIENTS_FINANCIALS_VIEW,
     SETTINGS_CURRENCY_VIEW, SETTINGS_CURRENCY_EDIT,
+    CF_VIEW, CF_PIPELINE_EDIT, CF_RUN_START, CF_RUN_CANCEL, CF_CONTENT_REVIEW,
+    CF_PUBLISH, CF_CHANNELS_MANAGE, CF_SETTINGS_EDIT,
 )
 
 OWNER_ROLE = "owner"
@@ -73,14 +88,21 @@ BUILTIN_ROLES: Dict[str, tuple] = {
         CLIENTS_PAYMENTS_VIEW, CLIENTS_PAYMENTS_CREATE,
         CLIENTS_FINANCIALS_VIEW,
         SETTINGS_CURRENCY_VIEW,
+        # Runs the content operation end to end, including publishing to the
+        # company's own channels; connecting new channels stays with the owner
+        # because it grants a third party access to those accounts.
+        CF_VIEW, CF_PIPELINE_EDIT, CF_RUN_START, CF_RUN_CANCEL, CF_CONTENT_REVIEW, CF_PUBLISH,
     ),
     # Support: sees who the clients are and whether their agents are healthy,
     # and no money at all — no prices, no MRR, no invoices.
     "operator": (
         CLIENTS_VIEW, CLIENTS_AGENTS_VIEW, CLIENTS_AGENTS_CONNECT,
         CLIENTS_AGENTS_DISCONNECT, SETTINGS_CURRENCY_VIEW,
+        # The spec's REVIEWER (§81): may approve or reject a video, may not
+        # edit the pipeline that produced it and may not publish it directly.
+        CF_VIEW, CF_CONTENT_REVIEW, CF_RUN_START,
     ),
-    "viewer": (CLIENTS_VIEW, CLIENTS_AGENTS_VIEW, SETTINGS_CURRENCY_VIEW),
+    "viewer": (CLIENTS_VIEW, CLIENTS_AGENTS_VIEW, SETTINGS_CURRENCY_VIEW, CF_VIEW),
 }
 
 SETTING_CUSTOM_ROLES = "dashboard_roles"

@@ -283,7 +283,7 @@ def test_send_text_uses_the_live_client_and_tolerates_unverified_devices():
     sent = []
 
     class FakeClient:
-        async def room_send(self, room_id, message_type, content, ignore_unverified_devices=False):
+        async def room_send(self, room_id, message_type, content, ignore_unverified_devices=False, tx_id=""):
             sent.append((room_id, content["body"], ignore_unverified_devices))
 
     manager = agent_matrix_bot.AgentMatrixBotManager()
@@ -370,4 +370,102 @@ def test_incoming_message_is_skipped_while_owner_is_active():
         assert "ignored_owner_active" in activity
     finally:
         channel_activity.record = orig_record
+
+
+# ── Telling the bot's own echo apart from the owner typing ───────────────────
+
+def _self_sent_event(tx_id="", event_id="$evt:senla.eu"):
+    class FakeEvent:
+        sender = "@albert:senla.eu"
+        body = "Альберт сейчас загружен другими задачами..."
+    event = FakeEvent()
+    event.event_id = event_id
+    event.source = {"unsigned": {"transaction_id": tx_id}} if tx_id else {"unsigned": {}}
+    return event
+
+
+def _owner_manager(monkeypatch):
+    from backend import agent_matrix_bot
+
+    monkeypatch.setattr("backend.channel_activity.record", lambda *a, **k: None)
+    manager = agent_matrix_bot.AgentMatrixBotManager()
+    manager.set_human_takeover_pause("b1", 60)
+
+    class FakeClient:
+        user_id = "@albert:senla.eu"
+
+    manager._clients["b1"] = FakeClient()  # type: ignore[assignment]
+    return manager
+
+
+def test_the_bots_own_reply_is_not_mistaken_for_the_owner_typing(monkeypatch):
+    """Everything the bot sends comes back through /sync as the owner's own user
+    id. Counting that as "the owner is handling this chat" muted the room the
+    instant the bot answered — including the handling-menu prompt, so the person
+    could never reply to it."""
+    manager = _owner_manager(monkeypatch)
+    manager._remember_own_message("b1", "hermes-deadbeef")
+
+    class FakeRoom:
+        room_id = "!room:example.org"
+        is_group = True
+        member_count = 2
+
+    import asyncio
+    asyncio.run(manager._make_callback("b1", "devops")(FakeRoom(), _self_sent_event("hermes-deadbeef")))
+    assert manager._human_takeover_active("b1", "!room:example.org") is False
+
+
+def test_the_event_id_of_a_sent_message_is_also_recognised(monkeypatch):
+    manager = _owner_manager(monkeypatch)
+    manager._remember_own_message("b1", "$sent:senla.eu")
+    assert manager._is_own_echo("b1", _self_sent_event(event_id="$sent:senla.eu")) is True
+
+
+def test_the_owner_typing_in_element_still_starts_the_pause(monkeypatch):
+    """The other half of the same check: a message this bot did not send, from
+    that same user id, is still the owner personally — and must silence it."""
+    manager = _owner_manager(monkeypatch)
+    manager._remember_own_message("b1", "hermes-something-else")
+
+    class FakeRoom:
+        room_id = "!room:example.org"
+        is_group = True
+        member_count = 2
+
+    import asyncio
+    asyncio.run(manager._make_callback("b1", "devops")(FakeRoom(), _self_sent_event(tx_id="")))
+    assert manager._human_takeover_active("b1", "!room:example.org") is True
+
+
+def test_send_text_marks_the_message_before_it_goes_out(monkeypatch):
+    """The /sync echo can land while room_send is still in flight, so the
+    transaction id has to be remembered first — reading it off the response
+    afterwards would leave a window where the bot mutes itself."""
+    from backend import agent_matrix_bot
+
+    manager = agent_matrix_bot.AgentMatrixBotManager()
+    seen = {}
+
+    class FakeClient:
+        user_id = "@albert:senla.eu"
+
+        async def room_send(self, room_id, message_type, content, ignore_unverified_devices, tx_id):
+            # Mid-send: the marker must already be there.
+            seen["known_during_send"] = manager._is_own_echo(
+                "b1", _self_sent_event(tx_id=tx_id, event_id="$not-yet")
+            )
+            seen["tx_id"] = tx_id
+            return type("Resp", (), {"event_id": "$final:senla.eu"})()
+
+    manager._clients["b1"] = FakeClient()  # type: ignore[assignment]
+
+    import asyncio
+    asyncio.run(manager.send_text("b1", "!room:example.org", "привет"))
+
+    assert seen["known_during_send"] is True
+    assert seen["tx_id"].startswith("hermes-")
+    # The resulting event id is remembered too, for homeservers that drop
+    # transaction_id from the echo.
+    assert manager._is_own_echo("b1", _self_sent_event(event_id="$final:senla.eu")) is True
 

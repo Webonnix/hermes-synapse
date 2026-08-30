@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   Settings,
   Terminal, 
@@ -19,7 +19,6 @@ import {
   ShieldCheck,
   AudioWaveform,
   KeyRound,
-  MessageCircle,
   Trello,
   Briefcase,
   Coins,
@@ -27,7 +26,9 @@ import {
   Users,
   Bot,
   FileText,
-  Wallet
+  Wallet,
+  Factory,
+  Megaphone
 } from 'lucide-react';
 
 import type { AppSettings, ChatMessage, ChatSession, DecisionLog, ActivityLog, SystemConfig, AgentModel, Project, SystemStats } from './types';
@@ -56,7 +57,6 @@ import { MCPTab } from './components/MCPTab';
 import { AgentsAdminTab } from './components/AgentsAdminTab';
 import { ApiKeysTab } from './components/ApiKeysTab';
 import { splitForSpeech } from './speechChunks';
-import { MessengerChannelsTab } from './components/MessengerChannelsTab';
 import { ProcessesTab } from './components/ProcessesTab';
 import { HermesMark } from './components/HermesMark';
 import { VexaLogo } from './components/VexaLogo';
@@ -71,6 +71,9 @@ import { ClientsTab, type Pane as ClientsPane } from './components/ClientsTab';
 import { CurrencySettingsTab } from './components/CurrencySettingsTab';
 import { AppHeader } from './components/AppHeader';
 import type { DevRunEvent } from './types';
+import { ContentFactoryTab } from './components/ContentFactoryTab';
+import { SMMFactoryTab } from './components/SMMFactoryTab';
+import type { CFEvent } from './components/content-factory/types';
 
 // Initialize global fetch interceptor
 initFetchInterceptor();
@@ -88,15 +91,18 @@ const TTS_PENDING_TIMEOUT_MS = 25000;
 
 export default function App() {
   const legacySettingsTabs = ['config', 'logs', 'activity', 'memory', 'tools', 'subagents', 'obsidian', 'mcp'];
-  const [activeTab, setActiveTab] = useState<'vexa' | 'processes' | 'devruns' | 'kanban' | 'clients' | 'agents' | 'schedule' | 'settings' | 'network' | 'metrics'>(() => {
+  const [activeTab, setActiveTab] = useState<'vexa' | 'processes' | 'devruns' | 'kanban' | 'clients' | 'agents' | 'schedule' | 'contentfactory' | 'smm' | 'settings' | 'network' | 'metrics'>(() => {
     const saved = localStorage.getItem('jarvis_active_tab');
     if (saved === 'chat') return 'vexa';
     if (saved === 'settings' || (saved && legacySettingsTabs.includes(saved))) return 'settings';
     return (saved as any) || 'vexa';
   });
-  const [settingsSection, setSettingsSection] = useState<'config' | 'currency' | 'tools' | 'subagents' | 'mcp' | 'obsidian' | 'memory' | 'logs' | 'activity' | 'keys' | 'channels'>(() => {
+  // 'channels' is deliberately absent: the messenger/social channels are now the
+  // SMM Factory section, and a saved 'channels' from before that move falls back
+  // to the first settings page instead of rendering an empty one.
+  const [settingsSection, setSettingsSection] = useState<'config' | 'currency' | 'tools' | 'subagents' | 'mcp' | 'obsidian' | 'memory' | 'logs' | 'activity' | 'keys'>(() => {
     const savedSection = localStorage.getItem('jarvis_settings_section');
-    if (savedSection && [...legacySettingsTabs, 'keys', 'channels', 'currency'].includes(savedSection)) return savedSection as any;
+    if (savedSection && [...legacySettingsTabs, 'keys', 'currency'].includes(savedSection)) return savedSection as any;
     const savedTab = localStorage.getItem('jarvis_active_tab');
     return (savedTab && legacySettingsTabs.includes(savedTab) ? savedTab : 'config') as any;
   });
@@ -155,6 +161,10 @@ export default function App() {
   ]);
   const [logs, setLogs] = useState<DecisionLog[]>([]);
   const [lastDevRunEvent, setLastDevRunEvent] = useState<DevRunEvent | null>(null);
+  // Content Factory pushes every pipeline/node transition over the same
+  // socket with a `cf.` prefix (§72); the panel refreshes from these instead
+  // of polling.
+  const [lastCfEvent, setLastCfEvent] = useState<CFEvent | null>(null);
   const [devRunNotificationsEnabled, setDevRunNotificationsEnabled] = useState<boolean>(
     () => localStorage.getItem('hermes_devrun_notifications') === '1'
   );
@@ -257,6 +267,21 @@ export default function App() {
 
   const [subagents, setSubagents] = useState<AgentModel[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+  // Depth of each project in the folder tree, used only to indent options in
+  // flat <select> project pickers (a <select> can't render a real tree).
+  const projectDepth = useMemo(() => {
+    const byId = new Map(projects.map(p => [p.id, p]));
+    const depth = new Map<string, number>();
+    const depthOf = (id: string): number => {
+      if (depth.has(id)) return depth.get(id)!;
+      const p = byId.get(id);
+      const d = p?.parent_id && byId.has(p.parent_id) ? depthOf(p.parent_id) + 1 : 0;
+      depth.set(id, d);
+      return d;
+    };
+    projects.forEach(p => depthOf(p.id));
+    return depth;
+  }, [projects]);
   const [currentChatId, setCurrentChatId] = useState<string>(() => {
     return localStorage.getItem('jarvis_current_chat_id') || 'dashboard';
   });
@@ -1286,6 +1311,8 @@ export default function App() {
             });
             playAlarmSound();
             speakText(`Albert, the alarm "${data.alarm.label}" has gone off.`);
+          } else if (typeof data.type === 'string' && data.type.startsWith('cf.')) {
+            setLastCfEvent(data as CFEvent);
           } else if (data.type === 'dev_run_event') {
             const runEvent = data as DevRunEvent;
             setLastDevRunEvent(runEvent);
@@ -2031,6 +2058,8 @@ export default function App() {
           ollama_think: editedRuntimeConfig.ollama_think,
           fast_mode: editedRuntimeConfig.fast_mode,
           max_history_len: editedRuntimeConfig.max_history_len,
+          condenser_enabled: editedRuntimeConfig.condenser_enabled,
+          condense_trigger_extra: editedRuntimeConfig.condense_trigger_extra,
           max_tokens: editedRuntimeConfig.max_tokens,
           tool_max_tokens: editedRuntimeConfig.tool_max_tokens,
           temperature: editedRuntimeConfig.temperature,
@@ -2430,6 +2459,30 @@ export default function App() {
           </button>
 
           <button
+            style={navStyle('contentfactory')}
+            onClick={() => { setActiveTab('contentfactory'); setSidebarOpen(false); }}
+            title="Content Factory"
+          >
+            <Factory size={18} />
+            <span>Content Factory</span>
+            {!isSidebarCollapsed && (
+              <span style={{
+                marginLeft: 'auto', fontSize: 9, fontWeight: 700, letterSpacing: 0.6,
+                padding: '2px 6px', borderRadius: 4, color: '#0f172a', background: '#22d3ee',
+              }}>NEW</span>
+            )}
+          </button>
+
+          <button
+            style={navStyle('smm')}
+            onClick={() => { setActiveTab('smm'); setSidebarOpen(false); }}
+            title={t('navSmmFactory')}
+          >
+            <Megaphone size={18} />
+            <span>{t('navSmmFactory')}</span>
+          </button>
+
+          <button
             style={navStyle('network')}
             onClick={() => { setActiveTab('network'); setSidebarOpen(false); }}
             title={t('navArchitecture')}
@@ -2606,6 +2659,7 @@ export default function App() {
                       handleSetSessionAgent={handleSetSessionAgent}
                       projects={projects}
                       handleSetSessionProject={handleSetSessionProject}
+                      fetchProjects={fetchProjects}
                       activeDevRun={lastDevRunEvent}
                       onOpenDevRuns={() => { setVexaTranscriptOpen(false); setActiveTab('devruns'); }}
                     />
@@ -2710,6 +2764,12 @@ export default function App() {
           />
         )}
 
+        {activeTab === 'contentfactory' && (
+          <ContentFactoryTab language={language} lastEvent={lastCfEvent} onOpenAgents={() => setActiveTab('agents')} />
+        )}
+
+        {activeTab === 'smm' && <SMMFactoryTab agents={subagents} />}
+
         {activeTab === 'network' && (
           <NetworkTab subagents={subagents} setSubagents={setSubagents} fetchSubagents={fetchSubagents} models={models} />
         )}
@@ -2729,10 +2789,6 @@ export default function App() {
               <button type="button" className={settingsSection === 'keys' ? 'is-active' : ''} onClick={() => setSettingsSection('keys')}>
                 <KeyRound size={15} />
                 <span>{t('navApiKeys')}</span>
-              </button>
-              <button type="button" className={settingsSection === 'channels' ? 'is-active' : ''} onClick={() => setSettingsSection('channels')}>
-                <MessageCircle size={15} />
-                <span>{t('navChannels')}</span>
               </button>
               <button type="button" className={settingsSection === 'tools' ? 'is-active' : ''} onClick={() => setSettingsSection('tools')}>
                 <Wrench size={15} />
@@ -2794,8 +2850,6 @@ export default function App() {
             {settingsSection === 'currency' && <CurrencySettingsTab />}
 
             {settingsSection === 'keys' && <ApiKeysTab />}
-
-            {settingsSection === 'channels' && <MessengerChannelsTab agents={subagents} />}
 
             {settingsSection === 'logs' && (
               <LogsTab
@@ -3013,7 +3067,7 @@ export default function App() {
               >
                 <option value="">— No project —</option>
                 {projects.map(p => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
+                  <option key={p.id} value={p.id}>{'  '.repeat(projectDepth.get(p.id) || 0)}{p.name}</option>
                 ))}
               </select>
             </div>

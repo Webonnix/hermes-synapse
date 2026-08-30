@@ -348,6 +348,17 @@ body::after {
   color: #d8d1ff;
 }
 
+/* Seven views is past the point where one non-wrapping pill row fits a laptop
+   pane. This modifier lets the strip take a second line instead of pushing the
+   section's primary action off screen; the default stays non-wrapping so the
+   shorter strips elsewhere are untouched. */
+.admin-subnav.is-wrap {
+  flex-wrap: wrap;
+  width: auto;
+  flex-shrink: 1;
+  min-width: 0;
+}
+
 .admin-subnav-count {
   font-family: var(--font-mono);
   font-style: normal;
@@ -898,6 +909,554 @@ body::after {
   justify-content: flex-end;
   gap: 10px;
   margin-top: 14px;
+}
+
+/* Visually hidden but read aloud: table captions, live regions and labels for
+   controls whose meaning is carried by an icon. Not display:none — that would
+   take them out of the accessibility tree too. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ═══ SMM Factory: the publication register ═══════════════════════════════
+   Built on the admin design system above rather than beside it: the KPI cards
+   are .admin-stat-card, the status pills are .admin-status-chip, the table is
+   .admin-table. What is added here is only what a post list needs and no other
+   panel had — a filter toolbar, a post cell with its thumbnail, the card view,
+   and pagination. */
+
+.smm-kpi-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* The reach card carries a sparkline, so it needs room the 170px KPI basis
+   does not give it. */
+.smm-kpi-row .smm-kpi-wide {
+  flex: 1.4 1 230px;
+}
+
+.smm-sparkline {
+  flex-shrink: 0;
+  align-self: center;
+  color: var(--accent-violet);
+  opacity: 0.9;
+}
+
+.smm-toolbar {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 14px 16px;
+}
+
+.smm-toolbar-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.smm-toolbar-field > label {
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.smm-toolbar-search {
+  flex: 1 1 220px;
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.smm-toolbar-search .form-input {
+  padding-right: 34px;
+  width: 100%;
+}
+
+.smm-toolbar-search > svg {
+  position: absolute;
+  right: 11px;
+  color: var(--text-dim);
+  pointer-events: none;
+}
+
+.smm-toolbar-spacer {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* Segmented list/grid switch. Radio semantics live on the buttons themselves
+   (aria-pressed), so this is purely the frame. */
+.smm-view-toggle {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.smm-view-toggle button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.smm-view-toggle button:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.smm-view-toggle button[aria-pressed='true'] {
+  color: var(--accent-violet);
+  background: rgba(155, 136, 255, 0.16);
+}
+
+.smm-view-toggle button:focus-visible,
+.smm-page-btn:focus-visible,
+.smm-sort-btn:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 2px;
+}
+
+/* Bulk-action bar. Appears in place of the table head row's usual quiet, so it
+   states the count out loud — a selection you cannot see the size of is how
+   people delete the wrong ten rows. */
+.smm-selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 9px 16px;
+  border-radius: 10px;
+  border: 1px solid rgba(155, 136, 255, 0.3);
+  background: rgba(155, 136, 255, 0.09);
+  font-size: 0.82rem;
+}
+
+.smm-table-panel {
+  padding: 0;
+  overflow: hidden;
+}
+
+.smm-table-panel .admin-table-wrap {
+  margin-bottom: 0;
+}
+
+.smm-table .smm-col-check {
+  width: 38px;
+  padding-right: 0;
+}
+
+.smm-sort-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+}
+
+.smm-sort-btn:hover { color: var(--text-primary); }
+.smm-sort-btn[data-active='true'] { color: var(--accent-violet); }
+.smm-sort-btn svg { transition: transform 0.15s ease; }
+.smm-sort-btn[data-direction='asc'] svg { transform: rotate(180deg); }
+
+/* Post cell: thumbnail, title, one line of the body, tags. */
+.smm-post-cell {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+}
+
+.smm-post-thumb {
+  width: 46px;
+  height: 46px;
+  border-radius: 9px;
+  flex-shrink: 0;
+  object-fit: cover;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: linear-gradient(135deg, rgba(155, 136, 255, 0.22), rgba(115, 217, 255, 0.12));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-violet);
+}
+
+.smm-post-text { min-width: 0; }
+
+.smm-post-title {
+  display: block;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.smm-post-excerpt {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.smm-tags {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.smm-tag {
+  font: 500 0.68rem var(--font-mono);
+  padding: 1px 7px;
+  border-radius: 999px;
+  color: var(--accent-cyan);
+  background: rgba(115, 217, 255, 0.1);
+  border: 1px solid rgba(115, 217, 255, 0.18);
+}
+
+.smm-account {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.smm-account-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.smm-account-name {
+  display: block;
+  font-size: 0.82rem;
+  color: var(--text-primary);
+}
+
+.smm-account-handle {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.smm-muted { color: var(--text-dim); }
+.smm-sub { display: block; font-size: 0.72rem; color: var(--text-dim); }
+
+.smm-reach {
+  font-weight: 700;
+  font-size: 0.92rem;
+  color: var(--success);
+}
+
+.smm-reach.is-empty { color: var(--text-dim); font-weight: 500; }
+.smm-delta { display: block; font-size: 0.72rem; color: var(--success); }
+.smm-delta.is-down { color: var(--danger); }
+
+.smm-row-actions {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+/* Card view. Same data, arranged for people scanning imagery rather than
+   comparing dates — which is what a visual channel's owner actually does. */
+.smm-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
+  gap: 14px;
+}
+
+.smm-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+}
+
+.smm-card-media {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  border-radius: 9px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(135deg, rgba(155, 136, 255, 0.22), rgba(115, 217, 255, 0.1));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-violet);
+}
+
+.smm-card-media img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.smm-card-media .admin-status-chip {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  backdrop-filter: blur(6px);
+}
+
+.smm-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.smm-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 11px 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+.smm-pages {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.smm-page-btn {
+  min-width: 30px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: transparent;
+  color: var(--text-muted);
+  font: 500 0.78rem var(--font-sans);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.smm-page-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: rgba(155, 136, 255, 0.4);
+}
+
+.smm-page-btn[aria-current='page'] {
+  color: var(--text-primary);
+  border-color: rgba(155, 136, 255, 0.55);
+  background: rgba(155, 136, 255, 0.16);
+}
+
+.smm-page-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.smm-page-ellipsis { padding: 0 2px; color: var(--text-dim); }
+
+/* Дизайнер: the editor on the left, a live per-platform preview on the right.
+   Collapses to one column early — the preview is the first thing that stops
+   being useful in a narrow pane. */
+.smm-designer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 360px);
+  gap: 18px;
+  align-items: start;
+}
+
+@media (max-width: 1100px) {
+  .smm-designer { grid-template-columns: minmax(0, 1fr); }
+}
+
+.smm-designer-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+}
+
+.smm-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.smm-field > label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.smm-field-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.smm-counter {
+  align-self: flex-end;
+  font: 500 0.7rem var(--font-mono);
+  color: var(--text-dim);
+}
+
+.smm-counter.is-over { color: var(--danger); }
+
+.smm-platform-picker {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.smm-platform-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 11px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.smm-platform-chip:hover { color: var(--text-primary); }
+
+.smm-platform-chip[aria-pressed='true'] {
+  color: var(--text-primary);
+  border-color: rgba(155, 136, 255, 0.5);
+  background: rgba(155, 136, 255, 0.14);
+}
+
+.smm-platform-chip:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 2px;
+}
+
+/* Preview. Not a pixel-accurate mock of each network — a deliberate
+   approximation that answers the one question the composer cannot: where the
+   text gets cut off and what the first line reads like. */
+.smm-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  position: sticky;
+  top: 0;
+}
+
+.smm-preview-card {
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.03);
+  overflow: hidden;
+}
+
+.smm-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.smm-preview-body {
+  padding: 12px;
+  font-size: 0.82rem;
+  line-height: 1.55;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.smm-preview-media {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  display: block;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.smm-preview-overflow {
+  color: var(--danger);
+  background: rgba(255, 93, 143, 0.12);
+  border-radius: 3px;
+}
+
+.smm-designer-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  padding-top: 4px;
+}
+
+.smm-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 11px;
+  border-radius: 9px;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  border: 1px solid rgba(255, 195, 72, 0.28);
+  background: rgba(255, 195, 72, 0.09);
+  color: var(--warning);
+}
+
+.smm-notice.is-error {
+  border-color: rgba(255, 93, 143, 0.32);
+  background: rgba(255, 93, 143, 0.1);
+  color: var(--danger);
+}
+
+.smm-notice svg { flex-shrink: 0; margin-top: 1px; }
+
+@media (max-width: 780px) {
+  .smm-toolbar { align-items: stretch; }
+  .smm-toolbar-spacer { display: none; }
+  .smm-pagination { justify-content: center; }
 }
 
 /* Animations */

@@ -50,6 +50,7 @@ async def _dispatch(task: Dict[str, Any], task_id: str) -> Optional[Dict[str, An
         get_discord_binding_proposal, execute_approved_discord_binding,
         get_slack_binding_proposal, execute_approved_slack_binding,
         get_email_binding_proposal, execute_approved_email_binding,
+        get_social_binding_proposal, execute_approved_social_binding,
     )
 
     if get_capability_proposal(control_task_id=task_id):
@@ -70,6 +71,10 @@ async def _dispatch(task: Dict[str, Any], task_id: str) -> Optional[Dict[str, An
         return await execute_approved_slack_binding(task_id)
     if get_email_binding_proposal(task_id):
         return await execute_approved_email_binding(task_id)
+    # One lookup for all four social platforms — see SOCIAL_PLATFORMS in
+    # agent_messenger_governance.py.
+    if get_social_binding_proposal(task_id):
+        return await execute_approved_social_binding(task_id)
     if task.get("tool_name"):
         from backend.control_plane import execute_governed_tool
         from backend.tool_permissions import OWNER

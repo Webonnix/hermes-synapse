@@ -59,6 +59,25 @@ def is_ollama_provider(api_base: str = "", provider: str = "") -> bool:
     return os.getenv("LLM_PROVIDER", "").strip().lower() == "ollama"
 
 
+def runner_options(num_ctx: Optional[int] = None) -> Dict[str, Any]:
+    """The options Ollama keys a *loaded runner* by, as opposed to per-request
+    knobs like temperature or num_predict.
+
+    Change any of these and Ollama tears the runner down and rebuilds it — 30-60s
+    for a 27B model on two cards. That is why the preload and the chat that
+    follows must agree on them exactly: backend/model_keeper.py pins the model
+    with this, chat() below sends it too, and neither can drift from the other.
+
+    Prefill batch, measured on 2x3090 with Qwen3.6-35B-A3B at 262k context:
+    512 -> 15.8s TTFT on a 60k prompt, 1024 -> 13.4s (+2.2 GiB VRAM),
+    2048 -> 12.4s (+6.5 GiB). Ollama defaults to 512."""
+    options: Dict[str, Any] = {"num_ctx": num_ctx or int(os.getenv("OLLAMA_NUM_CTX", "8192"))}
+    num_batch = os.getenv("OLLAMA_NUM_BATCH", "").strip()
+    if num_batch.isdigit():
+        options["num_batch"] = int(num_batch)
+    return options
+
+
 def normalize_keep_alive(value: Any) -> Any:
     """Ollama accepts numeric sentinels as numbers, not numeric strings."""
     if isinstance(value, str):
@@ -251,6 +270,29 @@ class OllamaClient:
             json={"model": model, "prompt": "", "stream": False, "keep_alive": 0},
         )
 
+    async def load_model(self, model: str, keep_alive: Any = -1, num_ctx: Optional[int] = None) -> None:
+        """Loads a model into VRAM without generating anything.
+
+        The mirror image of unload_model: an empty prompt makes Ollama do the
+        expensive part (weights into VRAM) and nothing else, and keep_alive
+        pins how long it stays. Used by backend/model_keeper.py to put the
+        model back after an Ollama restart, and to re-pin one that some caller
+        loaded with a short expiry.
+
+        `num_ctx` matters more than it looks: Ollama keys a loaded runner by
+        its options, so preloading with the server default and then chatting
+        with a different context size reloads the whole model — the 30-60s the
+        preload was supposed to save, paid anyway. Passing the value the agent
+        chats with makes the preload land on the same runner."""
+        payload: Dict[str, Any] = {
+            "model": model,
+            "prompt": "",
+            "stream": False,
+            "keep_alive": normalize_keep_alive(keep_alive),
+        }
+        payload["options"] = runner_options(num_ctx)
+        await self._request("POST", "/api/generate", json=payload)
+
     async def pull_model(self, model: str, *, insecure: bool = False) -> AsyncIterator[Dict[str, Any]]:
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=None)
@@ -302,14 +344,7 @@ class OllamaClient:
         options: Dict[str, Any] = {"temperature": temperature}
         if max_tokens is not None:
             options["num_predict"] = max_tokens
-        options["num_ctx"] = num_ctx or int(os.getenv("OLLAMA_NUM_CTX", "8192"))
-        # Prefill batch. Measured on 2x3090 with Qwen3.6-35B-A3B at 262k context:
-        # 512 -> 15.8s TTFT on a 60k prompt, 1024 -> 13.4s (+2.2 GiB VRAM),
-        # 2048 -> 12.4s (+6.5 GiB). Ollama defaults to 512 and reloads the runner
-        # when the value changes, so keep it stable across callers.
-        num_batch = os.getenv("OLLAMA_NUM_BATCH", "").strip()
-        if num_batch.isdigit():
-            options["num_batch"] = int(num_batch)
+        options.update(runner_options(num_ctx))
         payload: Dict[str, Any] = {
             "model": model,
             "messages": _ollama_messages(messages),

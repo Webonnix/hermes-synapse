@@ -62,6 +62,34 @@ def test_update_config():
         agent_instance.provider = original_provider
 
 
+def test_update_config_applies_the_condenser_controls():
+    """Every switch on the dashboard's speed panel has to reach the agent. These
+    two did not: absent from ConfigUpdate, they were silently dropped, so the
+    checkbox flipped, Save said "success", and the response reset it."""
+    original = (agent_instance.condenser_enabled, agent_instance.condense_trigger_extra)
+    try:
+        with (
+            patch(
+                "backend.ollama_client.OllamaClient.list_models",
+                new=AsyncMock(return_value=[{"name": "qwen-test:latest"}]),
+            ),
+            patch("backend.database.save_app_settings"),
+        ):
+            response = client.post(
+                "/api/config",
+                json={"condenser_enabled": True, "condense_trigger_extra": 15},
+            )
+
+        assert response.status_code == 200
+        config = response.json()["config"]
+        assert config["condenser_enabled"] is True
+        assert config["condense_trigger_extra"] == 15
+        assert agent_instance.condenser_enabled is True
+        assert agent_instance.condense_trigger_extra == 15
+    finally:
+        agent_instance.condenser_enabled, agent_instance.condense_trigger_extra = original
+
+
 def test_update_config_rejects_missing_local_model():
     original_model = agent_instance.model
     original_provider = agent_instance.provider

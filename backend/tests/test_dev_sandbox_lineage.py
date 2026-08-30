@@ -34,7 +34,7 @@ def repos(tmp_path, monkeypatch):
     monkeypatch.setattr(dev_sandbox, "RUNS_ROOT", runs_root)
     monkeypatch.setattr(dev_sandbox, "PREVIEWS_ROOT", tmp_path / "dev-previews")
     # chown to the sandbox uid needs root; irrelevant to what these assert.
-    monkeypatch.setattr(dev_sandbox, "_chown_to_sandbox", lambda target: None)
+    monkeypatch.setattr(dev_sandbox, "_chown_to_sandbox", lambda target, recursive=True: None)
     return base, runs_root
 
 

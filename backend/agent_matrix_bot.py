@@ -14,7 +14,9 @@ import logging
 import os
 import shutil
 import time
-from typing import Dict, List, Optional
+import uuid
+from collections import deque
+from typing import Deque, Dict, List, Optional
 
 from nio import (
     AsyncClient,
@@ -101,13 +103,38 @@ class AgentMatrixBotManager:
         # {binding_id: {room_id: unix_ts the pause expires at}} — the owner
         # typed in this room personally, so the bot backs off until then.
         self._human_active_until: Dict[str, Dict[str, float]] = {}
+        # {binding_id: transaction ids and event ids of what this bot itself
+        # sent} — see _is_own_echo for why sender alone cannot identify them.
+        self._own_echo_markers: Dict[str, Deque[str]] = {}
+
+    def _remember_own_message(self, binding_id: str, marker: str) -> None:
+        if not marker:
+            return
+        self._own_echo_markers.setdefault(binding_id, deque(maxlen=400)).append(marker)
+
+    def _is_own_echo(self, binding_id: str, event: RoomMessageText) -> bool:
+        """Every message this bot sends comes back through /sync as an event
+        from the owner's own user id — byte for byte indistinguishable from the
+        owner typing in Element, since they are literally the same account. The
+        transaction id chosen in send_text before sending (which the homeserver
+        echoes back in unsigned.transaction_id) is what tells the two apart."""
+        markers = self._own_echo_markers.get(binding_id)
+        if not markers:
+            return False
+        if event.event_id and event.event_id in markers:
+            return True
+        try:
+            tx_id = ((event.source or {}).get("unsigned") or {}).get("transaction_id")
+        except Exception:
+            tx_id = None
+        return bool(tx_id and tx_id in markers)
 
     def _note_human_takeover(self, binding_id: str, room_id: str) -> None:
         """The owner's own account IS this binding's identity (see
         [[matrix-mas-device-login]]), so a message from that same user id in a
-        DM room can only mean one thing: the owner just typed there personally,
-        from Element or another device. Nothing else on this binding can send
-        as that user id."""
+        DM room means the owner typed there personally, from Element or another
+        device — but only once the bot's own outgoing messages have been ruled
+        out by _is_own_echo, since those carry that same sender."""
         minutes = self._pause_minutes.get(binding_id, 0)
         if minutes <= 0:  # 0 = feature explicitly turned off for this channel
             return
@@ -137,7 +164,8 @@ class AgentMatrixBotManager:
             if not client:
                 return
             if event.sender == client.user_id:
-                self._note_human_takeover(binding_id, room.room_id)
+                if not self._is_own_echo(binding_id, event):
+                    self._note_human_takeover(binding_id, room.room_id)
                 return
             # Owner wants this account to act as a personal assistant that only
             # answers direct messages — never auto-reply into a named/group room,
@@ -249,10 +277,18 @@ class AgentMatrixBotManager:
         if not client:
             raise RuntimeError("Matrix-канал сейчас не запущен — включите его и повторите отправку.")
         for piece in _split_text(text):
-            await client.room_send(
+            # The transaction id is chosen and remembered *before* sending, not
+            # taken from the response afterwards: the /sync echo of this very
+            # message can arrive while room_send is still in flight, and it has
+            # to be recognisable as ours by then — otherwise the callback reads
+            # the bot's own reply as the owner typing and mutes the room.
+            tx_id = f"hermes-{uuid.uuid4().hex}"
+            self._remember_own_message(binding_id, tx_id)
+            response = await client.room_send(
                 room_id, message_type="m.room.message", content={"msgtype": "m.text", "body": piece},
-                ignore_unverified_devices=True,
+                ignore_unverified_devices=True, tx_id=tx_id,
             )
+            self._remember_own_message(binding_id, getattr(response, "event_id", ""))
 
     def _make_undecryptable_callback(self, binding_id: str):
         """An encrypted message we have no key for. Normal for anything sent

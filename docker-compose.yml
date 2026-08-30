@@ -347,6 +347,15 @@ services:
       - OLLAMA_FLASH_ATTENTION=${OLLAMA_FLASH_ATTENTION:-1}
       - OLLAMA_KV_CACHE_TYPE=${OLLAMA_KV_CACHE_TYPE:-q8_0}
       - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-1}
+      # The server-side default for every request that does not name its own
+      # keep_alive -- `ollama run` from a shell, the dashboard's proxy, any
+      # future client. Without it the server falls back to 5m and those
+      # requests quietly re-arm an expiry on a model the backend pinned.
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:--1}
+      # One slot: a request for any OTHER model (a subagent with a model
+      # override, an embedding model) evicts the pinned one to make room, and
+      # only backend/model_keeper.py's next tick brings it back. Raising this
+      # needs VRAM for both at 262k context, which 2x24 GiB does not have.
       - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-1}
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
     volumes:

@@ -1,0 +1,95 @@
+.cfw-activity em {
+  color: #8abbd5;
+  font-size: 8px;
+  font-style: normal;
+}
+
+.cfw-activity i {
+  color: #ff607e;
+  font-size: 7px;
+  font-style: normal;
+}
+
+.cfw-launch-input {
+  width: 180px;
+  min-width: 120px;
+  padding: 7px 9px;
+  border: 1px solid rgba(48, 119, 168, 0.3);
+  border-radius: 5px;
+  background: rgba(5, 24, 40, 0.8);
+  color: #c7e3f2;
+  font-size: 9px;
+}
+
+button.cfw-stage {
+  color: inherit;
+  cursor: pointer;
+}
+
+button.cfw-stage:hover,
+button.cfw-stage.is-selected {
+  border-color: #31baff;
+  transform: translateY(-2px);
+  box-shadow: 0 0 18px rgba(30, 164, 255, 0.22);
+}
+
+.cfw-agent-tabs {
+  display: flex;
+  gap: 20px;
+  padding: 8px 4px;
+  color: #68879b;
+  font-size: 9px;
+}
+
+.cfw-agent-tabs button {
+  padding: 0 0 7px;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  background: transparent;
+  color: #68879b;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.cfw-agent-tabs button.active {
+  border-color: #3acfff;
+  color: #3acfff;
+}
+
+.cfw-inline-action,
+.cfw-create-action,
+.cfw-fix button {
+  padding: 7px 10px;
+  border: 1px solid rgba(36, 203, 255, 0.45);
+  border-radius: 5px;
+  background: rgba(18, 94, 184, 0.16);
+  color: #5ecfff;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.cfw-create-action {
+  width: 100%;
+  margin-top: 7px;
+}
+
+.cfw-template-list button.selected {
+  border-color: rgba(36, 203, 255, 0.7);
+  background: rgba(18, 94, 184, 0.2);
+}
+
+.cfw-fix {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.cfw-fix select {
+  width: 100%;
+  padding: 6px;
+  border: 1px solid rgba(48, 119, 168, 0.3);
+  border-radius: 4px;
+  background: #061522;
+  color: #bcd3df;
+  font-size: 8px;
+}

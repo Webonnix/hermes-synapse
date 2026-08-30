@@ -88,7 +88,21 @@ class CommitRequest(BaseModel):
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "repo": str(REPO_ROOT), "repo_exists": REPO_ROOT.is_dir()}
+    """Liveness plus the one thing that silently ruins a whole run: whether the
+    bind-mounted /dev-repo is actually writable by the uid this container runs
+    as. A bind mount replaces the image's own ownership of that path, so a
+    host directory the daemon had to create itself arrives here root-owned and
+    every write fails with PermissionError — from inside, unfixable (no
+    CAP_CHOWN, not root). dev_sandbox checks this before handing the sandbox
+    to an agent, so the run stops with an actionable error instead of the
+    agent retrying writes until its budget is gone."""
+    return {
+        "status": "ok",
+        "repo": str(REPO_ROOT),
+        "repo_exists": REPO_ROOT.is_dir(),
+        "writable": REPO_ROOT.is_dir() and os.access(REPO_ROOT, os.W_OK | os.X_OK),
+        "uid": os.getuid(),
+    }
 
 
 @app.post("/fs/read", dependencies=[Depends(_require_token)])
