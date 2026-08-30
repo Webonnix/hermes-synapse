@@ -546,6 +546,9 @@ def _event_to_dict(e: Dict[str, Any]) -> Dict[str, Any]:
         "link": e.get("htmlLink", ""),
         "description": e.get("description", ""),
         "eventType": CALENDAR_COLOR_TO_TYPE.get(e.get("colorId"), "OTHER"),
+        # Only present on events someone actually invited people to — most
+        # personal-calendar entries have none, and that's a fine, honest 0.
+        "attendeeCount": len(e.get("attendees") or []),
     }
 
 

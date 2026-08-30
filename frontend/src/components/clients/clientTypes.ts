@@ -310,6 +310,8 @@ export interface CalendarEvent {
   /** Opens the event in the owner's own Google Calendar. */
   link: string;
   eventType: CalendarEventType;
+  /** 0 for the (usual) personal-calendar event nobody was invited to. */
+  attendeeCount: number;
 }
 
 export interface CalendarStatus {

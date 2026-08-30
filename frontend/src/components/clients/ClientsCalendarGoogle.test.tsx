@@ -123,9 +123,10 @@ describe('Календарь — Google integration', () => {
     stubFetch();
     render(<ClientsTab />);
     await openCalendar();
-    const chip = await screen.findByText('Созвон с Zenith');
-    expect(chip.className).toContain('is-google');
-    expect(chip.className).toContain('is-call');
+    // The day-cell line is "HH:MM Title" in one node (not a pill chip).
+    const line = await screen.findByText('10:00 Созвон с Zenith');
+    expect(line.className).toContain('is-google');
+    expect(line.className).toContain('is-call');
   });
 
   it('lists the event in the agenda for the selected (today) cell', async () => {
@@ -137,7 +138,8 @@ describe('Календарь — Google integration', () => {
     // container), but its content depends on the events fetch, which
     // resolves a tick later — the assertion has to wait for that, not just
     // for the container to exist.
-    expect(await within(agenda).findByText(/10:00 · Созвон с Zenith/)).toBeInTheDocument();
+    expect(await within(agenda).findByText('Созвон с Zenith')).toBeInTheDocument();
+    expect(within(agenda).getByText('10:00–10:30')).toBeInTheDocument();
   });
 
   it('shows the upcoming-events panel once connected', async () => {
@@ -193,7 +195,7 @@ describe('Календарь — Google integration', () => {
     render(<ClientsTab />);
     await openCalendar();
     const agenda = await screen.findByRole('complementary', { name: /События:/ });
-    fireEvent.click(await within(agenda).findByText(/10:00 · Созвон с Zenith/));
+    fireEvent.click(await within(agenda).findByText('Созвон с Zenith'));
     const drawer = await screen.findByRole('dialog', { name: 'Редактирование события' });
     expect(within(drawer).getByDisplayValue('Созвон с Zenith')).toBeInTheDocument();
     // The type it was created with (CALL) is pre-selected.
@@ -216,7 +218,7 @@ describe('Календарь — Google integration', () => {
     render(<ClientsTab />);
     await openCalendar();
     const agenda = await screen.findByRole('complementary', { name: /События:/ });
-    fireEvent.click(await within(agenda).findByText(/10:00 · Созвон с Zenith/));
+    fireEvent.click(await within(agenda).findByText('Созвон с Zenith'));
     const drawer = await screen.findByRole('dialog', { name: 'Редактирование события' });
     fireEvent.click(within(drawer).getByRole('button', { name: /Удалить/ }));
 
@@ -235,7 +237,7 @@ describe('Календарь — Google integration', () => {
     render(<ClientsTab />);
     await openCalendar();
     const agenda = await screen.findByRole('complementary', { name: /События:/ });
-    fireEvent.click(await within(agenda).findByText(/10:00 · Созвон с Zenith/));
+    fireEvent.click(await within(agenda).findByText('Созвон с Zenith'));
     const drawer = await screen.findByRole('dialog', { name: 'Редактирование события' });
     fireEvent.click(within(drawer).getByRole('button', { name: /Удалить/ }));
 

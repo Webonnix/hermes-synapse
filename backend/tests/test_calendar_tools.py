@@ -209,3 +209,17 @@ def test_delete_calendar_event_tool_wrapper(fake_calendar):
     created, _ = tools._create_event("X", "2026-09-01", "10:00")
     result = json.loads(tools.delete_calendar_event(created["id"]))
     assert result["status"] == "deleted"
+
+
+def test_attendee_count_defaults_to_zero_and_reflects_real_invitees(fake_calendar):
+    plain, _ = tools._create_event("Личная задача", "2026-09-01", "10:00")
+    assert plain["attendeeCount"] == 0
+
+    # Simulate what Google actually returns for an event someone invited
+    # people to — insert() never sets attendees in this codebase, so this
+    # exercises _event_to_dict's own reading of the field directly.
+    fake_calendar[plain["id"]]["attendees"] = [{"email": "a@x.com"}, {"email": "b@x.com"}]
+    events, _ = tools._list_events(
+        datetime(2026, 9, 1, tzinfo=TZ), datetime(2026, 9, 2, tzinfo=TZ),
+    )
+    assert events[0]["attendeeCount"] == 2

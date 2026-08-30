@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { createPortal } from 'react-dom';
 import {
   AlertTriangle, Bell, Building2, Check, ChevronLeft, ChevronRight, ExternalLink, ListChecks,
-  Phone, Plus, Target, Users as MeetingIcon,
+  MapPin, MoreHorizontal, Pencil, Phone, Plus, Target, Trash2, Users as MeetingIcon,
 } from 'lucide-react';
 import { api } from '../currency/currencyApi';
 import {
@@ -11,9 +12,10 @@ import { CalendarEventDrawer } from './CalendarEventDrawer';
 import type { CalendarEvent, CalendarEventType, CalendarStatus, ClientTask, Deal } from './clientTypes';
 
 /**
- * «Календарь» — everything with a date on it, in one month grid: real Google
- * Calendar events, an open CRM task's due date, and an open deal's expected
- * close date.
+ * «Календарь» — everything with a date on it, in one month grid plus a
+ * sidebar: a mini-calendar, the selected day's agenda, and an upcoming-events
+ * list — real Google Calendar events, an open CRM task's due date, and an
+ * open deal's expected close date.
  *
  * The events layer is genuinely live, not a read-only mirror: creating,
  * moving or deleting an event here goes straight to Google Calendar through
@@ -35,6 +37,9 @@ const MONTH_NAMES = [
   'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
   'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь',
 ];
+const UPCOMING_WINDOW_DAYS = 60;
+const UPCOMING_COLLAPSED_COUNT = 6;
+const UPCOMING_EXPANDED_COUNT = 30;
 
 const EVENT_TYPE_ICON: Record<CalendarEventType, typeof Target> = {
   MEETING: MeetingIcon, TASK: ListChecks, CALL: Phone, DEADLINE: AlertTriangle, TRAINING: Target, OTHER: Target,
@@ -42,6 +47,10 @@ const EVENT_TYPE_ICON: Record<CalendarEventType, typeof Target> = {
 
 function toIso(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function addDays(date: Date, days: number): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
 }
 
 /** Monday-first 6-week grid covering the given month, padded with the
@@ -61,10 +70,117 @@ function eventTime(event: CalendarEvent): string {
   return `${pad(start.getHours())}:${pad(start.getMinutes())}`;
 }
 
+/** Start–end, e.g. "10:00–11:30" — the agenda card's headline, richer than
+ *  the grid's own single-time line because there's room for it. */
+function eventTimeRange(event: CalendarEvent): string {
+  if (event.allDay) return 'Весь день';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const start = new Date(event.start);
+  const startLabel = `${pad(start.getHours())}:${pad(start.getMinutes())}`;
+  if (!event.end) return startLabel;
+  const end = new Date(event.end);
+  if (Number.isNaN(end.getTime())) return startLabel;
+  const endLabel = `${pad(end.getHours())}:${pad(end.getMinutes())}`;
+  return endLabel === startLabel ? startLabel : `${startLabel}–${endLabel}`;
+}
+
 interface DayItems {
   tasks: ClientTask[];
   deals: Deal[];
   events: CalendarEvent[];
+}
+
+/** One "HH:MM Title" (or bare-title, for a task/deal) line rendered inside a
+ *  day cell. Deliberately a single leaf node with only text as direct
+ *  children — a wrapper around it would never itself match a text query
+ *  (testing-library only looks at a node's own direct text children), but
+ *  keeping it flat also keeps the DOM here as light as 42 cells × a few
+ *  lines each deserves. */
+interface DayLine {
+  id: string;
+  text: string;
+  className: string;
+  color?: string;
+}
+
+/** Row overflow menu for one Google event in the agenda panel: Изменить /
+ *  Удалить. Rendered into a portal for the same reason SmmPublicationsPanel's
+ *  RowMenu is — `.cl-cal-side` doesn't clip, but a `position: fixed` popover
+ *  anchored to a button inside a `position: sticky` sidebar is one scroll
+ *  event away from drifting off its anchor otherwise. */
+function EventKebabMenu({ event, onEdit, onDelete }: {
+  event: CalendarEvent;
+  onEdit: (event: CalendarEvent) => void;
+  onDelete: (event: CalendarEvent) => Promise<void>;
+}) {
+  const [anchor, setAnchor] = useState<{ top: number; right: number } | null>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const open = anchor !== null;
+
+  const place = useCallback(() => {
+    const rect = buttonRef.current?.getBoundingClientRect();
+    if (rect) setAnchor({ top: rect.bottom + 6, right: window.innerWidth - rect.right });
+  }, []);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const close = () => setAnchor(null);
+    const onPointer = (event_: MouseEvent) => {
+      const target = event_.target as Node;
+      if (!buttonRef.current?.contains(target) && !menuRef.current?.contains(target)) close();
+    };
+    const onKey = (event_: KeyboardEvent) => {
+      if (event_.key === 'Escape') { close(); buttonRef.current?.focus(); }
+    };
+    document.addEventListener('mousedown', onPointer);
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      document.removeEventListener('mousedown', onPointer);
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [open]);
+
+  const remove = async () => {
+    setAnchor(null);
+    if (!window.confirm(`Удалить событие «${event.title}» из Google Календаря?`)) return;
+    await onDelete(event);
+  };
+
+  return (
+    <>
+      <button
+        ref={buttonRef} type="button" className="icon-btn" aria-haspopup="menu" aria-expanded={open}
+        aria-label={`Действия: ${event.title}`}
+        onClick={ev => { ev.stopPropagation(); if (open) { setAnchor(null); } else { place(); } }}
+      >
+        <MoreHorizontal size={14} />
+      </button>
+      {open && createPortal(
+        <div
+          ref={menuRef} role="menu" className="glass-panel"
+          style={{
+            position: 'fixed', top: anchor.top, right: anchor.right, zIndex: 70, minWidth: 172,
+            padding: 6, display: 'flex', flexDirection: 'column', gap: 2,
+          }}
+        >
+          <button type="button" role="menuitem" className="btn-ghost" style={{ justifyContent: 'flex-start' }}
+                  onClick={() => { setAnchor(null); onEdit(event); }}>
+            <Pencil size={13} /><span>Изменить</span>
+          </button>
+          <button type="button" role="menuitem" className="btn-ghost danger" style={{ justifyContent: 'flex-start' }}
+                  onClick={() => void remove()}>
+            <Trash2 size={13} /><span>Удалить</span>
+          </button>
+        </div>,
+        document.body,
+      )}
+    </>
+  );
 }
 
 export function ClientsCalendarPane({
@@ -87,6 +203,8 @@ export function ClientsCalendarPane({
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [eventsLoading, setEventsLoading] = useState(false);
   const [eventsError, setEventsError] = useState('');
+  const [upcoming, setUpcoming] = useState<CalendarEvent[]>([]);
+  const [upcomingExpanded, setUpcomingExpanded] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingEvent, setEditingEvent] = useState<CalendarEvent | null>(null);
   const [toast, setToast] = useState('');
@@ -94,6 +212,11 @@ export function ClientsCalendarPane({
   const grid = useMemo(() => buildMonthGrid(cursor.getFullYear(), cursor.getMonth()), [cursor]);
   const gridStartIso = toIso(grid[0]);
   const gridEndIso = toIso(grid[grid.length - 1]);
+  // A fixed forward-looking window, independent of whatever month the grid
+  // happens to be showing — the "Предстоящие события" panel is about what's
+  // actually next, not "next in this particular month".
+  const upcomingFromIso = toIso(today);
+  const upcomingToIso = toIso(addDays(today, UPCOMING_WINDOW_DAYS));
 
   useEffect(() => {
     if (!toast) return undefined;
@@ -132,7 +255,20 @@ export function ClientsCalendarPane({
     }
   }, [status?.connected, gridStartIso, gridEndIso]);
 
+  const loadUpcoming = useCallback(async () => {
+    if (!status?.connected) return;
+    try {
+      const params = new URLSearchParams({ dateFrom: upcomingFromIso, dateTo: upcomingToIso });
+      const list = await api<CalendarEvent[]>(`/api/calendar/events?${params}`);
+      setUpcoming(Array.isArray(list) ? list : []);
+    } catch {
+      // A non-critical, secondary panel — the grid's own status/error banner
+      // already covers "Google isn't reachable"; no need to say it twice.
+    }
+  }, [status?.connected, upcomingFromIso, upcomingToIso]);
+
   useEffect(() => { void loadEvents(); }, [loadEvents]);
+  useEffect(() => { void loadUpcoming(); }, [loadUpcoming]);
 
   const itemsByDate = useMemo(() => {
     const map = new Map<string, DayItems>();
@@ -157,15 +293,21 @@ export function ClientsCalendarPane({
 
   const upcomingEvents = useMemo(() => {
     const todayIso = toIso(today);
-    return events
+    const sorted = upcoming
       .filter(event => event.start.slice(0, 10) >= todayIso)
-      .sort((a, b) => a.start.localeCompare(b.start))
-      .slice(0, 6);
+      .sort((a, b) => a.start.localeCompare(b.start));
+    return sorted.slice(0, upcomingExpanded ? UPCOMING_EXPANDED_COUNT : UPCOMING_COLLAPSED_COUNT);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [events]);
+  }, [upcoming, upcomingExpanded]);
+  const upcomingTotal = useMemo(() => {
+    const todayIso = toIso(today);
+    return upcoming.filter(event => event.start.slice(0, 10) >= todayIso).length;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [upcoming]);
 
   const todayIso = toIso(today);
   const selectedItems = itemsByDate.get(selected);
+  const selectedCount = selectedItems ? selectedItems.events.length + selectedItems.tasks.length + selectedItems.deals.length : 0;
 
   const changeMonth = (delta: number) => {
     setCursor(current => new Date(current.getFullYear(), current.getMonth() + delta, 1));
@@ -204,14 +346,14 @@ export function ClientsCalendarPane({
       await api('/api/calendar/events', { method: 'POST', body: JSON.stringify(body) });
       setToast('Событие добавлено в Google Календарь');
     }
-    await loadEvents();
-  }, [loadEvents]);
+    await Promise.all([loadEvents(), loadUpcoming()]);
+  }, [loadEvents, loadUpcoming]);
 
   const deleteEvent = useCallback(async (event: CalendarEvent) => {
     await api(`/api/calendar/events/${event.id}`, { method: 'DELETE' });
     setToast('Событие удалено');
-    await loadEvents();
-  }, [loadEvents]);
+    await Promise.all([loadEvents(), loadUpcoming()]);
+  }, [loadEvents, loadUpcoming]);
 
   const openCreateDrawer = () => { setEditingEvent(null); setDrawerOpen(true); };
   const openEditDrawer = (event: CalendarEvent) => { setEditingEvent(event); setDrawerOpen(true); };
@@ -261,11 +403,6 @@ export function ClientsCalendarPane({
                 <ChevronRight size={15} />
               </button>
             </div>
-            {status?.connected && (
-              <button type="button" className="btn-primary" style={{ marginLeft: 'auto' }} onClick={openCreateDrawer}>
-                <Plus size={14} /><span>Создать событие</span>
-              </button>
-            )}
           </header>
 
           {eventsError && (
@@ -284,25 +421,28 @@ export function ClientsCalendarPane({
               const items = itemsByDate.get(iso);
               const outside = date.getMonth() !== cursor.getMonth();
               const overdueCount = items?.tasks.filter(task => task.overdue).length ?? 0;
-              const chips: Array<{ id: string; label: string; kind: string; color?: string }> = [
+              const lines: DayLine[] = [
                 ...(items?.events ?? []).map(event => ({
-                  id: event.id, label: event.title, kind: `google is-${event.eventType.toLowerCase()}`,
+                  id: event.id,
+                  text: `${eventTime(event)} ${event.title}`,
+                  className: `cl-cal-line is-google is-${event.eventType.toLowerCase()}`,
                   color: EVENT_TYPE_COLOR[event.eventType],
                 })),
                 ...(items?.tasks ?? []).map(task => ({
-                  id: task.id, label: task.title, kind: task.overdue ? 'overdue' : 'task',
+                  id: task.id, text: task.title,
+                  className: `cl-cal-line ${task.overdue ? 'is-overdue' : 'is-task'}`,
                 })),
-                ...(items?.deals ?? []).map(deal => ({ id: deal.id, label: deal.title, kind: 'deal' })),
+                ...(items?.deals ?? []).map(deal => ({ id: deal.id, text: deal.title, className: 'cl-cal-line is-deal' })),
               ];
-              const visibleChips = chips.slice(0, 3);
-              const hiddenCount = chips.length - visibleChips.length;
+              const visibleLines = lines.slice(0, 3);
+              const hiddenCount = lines.length - visibleLines.length;
               return (
                 <button
                   key={iso}
                   type="button"
                   role="gridcell"
                   className={`cl-cal-cell${outside ? ' is-outside' : ''}${iso === todayIso ? ' is-today' : ''}${iso === selected ? ' is-selected' : ''}`}
-                  aria-label={`${formatDate(iso)}${chips.length ? `, ${chips.length} событий` : ''}`}
+                  aria-label={`${formatDate(iso)}${lines.length ? `, ${lines.length} событий` : ''}`}
                   aria-current={iso === todayIso ? 'date' : undefined}
                   onClick={() => setSelected(iso)}
                 >
@@ -310,14 +450,14 @@ export function ClientsCalendarPane({
                     <span className="cl-cal-cell-date">{date.getDate()}</span>
                     {overdueCount > 0 && <AlertTriangle size={11} className="cl-cal-overdue-flag" />}
                   </span>
-                  <span className="cl-cal-chips">
-                    {visibleChips.map(chip => (
-                      <span key={chip.id} className={`cl-cal-chip is-${chip.kind}`}
-                            style={chip.color ? { background: `${chip.color}2e`, color: chip.color } : undefined}>
-                        {chip.label}
+                  <span className="cl-cal-lines">
+                    {visibleLines.map(line => (
+                      <span key={line.id} className={line.className}
+                            style={line.color ? { '--cal-line-color': line.color, color: line.color } as CSSProperties : undefined}>
+                        {line.text}
                       </span>
                     ))}
-                    {hiddenCount > 0 && <span className="cl-cal-chip-more">+{hiddenCount}</span>}
+                    {hiddenCount > 0 && <span className="cl-cal-line-more">+{hiddenCount} ещё</span>}
                   </span>
                 </button>
               );
@@ -335,28 +475,74 @@ export function ClientsCalendarPane({
         </section>
 
         <div className="cl-cal-side">
+          <aside className="glass-panel cl-cal-mini" aria-label="Мини-календарь">
+            <div className="cl-cal-mini-head">
+              <button type="button" className="icon-btn" aria-label="Предыдущий месяц" onClick={() => changeMonth(-1)}>
+                <ChevronLeft size={13} />
+              </button>
+              <strong>{MONTH_NAMES[cursor.getMonth()]} {cursor.getFullYear()}</strong>
+              <button type="button" className="icon-btn" aria-label="Следующий месяц" onClick={() => changeMonth(1)}>
+                <ChevronRight size={13} />
+              </button>
+            </div>
+            <div className="cl-cal-mini-weekdays" aria-hidden="true">
+              {WEEKDAYS.map(day => <span key={day}>{day[0]}</span>)}
+            </div>
+            <div className="cl-cal-mini-grid">
+              {grid.map(date => {
+                const iso = toIso(date);
+                const outside = date.getMonth() !== cursor.getMonth();
+                const hasItems = itemsByDate.has(iso);
+                return (
+                  <button
+                    key={iso} type="button"
+                    className={`cl-cal-mini-day${outside ? ' is-outside' : ''}${iso === todayIso ? ' is-today' : ''}${iso === selected ? ' is-selected' : ''}`}
+                    aria-label={formatDate(iso)}
+                    onClick={() => setSelected(iso)}
+                  >
+                    {date.getDate()}
+                    {hasItems && <i className="cl-cal-mini-dot" />}
+                  </button>
+                );
+              })}
+            </div>
+          </aside>
+
           <aside className="glass-panel cl-cal-agenda" aria-label={`События: ${formatDate(selected)}`}>
             <div className="cl-cal-agenda-head">
               <strong>{formatDate(selected)}{selected === todayIso ? ' · сегодня' : ''}</strong>
+              {selectedCount > 0 && <span className="cl-cal-agenda-count">{selectedCount}</span>}
             </div>
 
-            {!selectedItems || (selectedItems.tasks.length === 0 && selectedItems.deals.length === 0 && selectedItems.events.length === 0) ? (
+            {!selectedItems || selectedCount === 0 ? (
               <p className="cl-muted" style={{ margin: '10px 0' }}>На этот день ничего не запланировано.</p>
             ) : (
               <ul className="cl-cal-agenda-list">
                 {(selectedItems.events ?? []).map(event => {
                   const Icon = EVENT_TYPE_ICON[event.eventType];
                   return (
-                    <li key={event.id} className="cl-cal-agenda-item">
-                      <button type="button" className="cl-cal-agenda-link" onClick={() => openEditDrawer(event)}>
-                        <span className="cl-cal-agenda-icon" style={{ color: EVENT_TYPE_COLOR[event.eventType] }}><Icon size={13} /></span>
-                        <span>{eventTime(event)} · {event.title}</span>
+                    <li key={event.id} className="cl-cal-agenda-card" style={{ borderLeftColor: EVENT_TYPE_COLOR[event.eventType] }}>
+                      <button type="button" className="cl-cal-agenda-card-main" onClick={() => openEditDrawer(event)}>
+                        <span className="cl-cal-agenda-card-top">
+                          <Icon size={12} style={{ color: EVENT_TYPE_COLOR[event.eventType] }} />
+                          <span className="cl-cal-agenda-card-time">{eventTimeRange(event)}</span>
+                        </span>
+                        <span className="cl-cal-agenda-card-title">{event.title}</span>
+                        {(event.location || event.attendeeCount > 0) && (
+                          <span className="cl-cal-agenda-card-meta">
+                            {event.location && <span className="cl-cal-agenda-card-loc"><MapPin size={10} />{event.location}</span>}
+                            {event.attendeeCount > 0 && (
+                              <span className="cl-cal-agenda-card-attendees"><MeetingIcon size={10} />{event.attendeeCount}</span>
+                            )}
+                          </span>
+                        )}
+                        {event.link && (
+                          <a className="cl-cal-agenda-sub" href={event.link} target="_blank" rel="noreferrer" onClick={ev => ev.stopPropagation()}>
+                            <ExternalLink size={11} />Google Календарь
+                          </a>
+                        )}
                       </button>
-                      {event.link && (
-                        <a className="cl-cal-agenda-sub" href={event.link} target="_blank" rel="noreferrer" onClick={ev => ev.stopPropagation()}>
-                          <ExternalLink size={11} />Google Календарь
-                        </a>
-                      )}
+                      <EventKebabMenu event={event} onEdit={openEditDrawer} onDelete={deleteEvent} />
                     </li>
                   );
                 })}
@@ -382,6 +568,12 @@ export function ClientsCalendarPane({
               </ul>
             )}
 
+            {status?.connected && (
+              <button type="button" className="btn-primary cl-cal-create-btn" onClick={openCreateDrawer}>
+                <Plus size={14} /><span>Создать событие</span>
+              </button>
+            )}
+
             <div className="cl-cal-quick-add">
               <input
                 className="form-input" placeholder="Добавить задачу на этот день…" value={quickTitle}
@@ -401,16 +593,23 @@ export function ClientsCalendarPane({
               {upcomingEvents.length === 0 ? (
                 <p className="cl-muted" style={{ margin: '10px 0' }}>Ничего не запланировано.</p>
               ) : (
-                <ul className="cl-cal-upcoming-list">
-                  {upcomingEvents.map(event => (
-                    <li key={event.id}>
-                      <button type="button" onClick={() => jumpTo(event.start.slice(0, 10))}>
-                        <span className="cl-cal-upcoming-date">{formatDate(event.start)}</span>
-                        <span className="cl-cal-upcoming-title">{eventTime(event)} · {event.title}</span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
+                <>
+                  <ul className="cl-cal-upcoming-list">
+                    {upcomingEvents.map(event => (
+                      <li key={event.id}>
+                        <button type="button" onClick={() => jumpTo(event.start.slice(0, 10))}>
+                          <span className="cl-cal-upcoming-date">{formatDate(event.start)}</span>
+                          <span className="cl-cal-upcoming-title">{eventTime(event)} · {event.title}</span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                  {upcomingTotal > UPCOMING_COLLAPSED_COUNT && (
+                    <button type="button" className="cl-cal-upcoming-toggle" onClick={() => setUpcomingExpanded(v => !v)}>
+                      {upcomingExpanded ? 'Свернуть' : 'Смотреть все'}
+                    </button>
+                  )}
+                </>
               )}
             </aside>
           )}

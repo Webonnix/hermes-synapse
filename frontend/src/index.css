@@ -3307,34 +3307,53 @@ main.simple-chat-page { min-width: 0; padding: 0 !important; overflow: hidden !i
   color: var(--danger);
 }
 
-.cl-cal-chips {
+.cl-cal-lines {
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
-.cl-cal-chip {
+/* One "HH:MM Title" line — the reference layout, in place of the old pill
+   chips: a coloured dot (::before) plus plain text, so a day with several
+   items reads like a real day planner rather than a row of tags. */
+.cl-cal-line {
+  position: relative;
+  padding-left: 10px;
   font-size: 0.64rem;
-  padding: 1px 5px;
-  border-radius: 4px;
+  line-height: 1.4;
+  color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text-primary);
-  background: rgba(155, 136, 255, 0.16);
 }
 
-.cl-cal-chip.is-overdue {
-  background: rgba(255, 93, 143, 0.18);
+.cl-cal-line::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  transform: translateY(-50%);
+  background: var(--cal-line-color, rgba(155, 136, 255, 0.7));
+}
+
+.cl-cal-line.is-overdue {
   color: #ffb3c8;
 }
 
-.cl-cal-chip.is-deal {
-  background: rgba(115, 217, 255, 0.16);
+.cl-cal-line.is-overdue::before {
+  background: var(--danger);
 }
 
-.cl-cal-chip-more {
-  font: 600 0.62rem var(--font-mono);
+.cl-cal-line.is-deal::before {
+  background: var(--accent-cyan);
+}
+
+.cl-cal-line-more {
+  padding-left: 10px;
+  font: 600 0.6rem var(--font-mono);
   color: var(--text-dim);
 }
 
@@ -3365,6 +3384,93 @@ main.simple-chat-page { min-width: 0; padding: 0 !important; overflow: hidden !i
 .cl-cal-dot.is-overdue { background: var(--danger); }
 .cl-cal-dot.is-deal { background: var(--accent-cyan); }
 
+/* Sidebar mini-calendar — mirrors the main grid's own month/cursor, just
+   compact: no lines, only a dot for "something's on this day". Its own nav
+   arrows drive the same `cursor` state as the big grid, so the two never
+   fall out of sync. */
+.cl-cal-mini {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cl-cal-mini-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.cl-cal-mini-head strong {
+  font-size: 0.7rem;
+  text-transform: capitalize;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cl-cal-mini-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+}
+
+.cl-cal-mini-weekdays span {
+  font: 700 0.58rem var(--font-mono);
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.cl-cal-mini-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 1px;
+}
+
+.cl-cal-mini-day {
+  position: relative;
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  font-size: 0.66rem;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.cl-cal-mini-day:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.cl-cal-mini-day.is-outside {
+  opacity: 0.35;
+}
+
+.cl-cal-mini-day.is-today {
+  color: var(--accent-cyan);
+  font-weight: 700;
+}
+
+.cl-cal-mini-day.is-selected {
+  background: rgba(155, 136, 255, 0.22);
+  color: var(--text-primary);
+}
+
+.cl-cal-mini-dot {
+  position: absolute;
+  bottom: 3px;
+  left: 50%;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  transform: translateX(-50%);
+  background: var(--accent-violet);
+}
+
 .cl-cal-agenda {
   padding: 14px;
   display: flex;
@@ -3375,7 +3481,21 @@ main.simple-chat-page { min-width: 0; padding: 0 !important; overflow: hidden !i
 .cl-cal-agenda-head {
   display: flex;
   align-items: center;
+  gap: 8px;
   justify-content: space-between;
+}
+
+.cl-cal-agenda-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(155, 136, 255, 0.2);
+  color: var(--accent-violet);
+  font: 700 0.66rem var(--font-mono);
 }
 
 .cl-cal-agenda-list {
@@ -3435,10 +3555,84 @@ main.simple-chat-page { min-width: 0; padding: 0 !important; overflow: hidden !i
   width: 100%;
 }
 
+/* A Google event's own agenda card — a coloured left border instead of just
+   an icon, so its type reads at a glance even scrolled past the icon
+   column, plus room for a time range, location and attendee count that a
+   one-line chip never had space for. */
+.cl-cal-agenda-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  border-left: 3px solid var(--text-dim);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.cl-cal-agenda-card:hover {
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.cl-cal-agenda-card-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border: none;
+  background: none;
+  padding: 0;
+  text-align: left;
+  color: inherit;
+  font-size: inherit;
+  cursor: pointer;
+}
+
+.cl-cal-agenda-card-top {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.cl-cal-agenda-card-time {
+  font: 700 0.66rem var(--font-mono);
+  color: var(--text-muted);
+}
+
+.cl-cal-agenda-card-title {
+  font-size: 0.82rem;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cl-cal-agenda-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.cl-cal-agenda-card-loc,
+.cl-cal-agenda-card-attendees {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+
+.cl-cal-create-btn {
+  width: 100%;
+  justify-content: center;
+  margin-top: 10px;
+}
+
 .cl-cal-quick-add {
   display: flex;
   gap: 6px;
-  margin-top: auto;
+  margin-top: 10px;
   padding-top: 10px;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
@@ -3491,6 +3685,22 @@ main.simple-chat-page { min-width: 0; padding: 0 !important; overflow: hidden !i
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.cl-cal-upcoming-toggle {
+  align-self: flex-start;
+  margin-top: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--accent-cyan);
+  cursor: pointer;
+}
+
+.cl-cal-upcoming-toggle:hover {
+  text-decoration: underline;
 }
 
 /* Event-type picker in CalendarEventDrawer — same pill shape as
