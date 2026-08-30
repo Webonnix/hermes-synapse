@@ -377,6 +377,40 @@ async def lifespan(app: FastAPI):
                 logger.exception("Messenger channel health check sweep failed")
     asyncio.create_task(_channel_health_check_task())
 
+    # CRM: one Telegram message a day listing overdue and due-today tasks —
+    # the "reminder" half of the Задачи/Календарь section. A 30-minute poll
+    # rather than sleeping until the exact hour: it survives a restart
+    # mid-window without drifting, the same idiom every other sweep in this
+    # file uses. `crm_reminder_last_sent` (app_settings) is the dedup key, so
+    # a redeploy inside the same reminder hour cannot double-send.
+    if os.getenv("CRM_REMINDER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
+        reminder_hour = int(os.getenv("CRM_REMINDER_HOUR_UTC", "6"))
+
+        async def _crm_reminder_task():
+            from datetime import datetime, timezone
+            from backend import client_tasks
+            from backend.database import get_setting, set_setting
+
+            while True:
+                await asyncio.sleep(1800)
+                now = datetime.now(timezone.utc)
+                if now.hour != reminder_hour:
+                    continue
+                today = now.date().isoformat()
+                try:
+                    if await asyncio.to_thread(get_setting, "crm_reminder_last_sent") == today:
+                        continue
+                    text = await asyncio.to_thread(client_tasks.daily_digest_text)
+                    if text:
+                        import backend.bot as bot_module
+                        chat_id = os.getenv("TELEGRAM_CHAT_ID", "").split(",")[0].strip()
+                        if chat_id and getattr(bot_module, "telegram_app", None) and bot_module.telegram_app.bot:
+                            await bot_module.telegram_app.bot.send_message(chat_id=int(chat_id), text=text)
+                    await asyncio.to_thread(set_setting, "crm_reminder_last_sent", today)
+                except Exception:
+                    logger.exception("CRM daily reminder failed")
+        asyncio.create_task(_crm_reminder_task())
+
     yield
     if smm_scheduler_task is not None:
         smm_scheduler_task.cancel()

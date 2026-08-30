@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Download, Plus, Users } from 'lucide-react';
+import {
+  Bot, Calendar, Download, FileText, ListChecks, Plus, Target, Users, Wallet,
+} from 'lucide-react';
 import { styles } from '../styles';
 import { api } from './currency/currencyApi';
 import { useCurrencySettings } from './currency/useCurrencySettings';
@@ -14,6 +16,7 @@ import { ClientDetailsPane } from './clients/ClientDetailsPane';
 import { DealsPipeline } from './clients/DealsPipeline';
 import { DealDrawer } from './clients/DealDrawer';
 import { ClientTasksPane } from './clients/ClientTasksPane';
+import { ClientsCalendarPane } from './clients/ClientsCalendarPane';
 import type {
   AgentConnection, CatalogueService, Client, ClientActivityEntry, ClientBillingSummary,
   ClientInvoice, ClientNote, ClientPayment, ClientsDashboard, ClientsPage, ClientTask, Deal,
@@ -23,18 +26,17 @@ import type {
 /**
  * «Клиенты» — the CRM section (§3, §CRM).
  *
- * Six panes: the sales pipeline, the client book, agent connections,
- * invoices, payments and follow-ups. Navigation between them lives in the
- * left sidebar (App.tsx), not on this page — the sidebar owns the "which
- * pane" question and passes it down as `pane`/`onPaneChange`, the same
- * controlled-with-fallback shape as any externally-driven tab state. The
- * fallback (internal state, defaulting to 'clients') keeps this component
- * fully usable standalone — every existing test renders it with zero nav
- * props and still gets a working clients list.
+ * Seven panes, navigated with an in-page tab strip — the same pattern as
+ * Content Factory and SMM Factory, not a sidebar submenu. This component owns
+ * its own "which pane" state (persisted to localStorage, same idiom as
+ * `smm_factory_view`), so App.tsx only ever mounts `<ClientsTab />` with no
+ * navigation props, exactly like those two sections.
  *
  * State that every pane depends on (currency settings, the agent and service
  * pickers) is loaded once here and passed down, so switching panes does not
- * re-fetch the world.
+ * re-fetch the world. Deals and tasks are loaded unconditionally on mount —
+ * both the sidebar's "Задачи" badge context and the Календарь pane need them
+ * regardless of which pane is actually open.
  *
  * The pipeline and the client book meet at exactly one place: converting a
  * deal. That flow reuses this same `ClientDrawer` — pre-filled from the deal
@@ -42,7 +44,18 @@ import type {
  * `submitClientOrConvert` and `startConvert` below.
  */
 
-export type Pane = 'deals' | 'clients' | 'connections' | 'invoices' | 'payments' | 'tasks';
+export type Pane = 'deals' | 'clients' | 'connections' | 'invoices' | 'payments' | 'tasks' | 'calendar';
+
+const VIEWS: Array<[Pane, string, typeof Target]> = [
+  ['deals', 'Сделки', Target],
+  ['clients', 'Список клиентов', Users],
+  ['connections', 'Подключения', Bot],
+  ['invoices', 'Счета', FileText],
+  ['payments', 'Платежи', Wallet],
+  ['tasks', 'Задачи', ListChecks],
+  ['calendar', 'Календарь', Calendar],
+];
+const VIEW_KEYS = VIEWS.map(([key]) => key);
 
 /** Turns the filter/sort/page state into the query the backend understands.
  *  Filtering happens server-side across the whole book — see §38. */
@@ -110,19 +123,15 @@ function draftFromDeal(deal: Deal, baseCurrency: string): Partial<DraftState> {
   };
 }
 
-export function ClientsTab({
-  onOpenAgent, pane = 'clients',
-}: {
-  onOpenAgent?: (agentId: string) => void;
-  /** Which of the six panes to show — set by the sidebar (App.tsx), which
-   *  owns navigation for this section entirely; this component has no
-   *  internal way to change it. Defaults to 'clients' here so it stays
-   *  usable standalone (every existing test renders it with no `pane` prop);
-   *  App.tsx's own `clientsPane` state defaults to 'deals' instead — a CRM
-   *  opening on the pipeline is a production UX choice, not this
-   *  component's default. */
-  pane?: Pane;
-}) {
+export function ClientsTab({ onOpenAgent }: { onOpenAgent?: (agentId: string) => void }) {
+  const [pane, setPane] = useState<Pane>(() => {
+    const stored = localStorage.getItem('clients_view') as Pane | null;
+    // A view name from an older build (or a hand-edited key) must not leave
+    // the section rendering nothing at all.
+    return stored && VIEW_KEYS.includes(stored) ? stored : 'deals';
+  });
+  useEffect(() => { localStorage.setItem('clients_view', pane); }, [pane]);
+
   const { settings, loading: currencyLoading } = useCurrencySettings();
 
   const [filters, setFilters] = useState<ClientFilters>({ ...EMPTY_FILTERS });
@@ -155,7 +164,7 @@ export function ClientsTab({
   const [drawerPrefill, setDrawerPrefill] = useState<Partial<DraftState> | undefined>(undefined);
   const [convertingDeal, setConvertingDeal] = useState<Deal | null>(null);
 
-  // ── deals (sales pipeline) ──────────────────────────────────────────────
+  // ── deals (sales pipeline) — loaded unconditionally, see module docstring ──
   const [deals, setDeals] = useState<Deal[]>([]);
   const [pipelineSummary, setPipelineSummary] = useState<PipelineSummary | null>(null);
   const [dealsLoading, setDealsLoading] = useState(true);
@@ -163,7 +172,7 @@ export function ClientsTab({
   const [dealDrawerOpen, setDealDrawerOpen] = useState(false);
   const [dealDrawerDeal, setDealDrawerDeal] = useState<Deal | null>(null);
 
-  // ── tasks (global pane) ──────────────────────────────────────────────────
+  // ── tasks — also loaded unconditionally, for the same reason ────────────
   const [tasks, setTasks] = useState<ClientTask[]>([]);
   const [taskStats, setTaskStats] = useState<TaskStats | null>(null);
   const [tasksLoading, setTasksLoading] = useState(false);
@@ -287,20 +296,19 @@ export function ClientsTab({
     }
   }, []);
 
-  // The task-stats badge on the sidebar needs a number even when this section
-  // is not the active pane, so it refreshes on an interval regardless — the
-  // same pattern SMM Factory uses for its pending-drafts count.
+  // Deals and tasks load once on mount and then refresh on an interval,
+  // independent of which pane is open — the "Задачи" tab badge and the
+  // Календарь pane both need this data even when neither is the active view.
   useEffect(() => {
+    void loadDeals();
     void loadTasks();
     const interval = setInterval(() => { void loadTasks(); }, 60000);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => { if (pane === 'deals') void loadDeals(); }, [pane, loadDeals]);
-
   const loadPane = useCallback(async (target: Pane) => {
-    if (target === 'clients' || target === 'deals' || target === 'tasks') return;
+    if (target !== 'connections' && target !== 'invoices' && target !== 'payments') return;
     setPaneLoading(true);
     setPaneError('');
     try {
@@ -523,7 +531,7 @@ export function ClientsTab({
     setDrawerOpen(true);
   }, [settings.baseCurrency]);
 
-  // ── task actions (shared between the global pane and the client card) ──
+  // ── task actions (shared across the tasks pane, the calendar and a client's own card) ──
 
   const createTask = useCallback(async (payload: {
     title: string; dueAt: string; priority: TaskPriority; clientId?: string; dealId?: string;
@@ -625,8 +633,23 @@ export function ClientsTab({
       <div style={styles.tabHeader}>
         <div>
           <h2 className="glow-text-cyan" style={styles.tabTitle}>Клиенты</h2>
-          <p style={styles.tabSubtitle}>Сделки, клиенты, услуги, агенты, платежи и задачи</p>
+          <p style={styles.tabSubtitle}>Сделки, клиенты, услуги, агенты, платежи, задачи и календарь</p>
         </div>
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+        <nav className="admin-subnav is-wrap" aria-label="Клиенты">
+          {VIEWS.map(([key, label, Icon]) => (
+            <button key={key} type="button" className={pane === key ? 'is-active' : ''} onClick={() => setPane(key)}>
+              <Icon size={15} />
+              <span>{label}</span>
+              {key === 'tasks' && taskStats && taskStats.overdue > 0 && (
+                <span className="admin-subnav-count">{taskStats.overdue}</span>
+              )}
+            </button>
+          ))}
+        </nav>
+        <div style={{ flex: 1 }} />
         {pane === 'clients' && (
           <div className="cl-header-actions">
             <button type="button" className="btn-ghost"
@@ -805,6 +828,20 @@ export function ClientsTab({
         </>
       )}
 
+      {pane === 'calendar' && !canViewTasks && (
+        <div className="admin-empty-cta"><span>Недостаточно прав для просмотра календаря.</span></div>
+      )}
+      {pane === 'calendar' && canViewTasks && (
+        <ClientsCalendarPane
+          tasks={tasks}
+          deals={canViewDeals ? deals : []}
+          loading={tasksLoading || dealsLoading}
+          onCompleteTask={completeTask}
+          onOpenDeal={deal => { setDealDrawerDeal(deal); setDealDrawerOpen(true); }}
+          onCreateTask={createTask}
+        />
+      )}
+
       <ClientDrawer
         open={drawerOpen}
         mode={drawerMode}
@@ -831,3 +868,5 @@ export function ClientsTab({
     </div>
   );
 }
+
+export default ClientsTab;

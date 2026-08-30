@@ -148,6 +148,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // ClientsTab now persists its active pane to localStorage (like
+  // smm_factory_view) — clear it, or one test's tab selection leaks into
+  // the next test's default render.
+  localStorage.clear();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -155,14 +159,14 @@ afterEach(() => {
 describe('ClientsTab — deals (sales pipeline)', () => {
   it('shows the pipeline KPI row and the deal in its stage column', async () => {
     stubFetch();
-    render(<ClientsTab pane="deals" />);
+    render(<ClientsTab />);
     expect(await screen.findByText('Открытых сделок')).toBeInTheDocument();
     expect(screen.getByText('Сайт для Zenith')).toBeInTheDocument();
   });
 
   it('creates a deal from the drawer', async () => {
     const { handler } = stubFetch();
-    render(<ClientsTab pane="deals" />);
+    render(<ClientsTab />);
     fireEvent.click(await screen.findByRole('button', { name: /Новая сделка/ }));
     const drawer = await screen.findByRole('dialog');
 
@@ -179,7 +183,7 @@ describe('ClientsTab — deals (sales pipeline)', () => {
 
   it('refuses to create a deal without a title', async () => {
     stubFetch();
-    render(<ClientsTab pane="deals" />);
+    render(<ClientsTab />);
     fireEvent.click(await screen.findByRole('button', { name: /Новая сделка/ }));
     const drawer = await screen.findByRole('dialog');
     fireEvent.click(within(drawer).getByRole('button', { name: 'Создать сделку' }));
@@ -188,7 +192,7 @@ describe('ClientsTab — deals (sales pipeline)', () => {
 
   it('moves a deal to a new stage from the card and sends a PATCH', async () => {
     const { handler } = stubFetch();
-    render(<ClientsTab pane="deals" />);
+    render(<ClientsTab />);
     const select = await screen.findByLabelText('Изменить стадию сделки «Сайт для Zenith»');
     fireEvent.change(select, { target: { value: 'CONTACTED' } });
 
@@ -202,7 +206,7 @@ describe('ClientsTab — deals (sales pipeline)', () => {
   it('asks for a reason before moving a deal to Lost, and sends it along', async () => {
     vi.spyOn(window, 'prompt').mockReturnValue('Слишком дорого');
     const { handler } = stubFetch();
-    render(<ClientsTab pane="deals" />);
+    render(<ClientsTab />);
     const select = await screen.findByLabelText('Изменить стадию сделки «Сайт для Zenith»');
     fireEvent.change(select, { target: { value: 'LOST' } });
 
@@ -216,7 +220,7 @@ describe('ClientsTab — deals (sales pipeline)', () => {
   it('deletes an unconverted deal after confirmation, from its drawer', async () => {
     vi.spyOn(window, 'confirm').mockReturnValue(true);
     const { handler } = stubFetch();
-    render(<ClientsTab pane="deals" />);
+    render(<ClientsTab />);
     fireEvent.click(await screen.findByRole('button', { name: 'Сайт для Zenith' }));
     const drawer = await screen.findByRole('dialog');
     fireEvent.click(within(drawer).getByRole('button', { name: /Удалить/ }));
@@ -229,7 +233,7 @@ describe('ClientsTab — deals (sales pipeline)', () => {
 
   it('converts a deal into a client through the same client drawer, prefilled', async () => {
     const { handler } = stubFetch();
-    render(<ClientsTab pane="deals" />);
+    render(<ClientsTab />);
     fireEvent.click(await screen.findByRole('button', { name: 'Сайт для Zenith' }));
     const dealDrawer = await screen.findByRole('dialog');
     fireEvent.click(within(dealDrawer).getByRole('button', { name: /Конвертировать в клиента/ }));
@@ -254,7 +258,8 @@ describe('ClientsTab — deals (sales pipeline)', () => {
 describe('ClientsTab — tasks (follow-ups)', () => {
   it('lists tasks with their KPI counts', async () => {
     stubFetch();
-    render(<ClientsTab pane="tasks" />);
+    render(<ClientsTab />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Задачи' }));
     expect(await screen.findByText('Позвонить клиенту')).toBeInTheDocument();
     // "Просрочено" also labels the filter tab beside the KPI row — scope to
     // the stat card specifically.
@@ -265,7 +270,8 @@ describe('ClientsTab — tasks (follow-ups)', () => {
 
   it('adds a task from the composer', async () => {
     const { handler } = stubFetch();
-    render(<ClientsTab pane="tasks" />);
+    render(<ClientsTab />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Задачи' }));
     await screen.findByText('Позвонить клиенту');
     fireEvent.change(screen.getByPlaceholderText('Новая задача…'), { target: { value: 'Отправить КП' } });
     fireEvent.click(screen.getByRole('button', { name: /Добавить/ }));
@@ -279,7 +285,8 @@ describe('ClientsTab — tasks (follow-ups)', () => {
 
   it('completes a task from its checkbox', async () => {
     const { handler } = stubFetch();
-    render(<ClientsTab pane="tasks" />);
+    render(<ClientsTab />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Задачи' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Отметить выполненной: Позвонить клиенту' }));
 
     await waitFor(() => {
@@ -292,7 +299,8 @@ describe('ClientsTab — tasks (follow-ups)', () => {
 describe('ClientsTab — client notes', () => {
   it('adds a note to a client from the Заметки tab', async () => {
     const { handler } = stubFetch();
-    render(<ClientsTab pane="clients" />);
+    render(<ClientsTab />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Список клиентов' }));
     fireEvent.click(await screen.findByText('Midot Project'));
     fireEvent.click(await screen.findByRole('button', { name: 'Заметки' }));
 
@@ -311,9 +319,70 @@ describe('ClientsTab — client notes', () => {
 
   it('shows an existing note in the list', async () => {
     stubFetch();
-    render(<ClientsTab pane="clients" />);
+    render(<ClientsTab />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Список клиентов' }));
     fireEvent.click(await screen.findByText('Midot Project'));
     fireEvent.click(await screen.findByRole('button', { name: 'Заметки' }));
     expect(await screen.findByText('Договорились созвониться в среду')).toBeInTheDocument();
+  });
+});
+
+describe('ClientsTab — calendar', () => {
+  it('shows the fixture task on its due date and lets you open that day', async () => {
+    stubFetch();
+    render(<ClientsTab />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Календарь' }));
+    await screen.findByText(/Каждый день бот присылает/);
+
+    const dayCell = await screen.findByRole('gridcell', { name: /25\.08\.2026/ });
+    expect(within(dayCell).getByText('Позвонить клиенту')).toBeInTheDocument();
+
+    fireEvent.click(dayCell);
+    // The agenda panel now shows the same task, with a way to complete it.
+    expect(await screen.findByRole('button', { name: 'Отметить выполненной: Позвонить клиенту' }))
+      .toBeInTheDocument();
+  });
+
+  it('completes a task from the calendar agenda', async () => {
+    const { handler } = stubFetch();
+    render(<ClientsTab />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Календарь' }));
+    fireEvent.click(await screen.findByRole('gridcell', { name: /25\.08\.2026/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Отметить выполненной: Позвонить клиенту' }));
+
+    await waitFor(() => {
+      expect(handler.mock.calls.some(([url, init]) =>
+        String(url) === '/api/client-tasks/task-1/complete' && (init as RequestInit)?.method === 'POST')).toBe(true);
+    });
+  });
+
+  it('adds a quick task for the selected day', async () => {
+    const { handler } = stubFetch();
+    render(<ClientsTab />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Календарь' }));
+
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const input = await screen.findByPlaceholderText('Добавить задачу на этот день…');
+    fireEvent.change(input, { target: { value: 'Подготовить материалы' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    await waitFor(() => {
+      const post = handler.mock.calls.find(([url, init]) =>
+        String(url) === '/api/client-tasks' && (init as RequestInit)?.method === 'POST');
+      expect(post).toBeTruthy();
+      expect(JSON.parse((post![1] as RequestInit).body as string)).toMatchObject({
+        title: 'Подготовить материалы', dueAt: todayIso,
+      });
+    });
+  });
+
+  it('opens a deal from the calendar agenda when it has an expected close date', async () => {
+    stubFetch({ deals: [{ ...openDeal, expectedCloseDate: '2026-08-25' }] });
+    render(<ClientsTab />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Календарь' }));
+    fireEvent.click(await screen.findByRole('gridcell', { name: /25\.08\.2026/ }));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Сайт для Zenith' }));
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
   });
 });

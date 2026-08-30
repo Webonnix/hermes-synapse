@@ -296,3 +296,39 @@ def task_stats() -> Dict[str, int]:
         "overdue": row["overdue_count"] or 0,
         "dueToday": row["due_today_count"] or 0,
     }
+
+
+def daily_digest_text(max_per_section: int = 10) -> Optional[str]:
+    """The CRM's one piece of proactive reminding: what to say in the daily
+    Telegram digest (see main.py's `_crm_reminder_task`), or `None` when
+    there is nothing overdue or due today — a quiet day should not still
+    produce a message.
+
+    Pure and DB-only: no Telegram client here, so it is trivial to unit test
+    without a bot token, and main.py stays the only place that knows how to
+    actually send anything.
+    """
+    open_tasks = list_tasks(status="OPEN")
+    today = _today()
+    overdue = [task for task in open_tasks if task["overdue"]]
+    due_today = [task for task in open_tasks if task["dueAt"] and task["dueAt"][:10] == today and not task["overdue"]]
+    if not overdue and not due_today:
+        return None
+
+    def section(title: str, tasks: List[Dict[str, Any]]) -> List[str]:
+        lines = [f"{title} ({len(tasks)}):"]
+        lines.extend(f"• {task['title']}" for task in tasks[:max_per_section])
+        if len(tasks) > max_per_section:
+            lines.append(f"…и ещё {len(tasks) - max_per_section}")
+        return lines
+
+    lines = ["📅 CRM: задачи на сегодня"]
+    if overdue:
+        lines.append("")
+        lines.extend(section("⚠️ Просрочено", overdue))
+    if due_today:
+        lines.append("")
+        lines.extend(section("📌 На сегодня", due_today))
+    lines.append("")
+    lines.append("Раздел «Клиенты → Задачи» в дашборде.")
+    return "\n".join(lines)

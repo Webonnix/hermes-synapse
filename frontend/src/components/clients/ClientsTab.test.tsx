@@ -96,10 +96,34 @@ function stubFetch(overrides: Record<string, unknown> = {}) {
     if (path.startsWith('/api/client-agent-connections')) return ok([]);
     if (path.startsWith('/api/client-invoices')) return ok([]);
     if (path.startsWith('/api/client-payments')) return ok([]);
+    // Deals and tasks load unconditionally on mount regardless of which pane
+    // is active (the nav badge and the Календарь pane both need them) — every
+    // test needs a real array here, or the pipeline/tasks components would
+    // see an empty object instead.
+    if (path === '/api/deals') return ok([]);
+    if (path === '/api/deals/pipeline') return ok({
+      currency: 'BYN', baseCurrency: 'USD',
+      openCount: 0, openValue: { usd: '0.00', display: '0.00' },
+      wonCount: 0, lostCount: 0, winRate: null,
+      wonThisMonthCount: 0, wonThisMonthValue: { usd: '0.00', display: '0.00' },
+      byStage: Object.fromEntries(
+        ['NEW', 'CONTACTED', 'QUALIFIED', 'PROPOSAL', 'NEGOTIATION', 'WON', 'LOST']
+          .map(stage => [stage, { count: 0, valueUsd: '0.00' }]),
+      ),
+    });
+    if (path === '/api/client-tasks') return ok([]);
+    if (path === '/api/client-tasks/stats') return ok(null);
     return ok({});
   });
   vi.stubGlobal('fetch', handler);
   return { handler, calls };
+}
+
+/** The section now opens on the pipeline by default (§CRM) — tests about the
+ *  client list switch to it explicitly via the in-page tab strip, the same
+ *  way a person would. */
+async function openClientsList() {
+  fireEvent.click(await screen.findByRole('button', { name: 'Список клиентов' }));
 }
 
 beforeEach(() => {
@@ -107,6 +131,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // ClientsTab now persists its active pane to localStorage (like
+  // smm_factory_view) — clear it, or one test's tab selection leaks into
+  // the next test's default render.
+  localStorage.clear();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -115,6 +143,7 @@ describe('ClientsTab', () => {
   it('renders the KPI row in the display currency', async () => {
     stubFetch();
     render(<ClientsTab />);
+    await openClientsList();
     expect(await screen.findByText('Всего клиентов')).toBeInTheDocument();
     expect(screen.getByText('24')).toBeInTheDocument();
     expect(screen.getByText('Активных: 18')).toBeInTheDocument();
@@ -127,6 +156,7 @@ describe('ClientsTab', () => {
   it('keeps the source currency visible next to the converted amount', async () => {
     stubFetch();
     render(<ClientsTab />);
+    await openClientsList();
     const row = (await screen.findByText('Midot Project')).closest('tr');
     expect(row).toBeTruthy();
     // Converted (BYN) is primary, the agreed USD price stays underneath.
@@ -140,6 +170,7 @@ describe('ClientsTab', () => {
   it('does not repeat the original when the currencies already match', async () => {
     stubFetch();
     render(<ClientsTab />);
+    await openClientsList();
     const row = (await screen.findByText('ShopEasy')).closest('tr');
     // Priced in BYN, displayed in BYN — nothing to disambiguate.
     expect(row!.textContent).not.toContain('≈');
@@ -148,6 +179,7 @@ describe('ClientsTab', () => {
   it('shows the agent connection state per row', async () => {
     stubFetch();
     render(<ClientsTab />);
+    await openClientsList();
     const connected = (await screen.findByText('Midot Project')).closest('tr');
     expect(within(connected!).getByText('Агент #12')).toBeInTheDocument();
     expect(within(connected!).getByText('online')).toBeInTheDocument();
@@ -160,6 +192,7 @@ describe('ClientsTab', () => {
   it('shows payment status', async () => {
     stubFetch();
     render(<ClientsTab />);
+    await openClientsList();
     expect(await screen.findByText('Оплачено')).toBeInTheDocument();
     expect(screen.getByText('Просрочено')).toBeInTheDocument();
   });
@@ -167,6 +200,7 @@ describe('ClientsTab', () => {
   it('sends search and filters to the backend rather than filtering locally', async () => {
     const { calls } = stubFetch();
     render(<ClientsTab />);
+    await openClientsList();
     await screen.findByText('Midot Project');
 
     fireEvent.change(screen.getByLabelText('Поиск клиентов'), { target: { value: 'midot' } });
@@ -183,12 +217,14 @@ describe('ClientsTab', () => {
   it('renders the empty state when there are no clients', async () => {
     stubFetch({ items: [] });
     render(<ClientsTab />);
+    await openClientsList();
     expect(await screen.findByText('Клиентов пока нет')).toBeInTheDocument();
   });
 
   it('opens the create drawer with USD preselected', async () => {
     stubFetch();
     render(<ClientsTab />);
+    await openClientsList();
     fireEvent.click(await screen.findByRole('button', { name: /Добавить клиента/ }));
     const drawer = await screen.findByRole('dialog');
     expect(within(drawer).getByLabelText('Валюта')).toHaveValue('USD');
@@ -198,6 +234,7 @@ describe('ClientsTab', () => {
   it('creates a client with amount and currency as separate fields', async () => {
     const { handler } = stubFetch();
     render(<ClientsTab />);
+    await openClientsList();
     fireEvent.click(await screen.findByRole('button', { name: /Добавить клиента/ }));
     const drawer = await screen.findByRole('dialog');
 
@@ -229,29 +266,35 @@ describe('ClientsTab', () => {
 
     stubFetch({ dashboardForbidden: true, items: [rowWithoutMoney] });
     render(<ClientsTab />);
+    await openClientsList();
 
     expect(await screen.findByText('Midot Project')).toBeInTheDocument();
     expect(screen.queryByText('MRR')).not.toBeInTheDocument();
     expect(screen.queryByText('Стоимость')).not.toBeInTheDocument();
   });
 
-  it('shows a permission message rather than a blank page when the sidebar forces an invoices/payments pane the role cannot see', async () => {
-    // Pane navigation now lives in the sidebar (App.tsx), so a role without
-    // clients.financials.view can still be routed here via `pane` — the
-    // component must say why it's empty, not render nothing.
+  it('shows a permission message rather than a blank page for a pane the role cannot see', async () => {
+    // A role without clients.financials.view can still click into "Счета" —
+    // the component must say why it's empty, not render nothing.
     stubFetch({ dashboardForbidden: true });
-    render(<ClientsTab pane="invoices" />);
+    render(<ClientsTab />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Счета' }));
     expect(await screen.findByText('Недостаточно прав для просмотра счетов.')).toBeInTheDocument();
   });
 
-  it('starts on the clients pane by default and switches when the sidebar drives it', async () => {
+  it('opens on the deals pipeline by default and switches panes via the in-page tab strip', async () => {
     stubFetch();
-    const { rerender } = render(<ClientsTab />);
-    // No `pane` prop: the component manages its own state, defaulting to the
-    // clients list — this is what keeps it usable outside App.tsx's sidebar.
+    render(<ClientsTab />);
+    // No navigation prop at all — the component owns its own pane state and,
+    // like Content Factory and SMM Factory, defaults to the pipeline rather
+    // than a static list.
+    expect(await screen.findByText('Открытых сделок')).toBeInTheDocument();
+    expect(screen.queryByText('Midot Project')).not.toBeInTheDocument();
+
+    await openClientsList();
     expect(await screen.findByText('Midot Project')).toBeInTheDocument();
 
-    rerender(<ClientsTab pane="connections" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Подключения' }));
     await waitFor(() => {
       expect(screen.queryByText('Midot Project')).not.toBeInTheDocument();
     });
@@ -260,6 +303,7 @@ describe('ClientsTab', () => {
   it('shows the total count, not the page size', async () => {
     stubFetch();
     render(<ClientsTab />);
+    await openClientsList();
     expect(await screen.findByText(/Показано 1–2 из 2/)).toBeInTheDocument();
   });
 });

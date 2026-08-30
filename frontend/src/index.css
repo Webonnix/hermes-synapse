@@ -3132,6 +3132,269 @@ main.simple-chat-page { min-width: 0; padding: 0 !important; overflow: hidden !i
   color: var(--text-dim);
 }
 
+/* ═══ CRM: calendar (Календарь) ═══════════════════════════════════════════ */
+.cl-cal-reminder-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 11px 14px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.cl-cal-reminder-note svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--accent-cyan);
+}
+
+.cl-cal-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 16px;
+  align-items: start;
+}
+
+.cl-cal-board {
+  padding: 14px;
+}
+
+.cl-cal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.cl-cal-header strong {
+  font-size: 0.95rem;
+  text-transform: capitalize;
+}
+
+.cl-cal-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cl-cal-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 6px;
+  margin-bottom: 6px;
+  padding: 0 2px;
+}
+
+.cl-cal-weekdays span {
+  font: 700 0.66rem var(--font-mono);
+  text-transform: uppercase;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.cl-cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 6px;
+}
+
+.cl-cal-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-height: 74px;
+  padding: 6px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.015);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.cl-cal-cell:hover {
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.cl-cal-cell.is-outside {
+  opacity: 0.4;
+}
+
+.cl-cal-cell.is-today {
+  border-color: rgba(115, 217, 255, 0.4);
+  background: rgba(115, 217, 255, 0.06);
+}
+
+.cl-cal-cell.is-selected {
+  border-color: rgba(155, 136, 255, 0.55);
+  background: rgba(155, 136, 255, 0.1);
+}
+
+.cl-cal-cell-date {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font: 700 0.76rem var(--font-mono);
+  color: var(--text-muted);
+}
+
+.cl-cal-cell.is-today .cl-cal-cell-date {
+  color: var(--accent-cyan);
+}
+
+.cl-cal-cell-top {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.cl-cal-overdue-flag {
+  color: var(--danger);
+}
+
+.cl-cal-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cl-cal-chip {
+  font-size: 0.64rem;
+  padding: 1px 5px;
+  border-radius: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  background: rgba(155, 136, 255, 0.16);
+}
+
+.cl-cal-chip.is-overdue {
+  background: rgba(255, 93, 143, 0.18);
+  color: #ffb3c8;
+}
+
+.cl-cal-chip.is-deal {
+  background: rgba(115, 217, 255, 0.16);
+}
+
+.cl-cal-chip-more {
+  font: 600 0.62rem var(--font-mono);
+  color: var(--text-dim);
+}
+
+.cl-cal-legend {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
+.cl-cal-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cl-cal-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: rgba(155, 136, 255, 0.6);
+}
+
+.cl-cal-dot.is-overdue { background: var(--danger); }
+.cl-cal-dot.is-deal { background: var(--accent-cyan); }
+
+.cl-cal-agenda {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  position: sticky;
+  top: 0;
+}
+
+.cl-cal-agenda-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 10px 0;
+  list-style: none;
+}
+
+.cl-cal-agenda-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+  border-radius: 7px;
+  font-size: 0.8rem;
+  flex-wrap: wrap;
+}
+
+.cl-cal-agenda-item:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.cl-cal-agenda-item.is-overdue {
+  color: #ffb3c8;
+}
+
+.cl-cal-agenda-icon {
+  display: inline-flex;
+  color: var(--text-dim);
+}
+
+.cl-cal-agenda-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  background: none;
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
+  cursor: pointer;
+}
+
+.cl-cal-agenda-link:hover {
+  color: var(--accent-cyan);
+}
+
+.cl-cal-agenda-sub {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  margin-left: 21px;
+  width: 100%;
+}
+
+.cl-cal-quick-add {
+  display: flex;
+  gap: 6px;
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.cl-cal-quick-add .form-input {
+  flex: 1;
+}
+
+@media (max-width: 900px) {
+  .cl-cal-layout { grid-template-columns: 1fr; }
+  .cl-cal-agenda { position: static; }
+  .cl-cal-cell { min-height: 58px; }
+}
+
 /* ═══ CRM: client notes (Заметки) ═════════════════════════════════════════ */
 .cl-note-composer {
   display: flex;
@@ -3185,61 +3448,3 @@ main.simple-chat-page { min-width: 0; padding: 0 !important; overflow: hidden !i
   .cl-kanban-column { flex-basis: 240px; width: 240px; }
 }
 
-/* ── sidebar submenu (Клиенты → Список клиентов/Подключения/Счета/Платежи) ──
-   Nested navigation inside the left rail, distinct from .navBtn (App.tsx
-   inline styles) since it's a new pattern this sidebar didn't have before —
-   every other section navigates via an in-page tab bar instead. Indented and
-   quieter than the parent item so the hierarchy reads at a glance. */
-.sidebar-submenu {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin: 2px 0 4px 14px;
-  padding-left: 12px;
-  border-left: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.sidebar-submenu button {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  min-height: 32px;
-  padding: 6px 10px;
-  border-radius: 7px;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--text-dim);
-  font: 600 0.72rem var(--font-sans);
-  text-align: left;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.sidebar-submenu button:hover {
-  color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.sidebar-submenu button.is-active {
-  color: var(--accent-cyan);
-  background: rgba(115, 217, 255, 0.1);
-  border-color: rgba(115, 217, 255, 0.22);
-}
-
-.sidebar-submenu button svg {
-  flex-shrink: 0;
-}
-
-/* Overdue-task count on the "Задачи" submenu item — same warning tone as
-   .admin-stat-card.is-warning, so a person reads it the same way whether it
-   shows up here or as a KPI card inside the pane itself. */
-.sidebar-submenu-badge {
-  margin-left: auto;
-  min-width: 16px;
-  padding: 1px 5px;
-  border-radius: 9px;
-  background: rgba(255, 195, 72, 0.22);
-  color: #ffe1a1;
-  font: 700 0.62rem var(--font-mono);
-  text-align: center;
-}

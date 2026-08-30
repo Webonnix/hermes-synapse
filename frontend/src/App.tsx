@@ -22,15 +22,8 @@ import {
   Trello,
   Briefcase,
   Coins,
-  ChevronDown,
-  Users,
-  Bot,
-  FileText,
-  Wallet,
   Factory,
-  Megaphone,
-  Target,
-  ListChecks
+  Megaphone
 } from 'lucide-react';
 
 import type { AppSettings, ChatMessage, ChatSession, DecisionLog, ActivityLog, SystemConfig, AgentModel, Project, SystemStats } from './types';
@@ -69,7 +62,7 @@ import { VexaCommandCenter } from './components/VexaCommandCenter';
 import type { DashboardRoute } from './components/vexa/vexaDashboardTypes';
 import { DevRunsTab } from './components/DevRunsTab';
 import { KanbanTab } from './components/KanbanTab';
-import { ClientsTab, type Pane as ClientsPane } from './components/ClientsTab';
+import { ClientsTab } from './components/ClientsTab';
 import { CurrencySettingsTab } from './components/CurrencySettingsTab';
 import { AppHeader } from './components/AppHeader';
 import type { DevRunEvent } from './types';
@@ -108,11 +101,7 @@ export default function App() {
     const savedTab = localStorage.getItem('jarvis_active_tab');
     return (savedTab && legacySettingsTabs.includes(savedTab) ? savedTab : 'config') as any;
   });
-  /** Which pane of the Клиенты section is open — set from the sidebar's
-   *  submenu, read back there to highlight the active item. Defaults to the
-   *  pipeline: a CRM opens on "what needs working", not a static list. */
-  const [clientsPane, setClientsPane] = useState<ClientsPane>('deals');
-  /** Overdue-task count for the "Задачи" sidebar badge — polled independently
+  /** Overdue-task count for the Клиенты nav badge — polled independently
    *  of ClientsTab (same reason AppHeader polls its own approvals count):
    *  the badge has to stay live while the user is on an entirely different
    *  tab, where ClientsTab itself is unmounted. */
@@ -2410,72 +2399,17 @@ export default function App() {
             style={navStyle('clients')}
             onClick={() => { setActiveTab('clients'); setSidebarOpen(false); }}
             title={t('navClients')}
-            aria-expanded={activeTab === 'clients'}
           >
             <Briefcase size={18} />
             <span>{t('navClients')}</span>
-            {!isSidebarCollapsed && (
-              <ChevronDown
-                size={14}
-                style={{
-                  marginLeft: 'auto', flexShrink: 0, transition: 'transform 0.15s ease',
-                  transform: activeTab === 'clients' ? 'rotate(0deg)' : 'rotate(-90deg)',
-                }}
-              />
+            {overdueTaskCount > 0 && !isSidebarCollapsed && (
+              <span style={{
+                marginLeft: 'auto', minWidth: 16, padding: '1px 5px', borderRadius: 9,
+                background: 'rgba(255, 195, 72, 0.22)', color: '#ffe1a1',
+                font: '700 0.62rem var(--font-mono)', textAlign: 'center',
+              }}>{overdueTaskCount}</span>
             )}
           </button>
-
-          {/* Sub-navigation for the Клиенты section — the four panes that
-              used to be an in-page tab bar now live here, so the sidebar is
-              the one place a client's data is found (matches the reference
-              layout instead of a second nav row inside the content area). */}
-          {activeTab === 'clients' && !isSidebarCollapsed && (
-            <div className="sidebar-submenu" role="group" aria-label={t('navClients')}>
-              <button
-                type="button"
-                className={clientsPane === 'deals' ? 'is-active' : ''}
-                onClick={() => { setClientsPane('deals'); setSidebarOpen(false); }}
-              >
-                <Target size={14} /><span>Сделки</span>
-              </button>
-              <button
-                type="button"
-                className={clientsPane === 'clients' ? 'is-active' : ''}
-                onClick={() => { setClientsPane('clients'); setSidebarOpen(false); }}
-              >
-                <Users size={14} /><span>Список клиентов</span>
-              </button>
-              <button
-                type="button"
-                className={clientsPane === 'connections' ? 'is-active' : ''}
-                onClick={() => { setClientsPane('connections'); setSidebarOpen(false); }}
-              >
-                <Bot size={14} /><span>Подключения агентов</span>
-              </button>
-              <button
-                type="button"
-                className={clientsPane === 'invoices' ? 'is-active' : ''}
-                onClick={() => { setClientsPane('invoices'); setSidebarOpen(false); }}
-              >
-                <FileText size={14} /><span>Счета</span>
-              </button>
-              <button
-                type="button"
-                className={clientsPane === 'payments' ? 'is-active' : ''}
-                onClick={() => { setClientsPane('payments'); setSidebarOpen(false); }}
-              >
-                <Wallet size={14} /><span>Платежи</span>
-              </button>
-              <button
-                type="button"
-                className={clientsPane === 'tasks' ? 'is-active' : ''}
-                onClick={() => { setClientsPane('tasks'); setSidebarOpen(false); }}
-              >
-                <ListChecks size={14} /><span>Задачи</span>
-                {overdueTaskCount > 0 && <span className="sidebar-submenu-badge">{overdueTaskCount}</span>}
-              </button>
-            </div>
-          )}
 
           <button
             style={navStyle('agents')}
@@ -2770,10 +2704,7 @@ export default function App() {
         )}
 
         {activeTab === 'clients' && (
-          <ClientsTab
-            onOpenAgent={() => { setActiveTab('agents'); }}
-            pane={clientsPane}
-          />
+          <ClientsTab onOpenAgent={() => { setActiveTab('agents'); }} />
         )}
 
         {activeTab === 'agents' && (
