@@ -9,6 +9,8 @@ from typing import Awaitable, Callable, List, Dict, Any, Optional, Set
 import httpx
 from dotenv import load_dotenv
 
+from backend.tool_permissions import MAIN_AGENT_ID, LEGACY_MAIN_AGENT_ID
+
 logger = logging.getLogger("hermes.agent")
 
 
@@ -502,8 +504,8 @@ def _record_paid_tool_spend(agent_id: str, session_id: str, tool_name: str, cost
 # _respond_as_subagent already resolves a *sub*-agent's own model_provider row
 # before calling it (see the subagent_provider_id block further down). The two
 # run_orchestration() call sites below never did the same for the calling
-# agent itself (almost always "jarvis") — they passed self.api_key/self.model
-# straight through, so switching jarvis's own provider via the Agent Admin
+# agent itself (Vexa, id "vexa") — they passed self.api_key/self.model
+# straight through, so switching Vexa's own provider via the Agent Admin
 # panel or the Vexa dashboard's quick-switch widget silently had no effect on
 # the actual orchestration/synthesis calls. These two helpers replicate the
 # exact same resolve-or-fall-back-to-local pattern for that entry point.
@@ -1113,7 +1115,7 @@ CRITICAL RULES FOR OBSIDIAN:
 If the user asks what you can do, or requests info about a specific skill, describe its capabilities in a detailed, polite, and signature manner using these user-friendly names. Never use technical function names like "get_weather" in dialogue unless the user explicitly asks for them.
 """
 
-class JarvisAgent:
+class VexaAgent:
     def __init__(self):
         self.provider = os.getenv("LLM_PROVIDER", "ollama").strip().lower()
         self.lock_provider_endpoint = _env_bool("LLM_LOCK_PROVIDER_ENDPOINT", False)
@@ -1515,14 +1517,14 @@ class JarvisAgent:
         try:
             from backend.database import update_agent_runtime_state, log_agent_event
             update_agent_runtime_state(
-                "jarvis",
+                MAIN_AGENT_ID,
                 status="working",
                 current_task=user_message,
                 last_action="Routing chat request",
                 last_error="",
                 progress=10,
             )
-            log_agent_event("jarvis", "task_received", user_message, "working", task=user_message)
+            log_agent_event(MAIN_AGENT_ID, "task_received", user_message, "working", task=user_message)
         except Exception:
             pass
 
@@ -1571,10 +1573,10 @@ class JarvisAgent:
         if complexity in ("agent", "orchestrate"):
             logger.info("Routing query to Agentic Orchestration graph...")
             from backend.orchestrator import run_orchestration
-            from backend.database import get_subagent as _get_jarvis_row
-            jarvis_row = _get_jarvis_row("jarvis") or {}
+            from backend.database import get_subagent as _get_vexa_row
+            vexa_row = _get_vexa_row(MAIN_AGENT_ID) or _get_vexa_row(LEGACY_MAIN_AGENT_ID) or {}
             orch_api_base, orch_api_key, orch_model, orch_provider_name, orch_is_external, orch_provider_id = _resolve_agent_llm_config(
-                jarvis_row, self.api_base, self.api_key, self.model, self.provider
+                vexa_row, self.api_base, self.api_key, self.model, self.provider
             )
 
             hits = []
@@ -1600,7 +1602,7 @@ class JarvisAgent:
                 context_query = f"{context_query}\n\n{project_memory}"
                 
             start_time = time.time()
-            budget_status = _agent_budget_exceeded_status("jarvis") if orch_is_external else None
+            budget_status = _agent_budget_exceeded_status(MAIN_AGENT_ID) if orch_is_external else None
             try:
                 if budget_status:
                     response_text = (
@@ -1635,7 +1637,7 @@ class JarvisAgent:
                 try:
                     from backend.database import update_agent_runtime_state, log_agent_event
                     update_agent_runtime_state(
-                        "jarvis",
+                        MAIN_AGENT_ID,
                         status="idle" if error_msg is None else "error",
                         current_task="",
                         last_action="Orchestration finished" if error_msg is None else "Orchestration failed",
@@ -1643,7 +1645,7 @@ class JarvisAgent:
                         progress=100,
                     )
                     log_agent_event(
-                        "jarvis",
+                        MAIN_AGENT_ID,
                         "task_completed" if error_msg is None else "error",
                         "Orchestration finished." if error_msg is None else error_msg,
                         "success" if error_msg is None else "error",
@@ -2013,7 +2015,7 @@ class JarvisAgent:
                             source="Agent",
                             message=f"Выполнение через Control Plane: '{tool_name}'"
                         )
-                        if tool_name in PAID_TOOLS and (blocked := _paid_tool_budget_block("jarvis", tool_name)):
+                        if tool_name in PAID_TOOLS and (blocked := _paid_tool_budget_block(MAIN_AGENT_ID, tool_name)):
                             result_str = blocked
                         else:
                             from backend.control_plane import execute_governed_tool
@@ -2031,7 +2033,7 @@ class JarvisAgent:
                                 try:
                                     parsed_spend = json.loads(result_str)
                                     if isinstance(parsed_spend, dict) and "error" not in parsed_spend and parsed_spend.get("cost_usd"):
-                                        _record_paid_tool_spend("jarvis", session_id, tool_name, float(parsed_spend["cost_usd"]))
+                                        _record_paid_tool_spend(MAIN_AGENT_ID, session_id, tool_name, float(parsed_spend["cost_usd"]))
                                 except Exception:
                                     pass
 
@@ -2096,7 +2098,7 @@ class JarvisAgent:
         try:
             from backend.database import update_agent_runtime_state, log_agent_event
             update_agent_runtime_state(
-                "jarvis",
+                MAIN_AGENT_ID,
                 status="idle" if error_msg is None else "error",
                 current_task="",
                 last_action="Response delivered" if error_msg is None else "Response failed",
@@ -2104,7 +2106,7 @@ class JarvisAgent:
                 progress=100,
             )
             log_agent_event(
-                "jarvis",
+                MAIN_AGENT_ID,
                 "task_completed" if error_msg is None else "error",
                 "Response delivered to chat." if error_msg is None else error_msg,
                 "success" if error_msg is None else "error",
@@ -2189,6 +2191,7 @@ class JarvisAgent:
         chat_id: Optional[str] = None,
         current_user_msg_id: Optional[int] = None,
         stream_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        images: Optional[List[str]] = None,
     ) -> str:
         """Runs response generation loop specifically tailored for a dynamic subagent session."""
         session_id = chat_id or subagent["id"]
@@ -2370,7 +2373,13 @@ class JarvisAgent:
         messages = [{"role": "system", "content": system_prompt + system_info}]
         for msg in history:
             messages.append({"role": msg["role"], "content": msg["content"]})
-        messages.append({"role": "user", "content": user_content})
+        subagent_user_payload: Dict[str, Any] = {"role": "user", "content": user_content}
+        if images:
+            # Same convention as respond(): only the native Ollama chat path forwards
+            # this field, OpenAI-compatible providers strip it silently — see the
+            # comment on the equivalent block above in respond().
+            subagent_user_payload["images"] = images
+        messages.append(subagent_user_payload)
 
         # Sensitive-data redaction for anything routed to an external provider now
         # happens once, centrally, in llm_client.call_llm_normalized — gated on the
@@ -2880,4 +2889,4 @@ def translate_to_openai_response(anthropic_response):
     return openai_response
 
 # Singleton instance
-agent_instance = JarvisAgent()
+agent_instance = VexaAgent()

@@ -17,6 +17,7 @@ combination.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import respx
@@ -27,6 +28,7 @@ class FakeTelegramAPI:
     def __init__(self, bot_username: str = "test_bot") -> None:
         self.bot_username = bot_username
         self.sent_messages: list[dict[str, Any]] = []
+        self.sent_photos: list[dict[str, Any]] = []
         self.get_me_calls = 0
 
     def install(self, router: respx.MockRouter, token: str) -> None:
@@ -41,6 +43,8 @@ class FakeTelegramAPI:
             return self._handle_get_me()
         if method == "sendMessage":
             return self._handle_send_message(request)
+        if method == "sendPhoto":
+            return self._handle_send_photo(request)
         # getUpdates (long-poll), deleteWebhook, and anything else PTB's
         # startup/shutdown lifecycle calls: a generic "ok" response is
         # enough since none of it is asserted on in tests.
@@ -61,6 +65,24 @@ class FakeTelegramAPI:
                     "can_read_all_group_messages": False,
                     "supports_inline_queries": False,
                 },
+            },
+        )
+
+    def _handle_send_photo(self, request) -> Response:
+        # Multipart body (chat_id as a form field, photo as a file part) --
+        # good enough for tests to assert on without a full multipart parser.
+        body = request.content
+        chat_id_match = re.search(rb'name="chat_id"\r\n\r\n(.*?)\r\n--', body, re.S)
+        filename_match = re.search(rb'filename="([^"]+)"', body)
+        self.sent_photos.append({
+            "chat_id": chat_id_match.group(1).decode() if chat_id_match else None,
+            "filename": filename_match.group(1).decode() if filename_match else None,
+        })
+        return Response(
+            200,
+            json={
+                "ok": True,
+                "result": {"message_id": len(self.sent_photos), "date": 0, "chat": {}, "photo": []},
             },
         )
 

@@ -153,13 +153,31 @@ async def send_to_channel(binding_id: str, platform: str, chat_id: str, final_te
             raise RuntimeError("This channel's bot token is no longer available — was it revoked?")
         import httpx
 
-        async with httpx.AsyncClient(timeout=15) as client:
-            for chunk in agent_bot._split_text(final_text):
-                response = await client.post(
-                    f"https://api.telegram.org/bot{token}/sendMessage",
-                    json={"chat_id": reply["chat_id"], "text": chunk},
-                )
-                response.raise_for_status()
+        # A drafted reply may embed one of our own /api/plots or
+        # /api/generated-images markdown links (e.g. from the generate_image
+        # tool) — Telegram can't fetch those from localhost, so resolve them
+        # to the actual file on disk and send it as a real photo attachment.
+        clean_text, image_paths = agent_bot.extract_local_images(final_text)
+        async with httpx.AsyncClient(timeout=30) as client:
+            for path in image_paths:
+                try:
+                    with open(path, "rb") as photo:
+                        response = await client.post(
+                            f"https://api.telegram.org/bot{token}/sendPhoto",
+                            data={"chat_id": reply["chat_id"]},
+                            files={"photo": (os.path.basename(path), photo.read())},
+                        )
+                        response.raise_for_status()
+                except Exception:
+                    logger.exception("Failed to send attached image %s for reply", path)
+            text_to_send = clean_text if image_paths else final_text
+            if text_to_send.strip():
+                for chunk in agent_bot._split_text(text_to_send):
+                    response = await client.post(
+                        f"https://api.telegram.org/bot{token}/sendMessage",
+                        json={"chat_id": reply["chat_id"], "text": chunk},
+                    )
+                    response.raise_for_status()
     elif reply["platform"] == "matrix":
         from backend import agent_matrix_bot
 
