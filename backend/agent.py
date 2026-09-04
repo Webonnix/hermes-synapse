@@ -1157,6 +1157,14 @@ class VexaAgent:
         self.suppress_tts_sessions = set()
         self.last_run_metadata: Dict[str, Dict[str, Any]] = {}
         self.last_saved_ids: Dict[str, Dict[str, Optional[int]]] = {}
+        # generate_image's own /api/generated-images/<uuid>.png URL, captured
+        # straight from the tool result rather than re-parsed out of the
+        # model's final text -- a long hex filename echoed back by the model
+        # itself is exactly the kind of string LLMs drop/transpose a
+        # character in, which left a real generated photo undelivered with
+        # only a broken markdown link shown to the user. See agent_bot.py's
+        # extract_local_images(known_urls=...).
+        self.last_generated_images: Dict[str, List[str]] = {}
         self._load_persisted_runtime_config()
 
     def _load_persisted_runtime_config(self):
@@ -1366,6 +1374,7 @@ class VexaAgent:
         from backend import database as db
         current_user_msg_id = db.save_message(session_id, "user", user_message)
         self.last_saved_ids[session_id] = {"user": current_user_msg_id, "assistant": None}
+        self.last_generated_images[session_id] = []
 
         # Check if this session is a registered custom subagent
         from backend.database import get_subagent, get_session_agent_id
@@ -2034,6 +2043,10 @@ class VexaAgent:
                                     parsed_spend = json.loads(result_str)
                                     if isinstance(parsed_spend, dict) and "error" not in parsed_spend and parsed_spend.get("cost_usd"):
                                         _record_paid_tool_spend(MAIN_AGENT_ID, session_id, tool_name, float(parsed_spend["cost_usd"]))
+                                    if tool_name == "generate_image" and isinstance(parsed_spend, dict) and parsed_spend.get("image_url"):
+                                        # Captured straight from the tool result, not re-parsed out of
+                                        # the model's own final text later — see last_generated_images.
+                                        self.last_generated_images.setdefault(session_id, []).append(parsed_spend["image_url"])
                                 except Exception:
                                     pass
 
@@ -2329,7 +2342,8 @@ class VexaAgent:
         history = await self.get_history(session_id)
         from backend import database as db
         db.save_message(session_id, "user", user_message)
-        
+        self.last_generated_images[session_id] = []
+
         hits = []
         if self.auto_rag:
             from backend import rag
@@ -2701,6 +2715,8 @@ class VexaAgent:
                                     parsed_spend = json.loads(result_str)
                                     if isinstance(parsed_spend, dict) and "error" not in parsed_spend and parsed_spend.get("cost_usd"):
                                         _record_paid_tool_spend(subagent["id"], session_id, tool_name, float(parsed_spend["cost_usd"]))
+                                    if tool_name == "generate_image" and isinstance(parsed_spend, dict) and parsed_spend.get("image_url"):
+                                        self.last_generated_images.setdefault(session_id, []).append(parsed_spend["image_url"])
                                 except Exception:
                                     pass
                         if tool_name == "list_tools":

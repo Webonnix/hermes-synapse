@@ -35,6 +35,8 @@ RUN pip install --no-cache-dir \
     "docker>=6.1.0" \
     "pandas>=2.0.0" \
     "openpyxl>=3.1.0" \
+    "pypdf>=4.0.0" \
+    "python-docx>=1.1.0" \
     "beautifulsoup4>=4.12.0" \
     "python-multipart>=0.0.7" \
     "google-auth>=2.20.0" \

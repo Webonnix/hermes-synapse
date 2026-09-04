@@ -1,7 +1,7 @@
 import pytest
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
-from backend.agent import JarvisAgent, DEFAULT_SYSTEM_PROMPT
+from backend.agent import VexaAgent, DEFAULT_SYSTEM_PROMPT
 from backend import database
 
 @pytest.fixture(autouse=True)
@@ -25,7 +25,7 @@ def setup_test_db(tmp_path):
 @pytest.fixture
 def agent():
     # Instantiate agent for testing
-    agent_inst = JarvisAgent()
+    agent_inst = VexaAgent()
     agent_inst.provider = "openrouter"
     agent_inst.api_key = "test_key"
     agent_inst.api_base = "https://openrouter.ai/api/v1"
@@ -65,7 +65,7 @@ def test_locked_provider_endpoint_ignores_persisted_dashboard_url(monkeypatch):
         "ollama_base_url": "http://127.0.0.1:11434",
     })
 
-    locked_agent = JarvisAgent()
+    locked_agent = VexaAgent()
 
     assert locked_agent.provider == "ollama"
     assert locked_agent.api_base == "http://hermes-ollama:11434"
@@ -381,6 +381,43 @@ async def test_respond_sanitizes_qwen_tool_messages_between_local_calls(mock_pos
     assert "thinking" not in assistant_message
     assert assistant_message["content"] == ""
     assert json.loads(assistant_message["tool_calls"][0]["function"]["arguments"]) == {"location": "Minsk", "days_ahead": 0}
+
+
+@pytest.mark.asyncio
+async def test_generate_image_tool_call_is_captured_in_last_generated_images(agent):
+    """The image URL a generate_image tool call actually returns must be
+    recorded on the agent (last_generated_images), independent of whatever
+    the model's own final text says -- Telegram delivery (bot.py/agent_bot.py)
+    relies on this rather than re-parsing the model's reply, since a model
+    echoing back a long generated filename is exactly the kind of string an
+    LLM can drop or transpose a character in."""
+    from backend.llm_client import LLMUsage, NormalizedLLMResponse, STATUS_SUCCESS
+
+    tool_call_response = NormalizedLLMResponse(
+        status=STATUS_SUCCESS, provider="openrouter", model=agent.model,
+        content="",
+        tool_calls=[{
+            "id": "call_1", "type": "function",
+            "function": {"name": "generate_image", "arguments": json.dumps({"prompt": "a robot"})},
+        }],
+        finish_reason="tool_calls",
+        usage=LLMUsage(input_tokens=10, output_tokens=5),
+    )
+    final_response = NormalizedLLMResponse(
+        status=STATUS_SUCCESS, provider="openrouter", model=agent.model,
+        content="Готово! ![Робот](/api/generated-images/abc123.png)",
+        finish_reason="stop",
+        usage=LLMUsage(input_tokens=20, output_tokens=10),
+    )
+    tool_result = json.dumps({"image_url": "/api/generated-images/abc123.png", "cost_usd": 0.04})
+
+    with patch.dict("os.environ", {"COMPLEXITY_ROUTING": "always_direct"}), \
+         patch("backend.llm_client.call_llm_normalized", new=AsyncMock(side_effect=[tool_call_response, final_response])), \
+         patch("backend.control_plane.execute_governed_tool", return_value=tool_result):
+        response = await agent.respond("Нарисуй робота", session_id="img_test")
+
+    assert response == "Готово! ![Робот](/api/generated-images/abc123.png)"
+    assert agent.last_generated_images["img_test"] == ["/api/generated-images/abc123.png"]
 
 @pytest.mark.asyncio
 async def test_classify_complexity():

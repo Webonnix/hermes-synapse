@@ -10,9 +10,10 @@ bot): that one dispatches across the whole agent network and owns the
 Control Plane /approve flow, this one is a dedicated line to a single agent.
 
 Besides text, a binding's bot can receive a photo (fed to the model as vision
-input) or a document (text-like files are read and injected as context; other
-formats are announced to the model by name/type/size, since no PDF/DOCX parser
-is bundled here). It can also send files back: any ``/api/plots/...`` or
+input) or a document (text/PDF/DOCX/spreadsheet files are read and injected
+as context via backend/document_extract.py; other formats are announced to
+the model by name/type/size instead of silently ignored). It can also send
+files back: any ``/api/plots/...`` or
 ``/api/generated-images/...`` markdown image link the model's response embeds
 (e.g. from the generate_image tool) is resolved to the actual file on disk and
 delivered as a Telegram photo instead of a dead-looking link — both from this
@@ -32,6 +33,8 @@ from typing import Dict, List, Optional, Tuple
 from telegram import Update
 from telegram.ext import Application, ApplicationBuilder, ContextTypes, MessageHandler, filters
 
+from backend import document_extract
+
 logger = logging.getLogger("hermes.agent_bot")
 
 TELEGRAM_TEXT_LIMIT = 3900
@@ -39,13 +42,6 @@ TELEGRAM_TEXT_LIMIT = 3900
 # Telegram bots can't fetch a file from our own localhost, so a generated image
 # markdown link only works if we resolve it to the file on disk ourselves.
 _IMAGE_LINK_RE = re.compile(r"!\[[^\]]*\]\((?:https?://[^/\s]+)?/api/(plots|generated-images)/([^)\s]+)\)")
-
-_TEXT_DOC_EXTENSIONS = {
-    ".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml",
-    ".log", ".ini", ".cfg", ".conf", ".py", ".js", ".ts", ".html", ".htm", ".css", ".sh",
-}
-_MAX_DOC_TEXT_CHARS = 12000
-_MAX_DOC_BYTES = 15 * 1024 * 1024
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _PLOTS_DIR = os.path.join(_BASE_DIR, "data", "plots")
@@ -73,32 +69,49 @@ def _split_text(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> List[str]:
     return chunks
 
 
-def _human_size(num_bytes: int) -> str:
-    size = float(num_bytes)
-    for unit in ("Б", "КБ", "МБ", "ГБ"):
-        if size < 1024:
-            return f"{size:.0f} {unit}" if unit == "Б" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{size:.1f} ТБ"
+def _resolve_local_image(url: str) -> Optional[str]:
+    """Resolves one /api/plots/... or /api/generated-images/... URL -- as
+    returned directly by a tool call, not re-typed by the model -- to the
+    file on disk, if it exists."""
+    match = re.match(r"^(?:https?://[^/\s]+)?/api/(plots|generated-images)/([^/\s?]+)$", (url or "").strip())
+    if not match:
+        return None
+    kind, filename = match.group(1), match.group(2)
+    kind_dirs = {"plots": _PLOTS_DIR, "generated-images": _GENERATED_IMAGES_DIR}
+    candidate = os.path.join(kind_dirs[kind], filename)
+    return candidate if os.path.isfile(candidate) else None
 
 
-def extract_local_images(text: str) -> Tuple[str, List[str]]:
-    """Strips markdown image links pointing at this server's own /api/plots or
-    /api/generated-images out of `text` and resolves each to a local file path.
-    Returns (text_without_those_links, [existing_file_paths]). Links that don't
-    resolve to a real file on disk are left in the text untouched."""
+def extract_local_images(text: str, known_urls: Optional[List[str]] = None) -> Tuple[str, List[str]]:
+    """Strips every /api/plots/... or /api/generated-images/... markdown image
+    link out of `text` -- Telegram can't fetch a localhost URL, and one the
+    model mistyped is dead weight either way -- and returns the local file
+    paths to actually send as photos: whatever those links resolve to, plus
+    any `known_urls` (image URLs captured straight from a tool result during
+    this turn -- see agent.py's last_generated_images), which stay correct
+    even when the model's own final text garbles the filename it echoes
+    back (a long hex UUID is exactly the kind of string an LLM drops or
+    transposes a character in). Returns (text_without_those_links, [paths])."""
     kind_dirs = {"plots": _PLOTS_DIR, "generated-images": _GENERATED_IMAGES_DIR}
     paths: List[str] = []
+    seen = set()
 
     def _sub(match: "re.Match[str]") -> str:
         kind, filename = match.group(1), match.group(2)
         candidate = os.path.join(kind_dirs[kind], filename)
-        if os.path.isfile(candidate):
+        if os.path.isfile(candidate) and candidate not in seen:
+            seen.add(candidate)
             paths.append(candidate)
-            return ""
-        return match.group(0)
+        return ""
 
     cleaned = _IMAGE_LINK_RE.sub(_sub, text).strip()
+
+    for url in (known_urls or []):
+        resolved = _resolve_local_image(url)
+        if resolved and resolved not in seen:
+            seen.add(resolved)
+            paths.append(resolved)
+
     return cleaned, paths
 
 
@@ -176,13 +189,14 @@ class AgentBotManager:
         bot_access_gate.record_turn(
             decision, agent_instance.last_run_metadata.get(session_id), response_text
         )
+        generated_image_urls = list(agent_instance.last_generated_images.get(session_id, []))
 
         mode = bot_access_gate.effective_response_mode(
             decision, self._response_modes.get(binding_id, "draft")
         )
         if mode == "auto_labeled":
             from backend.agent_messenger_governance import auto_reply_disclosure
-            clean_text, image_paths = extract_local_images(response_text)
+            clean_text, image_paths = extract_local_images(response_text, known_urls=generated_image_urls)
             for path in image_paths:
                 try:
                     with open(path, "rb") as photo:
@@ -197,9 +211,11 @@ class AgentBotManager:
             return
 
         # draft mode: never send anything to the other person automatically —
-        # queue it and let the owner review/send from the dashboard. The
-        # drafted text keeps any image markdown links as-is; send_pending_reply
-        # (backend/channel_replies.py) resolves and attaches them at send time.
+        # queue it and let the owner review/send from the dashboard.
+        # generated_image_urls rides along as its own column (not just parsed
+        # back out of drafted_reply later) so a mistyped filename in the
+        # model's own text still doesn't lose the actual generated photo —
+        # send_pending_reply (backend/channel_replies.py) sends both.
         from backend.channel_replies import create_pending_reply
         incoming_from = f"@{sender.username}" if sender and sender.username else (str(sender.id) if sender else "")
         create_pending_reply(
@@ -210,6 +226,7 @@ class AgentBotManager:
             incoming_text=gate_text,
             drafted_reply=response_text,
             incoming_from=incoming_from,
+            image_urls=generated_image_urls,
         )
 
     def _make_handler(self, binding_id: str, subagent_id: str):
@@ -256,11 +273,12 @@ class AgentBotManager:
             caption = (update.message.caption or "").strip()
             file_name = doc.file_name or "без имени"
 
-            if doc.file_size and doc.file_size > _MAX_DOC_BYTES:
+            if doc.file_size and doc.file_size > document_extract.MAX_DOWNLOAD_BYTES:
                 prompt = (
-                    f"Пользователь прислал файл «{file_name}» ({_human_size(doc.file_size)}) — он слишком "
-                    f"большой, чтобы прочитать содержимое (лимит {_human_size(_MAX_DOC_BYTES)}). Сообщи "
-                    f"об этом и уточни, что нужно сделать с файлом."
+                    f"Пользователь прислал файл «{file_name}» ({document_extract.human_size(doc.file_size)}) — он "
+                    f"слишком большой, чтобы прочитать содержимое (лимит "
+                    f"{document_extract.human_size(document_extract.MAX_DOWNLOAD_BYTES)}). Сообщи об этом и уточни, "
+                    f"что нужно сделать с файлом."
                 )
             else:
                 try:
@@ -271,30 +289,9 @@ class AgentBotManager:
                     await update.message.reply_text("Не удалось загрузить файл.")
                     return
 
-                ext = os.path.splitext(file_name)[1].lower()
-                text_content: Optional[str] = None
-                if ext in _TEXT_DOC_EXTENSIONS or (doc.mime_type or "").startswith("text/"):
-                    try:
-                        text_content = data.decode("utf-8")
-                    except UnicodeDecodeError:
-                        text_content = None
-
-                if text_content is not None:
-                    truncated = text_content[:_MAX_DOC_TEXT_CHARS]
-                    note = (
-                        "\n\n[Файл обрезан — показана только начальная часть.]"
-                        if len(text_content) > _MAX_DOC_TEXT_CHARS else ""
-                    )
-                    prompt = (
-                        (caption or f"Пользователь прислал файл «{file_name}». Проанализируй его содержимое и ответь по существу.")
-                        + f"\n\n[Содержимое файла «{file_name}»]:\n{truncated}{note}"
-                    )
-                else:
-                    prompt = caption or (
-                        f"Пользователь прислал файл «{file_name}» ({doc.mime_type or 'неизвестный тип'}, "
-                        f"{_human_size(doc.file_size or len(data))}). Текст в этом формате нельзя прочитать "
-                        f"автоматически — уточни у пользователя, что нужно сделать с этим файлом."
-                    )
+                prompt = document_extract.build_document_prompt(
+                    file_name, doc.mime_type or "", doc.file_size or len(data), data, caption
+                )
 
             await self._process_incoming(
                 binding_id, subagent_id, update, context,

@@ -14,6 +14,7 @@ from ever putting words in the owner's mouth without them seeing it first.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sqlite3
@@ -59,6 +60,19 @@ def _init_schema() -> None:
             )
             """
         )
+        try:
+            # image_urls: JSON list of /api/plots or /api/generated-images
+            # URLs captured straight from a tool call during the turn that
+            # drafted this reply (agent.py's last_generated_images) -- kept
+            # as its own column rather than only being re-parsed out of
+            # drafted_reply's markdown later, so an approved draft still
+            # delivers the actual photo even if the model's own text
+            # mistyped the filename it echoed back.
+            connection.execute(
+                "ALTER TABLE pending_channel_replies ADD COLUMN image_urls TEXT NOT NULL DEFAULT '[]'"
+            )
+        except sqlite3.OperationalError:
+            pass  # already migrated
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -73,6 +87,7 @@ def create_pending_reply(
     incoming_text: str,
     drafted_reply: str,
     incoming_from: str = "",
+    image_urls: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     _init_schema()
     reply_id = f"draft-{uuid.uuid4().hex[:12]}"
@@ -82,11 +97,11 @@ def create_pending_reply(
             """
             INSERT INTO pending_channel_replies
                 (id, binding_id, platform, subagent_id, chat_id, incoming_from,
-                 incoming_text, drafted_reply, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                 incoming_text, drafted_reply, status, created_at, updated_at, image_urls)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
             """,
             (reply_id, binding_id, platform, subagent_id, chat_id, incoming_from,
-             incoming_text, drafted_reply, now, now),
+             incoming_text, drafted_reply, now, now, json.dumps(image_urls or [])),
         )
         row = connection.execute("SELECT * FROM pending_channel_replies WHERE id = ?", (reply_id,)).fetchone()
     result = _row_to_dict(row)
@@ -132,12 +147,22 @@ async def send_pending_reply(reply_id: str, edited_text: Optional[str] = None) -
     if not final_text:
         raise ValueError("Cannot send an empty reply")
 
-    await send_to_channel(reply["binding_id"], reply["platform"], reply["chat_id"], final_text)
+    try:
+        known_image_urls = json.loads(reply.get("image_urls") or "[]")
+    except (TypeError, ValueError):
+        known_image_urls = []
+    await send_to_channel(
+        reply["binding_id"], reply["platform"], reply["chat_id"], final_text,
+        known_image_urls=known_image_urls,
+    )
     _set_status(reply_id, "sent", sent_at=_now())
     return get_pending_reply(reply_id)
 
 
-async def send_to_channel(binding_id: str, platform: str, chat_id: str, final_text: str) -> None:
+async def send_to_channel(
+    binding_id: str, platform: str, chat_id: str, final_text: str,
+    known_image_urls: Optional[list[str]] = None,
+) -> None:
     """Delivers one message on a bound channel, using that channel's own stored
     credential. Split out of send_pending_reply() so the billing webhook can
     tell a buyer their access is open on the same line they bought it
@@ -157,7 +182,10 @@ async def send_to_channel(binding_id: str, platform: str, chat_id: str, final_te
         # /api/generated-images markdown links (e.g. from the generate_image
         # tool) — Telegram can't fetch those from localhost, so resolve them
         # to the actual file on disk and send it as a real photo attachment.
-        clean_text, image_paths = agent_bot.extract_local_images(final_text)
+        # known_image_urls (captured straight from the tool call that drafted
+        # this reply) still gets the photo out even if the model's own text
+        # mistyped the filename it echoed back.
+        clean_text, image_paths = agent_bot.extract_local_images(final_text, known_urls=known_image_urls)
         async with httpx.AsyncClient(timeout=30) as client:
             for path in image_paths:
                 try:

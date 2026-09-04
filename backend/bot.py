@@ -515,8 +515,12 @@ async def _process_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # embedded in the reply (matplotlib charts, or the generate_image tool) to
     # the actual file on disk, so it can go out as a real Telegram photo
     # instead of a dead-looking localhost link. Shared with agent_bot.py.
+    # generated_image_urls comes straight from the tool call itself (see
+    # agent.py's last_generated_images) so a photo still gets delivered even
+    # if the model's own final text mistyped the filename it echoed back.
     from backend import agent_bot as _agent_bot
-    clean_response_text, image_paths = _agent_bot.extract_local_images(response_text)
+    generated_image_urls = agent_instance.last_generated_images.get(str(chat_id), [])
+    clean_response_text, image_paths = _agent_bot.extract_local_images(response_text, known_urls=generated_image_urls)
     reply_mode = getattr(agent_instance, "telegram_reply_mode", "text")
     send_text = reply_mode in ("text", "both")
     send_voice = reply_mode in ("voice", "both")
@@ -735,6 +739,49 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @admin_only
+async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Downloads a Telegram document, extracts readable text when the format
+    supports it (text/PDF/DOCX/spreadsheets -- see backend/document_extract.py),
+    and routes it into a normal agent turn, same as a typed message."""
+    if not _is_allowed_chat(update):
+        logger.warning("Ignoring document from unauthorized chat_id=%s", update.effective_chat.id if update.effective_chat else None)
+        return
+
+    if not update.message or not update.message.document:
+        return
+
+    doc = update.message.document
+    chat_id = update.effective_chat.id
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+    from backend import document_extract
+
+    file_name = doc.file_name or "без имени"
+    caption = (update.message.caption or "").strip()
+
+    if doc.file_size and doc.file_size > document_extract.MAX_DOWNLOAD_BYTES:
+        prompt = (
+            f"Пользователь прислал файл «{file_name}» ({document_extract.human_size(doc.file_size)}) — он "
+            f"слишком большой, чтобы прочитать содержимое (лимит "
+            f"{document_extract.human_size(document_extract.MAX_DOWNLOAD_BYTES)}). Сообщи об этом и уточни, "
+            f"что нужно сделать с файлом."
+        )
+        await _run_user_request(update, context, prompt)
+        return
+
+    try:
+        tg_file = await doc.get_file()
+        data = bytes(await tg_file.download_as_bytearray())
+    except Exception:
+        logger.exception("Telegram document download failed")
+        await update.message.reply_text("Не удалось загрузить файл.")
+        return
+
+    prompt = document_extract.build_document_prompt(file_name, doc.mime_type or "", doc.file_size or len(data), data, caption)
+    await _run_user_request(update, context, prompt)
+
+
+@admin_only
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Downloads a Telegram voice/audio message, transcribes it locally, then handles it like text."""
     if not _is_allowed_chat(update):
@@ -830,6 +877,7 @@ async def init_bot() -> Application:
     # Bind message handlers
     telegram_app.add_handler(MessageHandler((filters.VOICE | filters.AUDIO) & ~filters.COMMAND, voice_handler))
     telegram_app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, photo_handler))
+    telegram_app.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND, document_handler))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     telegram_app.add_error_handler(telegram_error_handler)
     
