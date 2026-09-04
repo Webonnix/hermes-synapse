@@ -511,7 +511,12 @@ async def _process_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     async def safe_reply(text: str):
         await _reply_text(update, text)
 
-    plot_matches = re.findall(r'!\[.*?\]\((?:https?://[^/]+)?/api/plots/(plot_[a-f0-9]+\.png)\)', response_text)
+    # Resolves any /api/plots/... or /api/generated-images/... markdown link
+    # embedded in the reply (matplotlib charts, or the generate_image tool) to
+    # the actual file on disk, so it can go out as a real Telegram photo
+    # instead of a dead-looking localhost link. Shared with agent_bot.py.
+    from backend import agent_bot as _agent_bot
+    clean_response_text, image_paths = _agent_bot.extract_local_images(response_text)
     reply_mode = getattr(agent_instance, "telegram_reply_mode", "text")
     send_text = reply_mode in ("text", "both")
     send_voice = reply_mode in ("voice", "both")
@@ -554,38 +559,31 @@ async def _process_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             logger.warning(f"Telegram failed to send document: {doc_err}. Retrying inline reply.")
             await safe_reply(response_text)
             
-        # Send any plots if they exist
-        if plot_matches:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            for plot_file in plot_matches:
-                plot_path = os.path.join(base_dir, "data", "plots", plot_file)
-                if os.path.exists(plot_path):
-                    try:
-                        caption_text = f"График: {plot_file}"
-                        with open(plot_path, 'rb') as photo:
-                            await update.message.reply_photo(
-                                photo=photo,
-                                caption=caption_text
-                            )
-                    except Exception as send_photo_err:
-                        logger.error(f"Failed to send generated photo to Telegram: {send_photo_err}")
+        # Send any embedded images if they exist
+        for image_path in image_paths:
+            try:
+                caption_text = f"Изображение: {os.path.basename(image_path)}"
+                with open(image_path, 'rb') as photo:
+                    await update.message.reply_photo(
+                        photo=photo,
+                        caption=caption_text
+                    )
+            except Exception as send_photo_err:
+                logger.error(f"Failed to send generated photo to Telegram: {send_photo_err}")
     else:
-        if plot_matches:
-            if send_text:
-                await safe_reply(response_text)
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            for plot_file in plot_matches:
-                plot_path = os.path.join(base_dir, "data", "plots", plot_file)
-                if os.path.exists(plot_path):
-                    try:
-                        caption_text = f"График: {plot_file}"
-                        with open(plot_path, 'rb') as photo:
-                            await update.message.reply_photo(
-                                photo=photo,
-                                caption=caption_text
-                            )
-                    except Exception as send_photo_err:
-                        logger.error(f"Failed to send generated photo to Telegram: {send_photo_err}")
+        if image_paths:
+            if send_text and clean_response_text.strip():
+                await safe_reply(clean_response_text)
+            for image_path in image_paths:
+                try:
+                    caption_text = f"Изображение: {os.path.basename(image_path)}"
+                    with open(image_path, 'rb') as photo:
+                        await update.message.reply_photo(
+                            photo=photo,
+                            caption=caption_text
+                        )
+                except Exception as send_photo_err:
+                    logger.error(f"Failed to send generated photo to Telegram: {send_photo_err}")
         elif send_text:
             await safe_reply(response_text)
 
