@@ -360,3 +360,112 @@ def test_row_carries_both_display_and_source_amount(clients_db):
     assert row["primaryService"]["currency"] == "USD"
     assert row["primaryAmountUsd"] == "750.00"
     assert row["primaryAmountDisplay"] == "2452.50"
+
+
+# ── country and its per-country tax rate ─────────────────────────────────────
+
+def test_client_country_round_trips_through_create_and_update(clients_db):
+    client = clients.create_client(_client(country="Беларусь"))
+    assert client["country"] == "Беларусь"
+    updated = clients.update_client(client["id"], {"country": "Россия"})
+    assert updated["country"] == "Россия"
+
+
+def test_country_defaults_to_blank(clients_db):
+    client = clients.create_client(_client())
+    assert client["country"] == ""
+
+
+def test_list_country_settings_merges_used_and_configured_countries(clients_db):
+    clients.create_client(_client(name="A", country="Беларусь"))
+    clients.create_client(_client(name="B", country="Беларусь"))
+    clients.create_client(_client(name="C", country="Россия"))
+    # Казахстан has an explicit rate but no client yet — it must still show up.
+    clients.set_country_tax_rate("Казахстан", "10")
+
+    settings = {row["country"]: row for row in clients.list_country_settings()}
+    assert settings["Беларусь"] == {"country": "Беларусь", "taxRatePercent": "0", "clientCount": 2}
+    assert settings["Россия"] == {"country": "Россия", "taxRatePercent": "0", "clientCount": 1}
+    assert settings["Казахстан"] == {"country": "Казахстан", "taxRatePercent": "10", "clientCount": 0}
+    # No blank-country group for clients nobody's assigned a country to yet.
+    assert "" not in settings
+
+
+def test_set_country_tax_rate_is_idempotent_and_updates_in_place(clients_db):
+    clients.create_client(_client(country="Беларусь"))
+    clients.set_country_tax_rate("Беларусь", "13")
+    clients.set_country_tax_rate("Беларусь", "15.5")
+    settings = {row["country"]: row["taxRatePercent"] for row in clients.list_country_settings()}
+    assert settings["Беларусь"] == "15.5"
+
+
+def test_country_tax_rate_rejects_out_of_range_values(clients_db):
+    with pytest.raises(ValueError):
+        clients.set_country_tax_rate("Беларусь", "101")
+    with pytest.raises(ValueError):
+        clients.set_country_tax_rate("Беларусь", "-1")
+
+
+def test_country_tax_rate_rejects_garbage(clients_db):
+    with pytest.raises(ValueError):
+        clients.set_country_tax_rate("Беларусь", "не число")
+
+
+def test_country_tax_rate_requires_a_country(clients_db):
+    with pytest.raises(ValueError):
+        clients.set_country_tax_rate("", "10")
+
+
+def test_country_tax_rate_accepts_a_comma_decimal(clients_db):
+    """A percent typed with a comma (common in ru-RU input) is not garbage."""
+    result = clients.set_country_tax_rate("Беларусь", "13,5")
+    assert result["taxRatePercent"] == "13.5"
+
+
+def test_init_schema_migrates_a_clients_table_that_predates_country(tmp_path, monkeypatch):
+    """The pre-country schema is what every existing install actually has. The
+    ALTER TABLE has to run *before* the schema script's index over `country`,
+    or that index aborts the whole executescript and every other CREATE in it
+    goes down with it — leaving the client book dead, not merely un-migrated."""
+    import sqlite3
+
+    db_path = str(tmp_path / "legacy.db")
+    for module in (database, currency, clients, client_billing, client_activity):
+        monkeypatch.setattr(module, "DB_PATH", db_path, raising=False)
+    monkeypatch.setattr(database, "DB_DIR", str(tmp_path))
+    for module in (currency, clients, client_billing, client_activity):
+        module.reset_schema_cache()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE clients ("
+            "id TEXT PRIMARY KEY, type TEXT NOT NULL DEFAULT 'COMPANY', name TEXT NOT NULL, "
+            "project_name TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', "
+            "status TEXT NOT NULL DEFAULT 'ACTIVE', primary_contact_id TEXT, "
+            "responsible_user_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+            "archived_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO clients (id, name, created_at, updated_at) "
+            "VALUES ('c-old', 'Старый клиент', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+        )
+
+    database.init_db()
+    clients._init_schema()
+    client_billing._init_schema()
+
+    # The row that predates the column still loads, blank rather than absent.
+    existing = clients.get_client("c-old")
+    assert existing is not None
+    assert existing["name"] == "Старый клиент"
+    assert existing["country"] == ""
+
+    # And the rest of the schema script really did run, not just the ALTER.
+    with sqlite3.connect(db_path) as conn:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert "client_country_settings" in tables
+
+    clients.set_country_tax_rate("Беларусь", "13")
+    assert clients.list_country_settings() == [
+        {"country": "Беларусь", "taxRatePercent": "13", "clientCount": 0}
+    ]

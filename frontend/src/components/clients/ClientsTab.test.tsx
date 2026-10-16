@@ -86,6 +86,17 @@ function stubFetch(overrides: Record<string, unknown> = {}) {
     }
     if (path.startsWith('/api/clients/services')) return ok([{ id: 'svc-1', name: 'Разработка', description: '', isActive: true }]);
     if (path.startsWith('/api/clients/agents')) return ok([{ id: 'agent-12', name: 'Агент #12', role: '', status: 'idle', isEnabled: true }]);
+    if (path === '/api/clients/countries' && (!init || !init.method || init.method === 'GET')) {
+      if (overrides.dashboardForbidden) {
+        return { ok: false, status: 403, json: async () => ({ detail: 'Недостаточно прав: требуется «clients.financials.view»' }) };
+      }
+      return ok(overrides.countrySettings ?? []);
+    }
+    if (path.startsWith('/api/clients/countries/') && init?.method === 'PATCH') {
+      const country = decodeURIComponent(path.split('/').pop() as string);
+      const body = JSON.parse(init.body as string);
+      return ok({ country, taxRatePercent: body.taxRatePercent, clientCount: 1 });
+    }
     if (path.startsWith('/api/clients?')) {
       return ok({
         items: overrides.items ?? [midot, shopEasy],
@@ -305,5 +316,90 @@ describe('ClientsTab', () => {
     render(<ClientsTab />);
     await openClientsList();
     expect(await screen.findByText(/Показано 1–2 из 2/)).toBeInTheDocument();
+  });
+});
+
+describe('ClientsTab — client country grouping and tax rate', () => {
+  const byCountry = [
+    { ...midot, country: 'Беларусь' },
+    { ...shopEasy, country: 'Россия' },
+  ];
+  const countrySettings = [
+    { country: 'Беларусь', taxRatePercent: '13', clientCount: 1 },
+    { country: 'Россия', taxRatePercent: '0', clientCount: 1 },
+  ];
+
+  it('groups the client list into a header row per country', async () => {
+    stubFetch({ items: byCountry, countrySettings });
+    render(<ClientsTab />);
+    await openClientsList();
+    await screen.findByText('Midot Project');
+    expect(screen.getByText('Беларусь')).toBeInTheDocument();
+    expect(screen.getByText('Россия')).toBeInTheDocument();
+  });
+
+  it('groups clients without a country under "Без страны", sorted last', async () => {
+    stubFetch({ items: [midot, { ...shopEasy, country: 'Россия' }], countrySettings });
+    render(<ClientsTab />);
+    await openClientsList();
+    await screen.findByText('Midot Project');
+    expect(screen.getByText('Без страны')).toBeInTheDocument();
+  });
+
+  it('shows the configured tax rate in the group header for a financials-capable role', async () => {
+    stubFetch({ items: byCountry, countrySettings });
+    render(<ClientsTab />);
+    await openClientsList();
+    await screen.findByText('Беларусь');
+    expect(screen.getByLabelText('Ставка налога для Беларусь, %')).toHaveValue('13');
+    expect(screen.getByLabelText('Ставка налога для Россия, %')).toHaveValue('0');
+  });
+
+  it('saves an edited tax rate on blur', async () => {
+    const { handler } = stubFetch({ items: byCountry, countrySettings });
+    render(<ClientsTab />);
+    await openClientsList();
+    await screen.findByText('Беларусь');
+
+    const input = screen.getByLabelText('Ставка налога для Беларусь, %');
+    fireEvent.change(input, { target: { value: '15' } });
+    fireEvent.blur(input);
+
+    await waitFor(() => {
+      const patch = handler.mock.calls.find(([url, init]) =>
+        String(url) === '/api/clients/countries/%D0%91%D0%B5%D0%BB%D0%B0%D1%80%D1%83%D1%81%D1%8C'
+        && (init as RequestInit)?.method === 'PATCH');
+      expect(patch).toBeTruthy();
+      expect(JSON.parse((patch![1] as RequestInit).body as string)).toEqual({ taxRatePercent: '15' });
+    });
+  });
+
+  it('hides the tax rate editor for a role without financial access, but keeps the grouping', async () => {
+    stubFetch({ dashboardForbidden: true, items: byCountry });
+    render(<ClientsTab />);
+    await openClientsList();
+    await screen.findByText('Midot Project');
+    expect(screen.getByText('Беларусь')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Ставка налога для Беларусь, %')).not.toBeInTheDocument();
+  });
+
+  it('sends the country typed in the create drawer', async () => {
+    const { handler } = stubFetch();
+    render(<ClientsTab />);
+    await openClientsList();
+    fireEvent.click(await screen.findByRole('button', { name: /Добавить клиента/ }));
+    const drawer = await screen.findByRole('dialog');
+
+    fireEvent.change(within(drawer).getByPlaceholderText('Например, Midot Project'), { target: { value: 'Новый клиент' } });
+    fireEvent.change(within(drawer).getByPlaceholderText('Беларусь'), { target: { value: 'Казахстан' } });
+    fireEvent.click(within(drawer).getByRole('button', { name: 'Добавить клиента' }));
+
+    await waitFor(() => {
+      const post = handler.mock.calls.find(
+        ([url, init]) => String(url) === '/api/clients' && (init as RequestInit)?.method === 'POST',
+      );
+      expect(post).toBeTruthy();
+      expect(JSON.parse((post![1] as RequestInit).body as string).country).toBe('Казахстан');
+    });
   });
 });

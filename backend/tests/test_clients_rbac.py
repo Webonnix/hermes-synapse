@@ -164,6 +164,44 @@ async def test_invoices_are_refused_without_financials(api_db, seeded):
     assert exc.value.status_code == 403
 
 
+# ── country tax rates ────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_country_settings_are_refused_without_financials(api_db, seeded):
+    with pytest.raises(HTTPException) as exc:
+        await main.list_country_settings_api(_session("operator"))
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_setting_a_country_tax_rate_is_refused_without_financials(api_db, seeded):
+    with pytest.raises(HTTPException) as exc:
+        await main.set_country_tax_rate_api(
+            "Беларусь", main.CountryTaxRateRequest(taxRatePercent="13"), _session("operator"),
+        )
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_a_manager_can_set_and_read_a_country_tax_rate(api_db, seeded):
+    clients.update_client(seeded["id"], {"country": "Беларусь"})
+    result = await main.set_country_tax_rate_api(
+        "Беларусь", main.CountryTaxRateRequest(taxRatePercent="13"), _session("manager"),
+    )
+    assert result["taxRatePercent"] == "13"
+    listed = await main.list_country_settings_api(_session("manager"))
+    assert {row["country"]: row["taxRatePercent"] for row in listed} == {"Беларусь": "13"}
+
+
+@pytest.mark.asyncio
+async def test_a_viewer_cannot_set_a_country_tax_rate(api_db):
+    with pytest.raises(HTTPException) as exc:
+        await main.set_country_tax_rate_api(
+            "Беларусь", main.CountryTaxRateRequest(taxRatePercent="13"), _session("viewer"),
+        )
+    assert exc.value.status_code == 403
+
+
 # ── mutations ────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -192,7 +230,7 @@ async def test_an_operator_cannot_register_a_payment(api_db, seeded):
 
 @pytest.mark.asyncio
 async def test_a_viewer_cannot_connect_an_agent(api_db, seeded):
-    payload = main.AgentConnectionRequest(agentId="jarvis")
+    payload = main.AgentConnectionRequest(agentId="vexa")
     with pytest.raises(HTTPException) as exc:
         await main.connect_client_agent_api(seeded["id"], payload, _session("viewer"))
     assert exc.value.status_code == 403

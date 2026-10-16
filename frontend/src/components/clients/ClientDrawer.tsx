@@ -1,9 +1,9 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useState, useRef, type ReactNode } from 'react';
 import { X } from 'lucide-react';
 import { styles } from '../../styles';
 import { CurrencySelect } from '../currency/CurrencySelect';
 import type { CurrencySettings } from '../currency/currencyApi';
-import { FREQUENCY_LABELS } from './clientLabels';
+import { COMMON_COUNTRIES, FREQUENCY_LABELS } from './clientLabels';
 import type { CatalogueService, Client, PickerAgent } from './clientTypes';
 
 /**
@@ -20,6 +20,7 @@ export interface DraftState {
   name: string;
   projectName: string;
   description: string;
+  country: string;
   responsibleUserId: string;
   contactName: string;
   contactEmail: string;
@@ -41,7 +42,7 @@ export interface DraftState {
 
 function emptyDraft(baseCurrency: string): DraftState {
   return {
-    type: 'COMPANY', name: '', projectName: '', description: '', responsibleUserId: '',
+    type: 'COMPANY', name: '', projectName: '', description: '', country: '', responsibleUserId: '',
     contactName: '', contactEmail: '', contactPhone: '', contactTelegram: '',
     serviceId: '', serviceName: '', serviceTitle: '', serviceType: 'RECURRING',
     // USD by default: the base currency is the safe assumption, and anything
@@ -84,12 +85,17 @@ export function ClientDrawer({
   title?: string;
 }) {
   const [draft, setDraft] = useState<DraftState>(() => ({ ...emptyDraft(settings.baseCurrency), ...prefill }));
+  const [dirty, setDirty] = useState(false);
+  const [confirmClose, setConfirmClose] = useState(false);
+  const drawerRef = useRef<HTMLElement>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
     if (!open) return;
     setError('');
+    setDirty(false);
+    setConfirmClose(false);
     if (mode === 'edit' && client) {
       const service = client.primaryService;
       const contact = client.primaryContact;
@@ -99,6 +105,7 @@ export function ClientDrawer({
         name: client.name,
         projectName: client.projectName,
         description: client.description,
+        country: client.country ?? '',
         responsibleUserId: client.responsibleUserId ?? '',
         contactName: contact?.name ?? '',
         contactEmail: contact?.email ?? '',
@@ -125,12 +132,46 @@ export function ClientDrawer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, mode, client, settings.baseCurrency]);
 
+  const requestClose = () => {
+    if (saving) return;
+    if (dirty) setConfirmClose(true);
+    else onClose();
+  };
+  const closeRef = useRef(requestClose);
+  useEffect(() => { closeRef.current = requestClose; });
+  useEffect(() => {
+    if (!open) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const root = drawerRef.current;
+    root?.querySelector<HTMLElement>('input, select, button')?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); closeRef.current(); }
+      if (event.key !== 'Tab' || !root) return;
+      const nodes = Array.from(root.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]')).filter(node => !node.hidden);
+      const first = nodes[0]; const last = nodes[nodes.length - 1];
+      if (!first) { event.preventDefault(); root.focus(); return; }
+      if (event.shiftKey && (document.activeElement === first || !root.contains(document.activeElement))) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && (document.activeElement === last || !root.contains(document.activeElement))) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('keydown', onKey); document.body.style.overflow = previousOverflow; previous?.focus(); };
+  }, [open]);
+  useEffect(() => {
+    if (!open || (!dirty && !saving)) return;
+    const prevent = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', prevent);
+    return () => window.removeEventListener('beforeunload', prevent);
+  }, [open, dirty, saving]);
+
   if (!open) return null;
 
-  const set = (patch: Partial<DraftState>) => setDraft(current => ({ ...current, ...patch }));
+  const set = (patch: Partial<DraftState>) => { setDirty(true); setDraft(current => ({ ...current, ...patch })); };
   const recurring = draft.serviceType === 'RECURRING';
 
   const submit = async () => {
+    if (saving) return;
     if (!draft.name.trim()) {
       setError('Укажите название клиента');
       return;
@@ -144,7 +185,7 @@ export function ClientDrawer({
         // service's price would be rewriting what the client agreed to pay.
         await onSubmit({
           type: draft.type, name: draft.name.trim(), projectName: draft.projectName.trim(),
-          description: draft.description.trim(),
+          description: draft.description.trim(), country: draft.country.trim(),
           responsibleUserId: draft.responsibleUserId.trim(),
         }, 'edit', client.id);
       } else {
@@ -153,6 +194,7 @@ export function ClientDrawer({
           name: draft.name.trim(),
           projectName: draft.projectName.trim(),
           description: draft.description.trim(),
+          country: draft.country.trim(),
           responsibleUserId: draft.responsibleUserId.trim(),
           contact: {
             name: draft.contactName.trim(), email: draft.contactEmail.trim(),
@@ -192,16 +234,21 @@ export function ClientDrawer({
 
   return (
     <>
-      <div className="cl-drawer-backdrop" onClick={onClose} aria-hidden />
-      <aside className="cl-drawer" role="dialog" aria-modal="true"
+      <div className="cl-drawer-backdrop" onClick={requestClose} aria-hidden />
+      <aside ref={drawerRef} tabIndex={-1} aria-busy={saving} className="cl-drawer" role="dialog" aria-modal="true"
              aria-label={title ?? (mode === 'edit' ? 'Редактирование клиента' : 'Новый клиент')}>
         <header>
           <span>{title ?? (mode === 'edit' ? 'Редактировать клиента' : 'Добавить клиента')}</span>
-          <button type="button" className="icon-btn" onClick={onClose} aria-label="Закрыть">
+          <button type="button" className="icon-btn" onClick={requestClose} aria-label="Закрыть">
             <X size={15} />
           </button>
         </header>
 
+        {confirmClose && <div className="discard-notice" role="alert">
+          <p>Есть несохранённые изменения. Закрыть форму и потерять их?</p>
+          <button type="button" onClick={() => setConfirmClose(false)}>Продолжить редактирование</button>
+          <button type="button" disabled={saving} onClick={onClose}>Закрыть без сохранения</button>
+        </div>}
         <div className="cl-drawer-body">
           <section className="cl-drawer-section">
             <h4>Основное</h4>
@@ -225,6 +272,14 @@ export function ClientDrawer({
             <Field label="Описание">
               <textarea className="form-input" rows={2} value={draft.description}
                         onChange={event => set({ description: event.target.value })} />
+            </Field>
+            <Field label="Страна" hint="Группирует «Список клиентов» и определяет ставку налога.">
+              <input className="form-input" list="cl-country-suggestions" value={draft.country}
+                     placeholder="Беларусь"
+                     onChange={event => set({ country: event.target.value })} />
+              <datalist id="cl-country-suggestions">
+                {COMMON_COUNTRIES.map(name => <option key={name} value={name} />)}
+              </datalist>
             </Field>
             <Field label="Ответственный">
               <input className="form-input" value={draft.responsibleUserId}
@@ -370,7 +425,7 @@ export function ClientDrawer({
         </div>
 
         <footer className="cl-drawer-footer">
-          <button type="button" className="btn-ghost" onClick={onClose}>Отмена</button>
+          <button type="button" className="btn-ghost" onClick={requestClose}>Отмена</button>
           <button type="button" className="btn-primary" disabled={saving} onClick={submit}>
             {saving ? 'Сохранение…' : (submitLabel ?? (mode === 'edit' ? 'Сохранить' : 'Добавить клиента'))}
           </button>

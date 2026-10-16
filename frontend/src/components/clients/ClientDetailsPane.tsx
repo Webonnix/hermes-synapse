@@ -11,6 +11,8 @@ import { ClientInvoicesPane } from './ClientInvoicesPane';
 import { ClientPaymentsPane } from './ClientPaymentsPane';
 import { ClientTasksPane } from './ClientTasksPane';
 import { ClientNotesPane } from './ClientNotesPane';
+import { ClientConversationsPane } from './ClientConversationsPane';
+import { CallDialog } from '../smm/dialogs/CallDialog';
 import type {
   AgentConnection, Client, ClientActivityEntry, ClientBillingSummary, ClientInvoice, ClientNote, ClientPayment,
   ClientTask, TaskPriority,
@@ -20,7 +22,7 @@ import type {
 
 type Section =
   | 'overview' | 'services' | 'agents' | 'billing' | 'invoices' | 'payments'
-  | 'tasks' | 'notes' | 'contacts' | 'activity';
+  | 'tasks' | 'notes' | 'conversations' | 'contacts' | 'activity';
 
 const SECTIONS: Array<{ id: Section; label: string }> = [
   { id: 'overview', label: 'Обзор' },
@@ -31,6 +33,7 @@ const SECTIONS: Array<{ id: Section; label: string }> = [
   { id: 'payments', label: 'Платежи' },
   { id: 'tasks', label: 'Задачи' },
   { id: 'notes', label: 'Заметки' },
+  { id: 'conversations', label: 'Разговоры' },
   { id: 'contacts', label: 'Контакты' },
   { id: 'activity', label: 'Активность' },
 ];
@@ -84,6 +87,7 @@ export function ClientDetailsPane({
   onDeleteNote: (note: ClientNote) => void;
 }) {
   const [section, setSection] = useState<Section>('overview');
+  const [callNumber, setCallNumber] = useState<string | null>(null);
 
   // A different client in the same pane starts at its overview rather than
   // whatever tab happened to be open for the previous one.
@@ -132,6 +136,7 @@ export function ClientDetailsPane({
           <InfoRow label="Название" value={client.name} />
           <InfoRow label="Проект" value={client.projectName || '—'} />
           <InfoRow label="Тип" value={client.type === 'PERSON' ? 'Физическое лицо' : 'Компания'} />
+          <InfoRow label="Страна" value={client.country || '—'} />
           <InfoRow label="Статус" value={<ClientStatusBadge status={client.status} />} />
           <InfoRow label="Ответственный" value={client.responsibleUserId || '—'} />
           <InfoRow label="Основной контакт" value={client.primaryContact?.name || '—'} />
@@ -295,6 +300,12 @@ export function ClientDetailsPane({
         />
       )}
 
+      {section === 'conversations' && <ClientConversationsPane clientId={client.id} />}
+
+      {callNumber !== null && (
+        <CallDialog defaultNumber={callNumber} clientId={client.id} onClose={() => setCallNumber(null)} />
+      )}
+
       {section === 'contacts' && (
         <div className="cl-card-grid">
           {client.contacts.length === 0 && <div className="admin-empty">Контактов пока нет</div>}
@@ -305,7 +316,15 @@ export function ClientDetailsPane({
                 {contact.isPrimary && <span className="admin-status-chip is-active"><i className="dot" />Основной</span>}
               </header>
               {contact.email && <div className="cl-info-row"><span><Mail size={12} /> Email</span><strong>{contact.email}</strong></div>}
-              {contact.phone && <div className="cl-info-row"><span><Phone size={12} /> Телефон</span><strong>{contact.phone}</strong></div>}
+              {contact.phone && (
+                <div className="cl-info-row">
+                  <span><Phone size={12} /> Телефон</span>
+                  <strong>
+                    {contact.phone}{' '}
+                    <button type="button" className="cl-link-btn" onClick={() => setCallNumber(contact.phone)}>Позвонить через ИИ</button>
+                  </strong>
+                </div>
+              )}
               {contact.telegram && <div className="cl-info-row"><span>Telegram</span><strong>{contact.telegram}</strong></div>}
             </article>
           ))}

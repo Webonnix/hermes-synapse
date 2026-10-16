@@ -127,6 +127,18 @@ def _init_schema() -> None:
     currency.ensure_schema()
     client_activity.ensure_schema()
     with _connect() as conn:
+        # A `clients` table that predates the `country` column has to gain it
+        # *before* the schema script below, which indexes that column: an index
+        # over a column that does not exist aborts the whole executescript and
+        # takes every other CREATE in it down with it, so the migration cannot
+        # sit at the end.
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'clients'"
+        ).fetchone():
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(clients)")}
+            if "country" not in columns:
+                conn.execute("ALTER TABLE clients ADD COLUMN country TEXT NOT NULL DEFAULT ''")
+                logger.info("Migrated clients table to include country column.")
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS clients (
@@ -136,6 +148,7 @@ def _init_schema() -> None:
                 project_name TEXT NOT NULL DEFAULT '',
                 description TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'ACTIVE',
+                country TEXT NOT NULL DEFAULT '',
                 primary_contact_id TEXT,
                 responsible_user_id TEXT,
                 created_at TEXT NOT NULL,
@@ -144,6 +157,19 @@ def _init_schema() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_clients_status ON clients (status);
             CREATE INDEX IF NOT EXISTS idx_clients_name ON clients (name);
+            CREATE INDEX IF NOT EXISTS idx_clients_country ON clients (country);
+
+            -- One tax deduction % per country, so "Клиенты" can group its book
+            -- by country and show/edit the rate right on the group header
+            -- instead of a separate settings page. Deliberately not a column
+            -- on `clients` (§ two clients in the same country must always see
+            -- the same rate the moment either row's country matches — a rate
+            -- copied onto every client at creation time could drift per-row).
+            CREATE TABLE IF NOT EXISTS client_country_settings (
+                country TEXT PRIMARY KEY,
+                tax_rate_percent TEXT NOT NULL DEFAULT '0',
+                updated_at TEXT NOT NULL
+            );
 
             CREATE TABLE IF NOT EXISTS client_contacts (
                 id TEXT PRIMARY KEY,
@@ -242,6 +268,7 @@ def _client_row(row: sqlite3.Row) -> Dict[str, Any]:
         "projectName": row["project_name"],
         "description": row["description"],
         "status": row["status"],
+        "country": row["country"] if "country" in row.keys() else "",
         "primaryContactId": row["primary_contact_id"],
         "responsibleUserId": row["responsible_user_id"],
         "createdAt": row["created_at"],
@@ -852,12 +879,12 @@ def create_client(payload: Dict[str, Any], actor_id: Optional[str] = None) -> Di
         try:
             conn.execute(
                 "INSERT INTO clients "
-                "(id, type, name, project_name, description, status, primary_contact_id, "
+                "(id, type, name, project_name, description, status, country, primary_contact_id, "
                 " responsible_user_id, created_at, updated_at, archived_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL)",
                 (
                     client_id, client_type, name, _clean(payload.get("projectName")),
-                    _clean(payload.get("description")), status,
+                    _clean(payload.get("description")), status, _clean(payload.get("country")),
                     _clean(payload.get("responsibleUserId")) or None, now, now,
                 ),
             )
@@ -934,7 +961,7 @@ def update_client(client_id: str, payload: Dict[str, Any], actor_id: Optional[st
         raise KeyError(client_id)
     mapping = {
         "name": "name", "projectName": "project_name", "description": "description",
-        "responsibleUserId": "responsible_user_id",
+        "country": "country", "responsibleUserId": "responsible_user_id",
     }
     sets: List[str] = []
     params: List[Any] = []
@@ -1706,3 +1733,65 @@ def list_agents_for_picker() -> List[Dict[str, Any]]:
         }
         for row in rows
     ]
+
+
+# ── country tax settings ─────────────────────────────────────────────────────
+# One deduction % per country, edited from the "Клиенты" list's own country
+# group headers rather than a separate settings screen. See the
+# client_country_settings CREATE TABLE comment for why this isn't a column on
+# `clients` itself.
+
+def _valid_tax_rate(value: Any) -> str:
+    try:
+        rate = Decimal(str(value).strip().replace(",", "."))
+    except Exception as exc:
+        raise ValueError(f"Некорректный процент: {value!r}") from exc
+    if rate < 0 or rate > 100:
+        raise ValueError("Процент должен быть от 0 до 100")
+    return format(rate.normalize(), "f")
+
+
+def list_country_settings() -> List[Dict[str, Any]]:
+    """Every country in use by a (non-archived) client, or explicitly
+    configured with a rate, merged into one list — a country nobody has set a
+    rate for yet still shows up (at 0%) instead of silently missing until
+    someone visits a settings screen that doesn't exist."""
+    _init_schema()
+    with _connect() as conn:
+        used = conn.execute(
+            "SELECT country, COUNT(*) AS client_count FROM clients "
+            "WHERE country != '' AND archived_at IS NULL GROUP BY country"
+        ).fetchall()
+        configured = conn.execute(
+            "SELECT country, tax_rate_percent FROM client_country_settings"
+        ).fetchall()
+    counts = {row["country"]: int(row["client_count"]) for row in used}
+    rates = {row["country"]: row["tax_rate_percent"] for row in configured}
+    names = sorted(set(counts) | set(rates), key=lambda value: value.lower())
+    return [
+        {
+            "country": name,
+            "taxRatePercent": rates.get(name, "0"),
+            "clientCount": counts.get(name, 0),
+        }
+        for name in names
+    ]
+
+
+def set_country_tax_rate(country: str, tax_rate_percent: Any) -> Dict[str, Any]:
+    _init_schema()
+    country = _clean(country)
+    if not country:
+        raise ValueError("Укажите страну")
+    rate_text = _valid_tax_rate(tax_rate_percent)
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO client_country_settings (country, tax_rate_percent, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(country) DO UPDATE SET tax_rate_percent = excluded.tax_rate_percent, "
+            "updated_at = excluded.updated_at",
+            (country, rate_text, _now()),
+        )
+        client_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM clients WHERE country = ? AND archived_at IS NULL", (country,)
+        ).fetchone()["n"]
+    return {"country": country, "taxRatePercent": rate_text, "clientCount": int(client_count)}

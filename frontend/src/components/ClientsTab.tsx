@@ -19,8 +19,8 @@ import { ClientTasksPane } from './clients/ClientTasksPane';
 import { ClientsCalendarPane } from './clients/ClientsCalendarPane';
 import type {
   AgentConnection, CatalogueService, Client, ClientActivityEntry, ClientBillingSummary,
-  ClientInvoice, ClientNote, ClientPayment, ClientsDashboard, ClientsPage, ClientTask, Deal,
-  DealStage, PickerAgent, PipelineSummary, TaskPriority, TaskStats,
+  ClientInvoice, ClientNote, ClientPayment, ClientsDashboard, ClientsPage, ClientTask,
+  CountrySetting, Deal, DealStage, PickerAgent, PipelineSummary, TaskPriority, TaskStats,
 } from './clients/clientTypes';
 
 /**
@@ -82,11 +82,11 @@ function buildQuery(
  *  the operator is looking at. */
 function exportCsv(clients: Client[], displayCurrency: string) {
   const header = [
-    'Клиент', 'Проект', 'Контакт', 'Email', 'Услуга', 'Тип', 'Агент', 'Статус агента',
+    'Клиент', 'Проект', 'Страна', 'Контакт', 'Email', 'Услуга', 'Тип', 'Агент', 'Статус агента',
     `Сумма (${displayCurrency})`, 'Исходная сумма', 'Валюта', 'Следующий счёт', 'Оплата',
   ];
   const rows = clients.map(client => [
-    client.name, client.projectName, client.primaryContact?.name ?? '',
+    client.name, client.projectName, client.country, client.primaryContact?.name ?? '',
     client.primaryContact?.email ?? '',
     client.primaryService?.title || client.primaryService?.serviceName || '',
     client.primaryService?.serviceType ?? '',
@@ -142,6 +142,7 @@ export function ClientsTab({ onOpenAgent }: { onOpenAgent?: (agentId: string) =>
 
   const [result, setResult] = useState<ClientsPage | null>(null);
   const [dashboard, setDashboard] = useState<ClientsDashboard | null>(null);
+  const [countrySettings, setCountrySettings] = useState<CountrySetting[]>([]);
   const [connections, setConnections] = useState<AgentConnection[]>([]);
   const [invoices, setInvoices] = useState<ClientInvoice[]>([]);
   const [payments, setPayments] = useState<ClientPayment[]>([]);
@@ -204,7 +205,7 @@ export function ClientsTab({ onOpenAgent }: { onOpenAgent?: (agentId: string) =>
     setError('');
     try {
       const query = buildQuery(filters, page, limit, sort, order);
-      const [page_, dashboardData] = await Promise.all([
+      const [page_, dashboardData, countryData] = await Promise.all([
         api<ClientsPage>(`/api/clients?${query}`),
         api<ClientsDashboard>('/api/clients/dashboard').catch(exc => {
           if (String((exc as Error).message).includes('financials')) {
@@ -213,9 +214,13 @@ export function ClientsTab({ onOpenAgent }: { onOpenAgent?: (agentId: string) =>
           }
           throw exc;
         }),
+        // Same gate as the dashboard (a tax rate is a revenue figure) — a
+        // role without financials just never sees the group header's editor.
+        api<CountrySetting[]>('/api/clients/countries').catch(() => []),
       ]);
       setResult(page_);
       if (dashboardData) setDashboard(dashboardData);
+      setCountrySettings(Array.isArray(countryData) ? countryData : []);
     } catch (exc) {
       setError((exc as Error).message);
     } finally {
@@ -483,6 +488,25 @@ export function ClientsTab({ onOpenAgent }: { onOpenAgent?: (agentId: string) =>
     });
   }, []);
 
+  // country → tax rate %, for the client list's group headers.
+  const countryTaxRates = useMemo(
+    () => Object.fromEntries(countrySettings.map(row => [row.country, row.taxRatePercent])),
+    [countrySettings],
+  );
+
+  const saveCountryTaxRate = useCallback(async (country: string, rate: string) => {
+    try {
+      const updated = await api<CountrySetting>(`/api/clients/countries/${encodeURIComponent(country)}`, {
+        method: 'PATCH', body: JSON.stringify({ taxRatePercent: rate }),
+      });
+      setCountrySettings(current => [...current.filter(row => row.country !== country), updated]);
+      setToast(`Ставка налога для «${country}» обновлена`);
+    } catch (exc) {
+      setToast(`Не удалось сохранить ставку: ${(exc as Error).message}`);
+      throw exc;
+    }
+  }, []);
+
   // ── deals actions ────────────────────────────────────────────────────────
 
   const submitDeal = useCallback(async (payload: Record<string, unknown>, dealId?: string) => {
@@ -724,6 +748,8 @@ export function ClientsTab({ onOpenAgent }: { onOpenAgent?: (agentId: string) =>
                 sort={sort}
                 order={order}
                 canSeeFinancials={canSeeFinancials}
+                countryTaxRates={countryTaxRates}
+                onSaveTaxRate={saveCountryTaxRate}
                 onSort={toggleSort}
                 onOpen={client => void openClient(client)}
                 onEdit={client => { setDrawerMode('edit'); setDrawerClient(client); setDrawerPrefill(undefined); setDrawerOpen(true); }}

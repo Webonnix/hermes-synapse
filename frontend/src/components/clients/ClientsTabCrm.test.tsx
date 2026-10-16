@@ -328,6 +328,20 @@ describe('ClientsTab — client notes', () => {
 });
 
 describe('ClientsTab — calendar', () => {
+  // The calendar always renders the *current* month, while the fixtures above
+  // pin their dates to August 2026 — so without a fixed clock these tests
+  // start failing the moment that month passes. Freeze Date (and only Date:
+  // faking setTimeout too would hang testing-library's waitFor, which never
+  // detects vitest's fake timers) to a day inside the fixture month.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 7, 25, 12, 0, 0));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('shows the fixture task on its due date and lets you open that day', async () => {
     stubFetch();
     render(<ClientsTab />);

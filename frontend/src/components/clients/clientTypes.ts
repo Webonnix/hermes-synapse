@@ -84,6 +84,9 @@ export interface Client {
   projectName: string;
   description: string;
   status: ClientStatus;
+  /** Free text ("Беларусь", "Россия", …) — groups the client list and keys
+   *  the per-country tax rate in CountrySetting. Blank until set. */
+  country: string;
   primaryContactId: string | null;
   responsibleUserId: string | null;
   createdAt: string;
@@ -101,6 +104,17 @@ export interface Client {
   primaryAmountDisplay?: string;
   nextBillingDate: string | null;
   billingFrequency: BillingFrequency | null;
+}
+
+// ── country grouping and its tax rate ────────────────────────────────────────
+
+export interface CountrySetting {
+  country: string;
+  /** Decimal string, e.g. "13" or "15.5" — a deduction %, not money, so it's
+   *  never run through currency conversion. */
+  taxRatePercent: string;
+  /** Non-archived clients currently assigned to this country. */
+  clientCount: number;
 }
 
 export interface ClientsPage {

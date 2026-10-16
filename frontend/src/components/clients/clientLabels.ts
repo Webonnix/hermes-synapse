@@ -125,6 +125,20 @@ export const DEAL_STAGE_TONE: Record<DealStage, Tone> = {
 
 export const DEAL_SOURCES = ['Сайт', 'Реферал', 'Соцсети', 'Холодный контакт', 'Партнёр', 'Другое'];
 
+// ── client country ───────────────────────────────────────────────────────────
+
+/** Suggestions only — the field itself is free text, so a client based
+ *  somewhere off this list is never blocked, just not autocompleted. */
+export const COMMON_COUNTRIES = [
+  'Беларусь', 'Россия', 'Казахстан', 'Украина', 'Узбекистан', 'Азербайджан',
+  'Армения', 'Кыргызстан', 'Молдова', 'Грузия', 'Польша', 'Литва', 'Латвия',
+  'Эстония', 'Германия', 'США', 'ОАЭ',
+];
+
+/** No country set — the group every unassigned client falls into, always
+ *  sorted last regardless of locale ordering. */
+export const NO_COUNTRY_LABEL = 'Без страны';
+
 // ── Календарь (Google Calendar) ──────────────────────────────────────────────
 
 /** Picker order — legend and the type selector in the event drawer both walk
@@ -140,7 +154,7 @@ export const EVENT_TYPE_LABELS: Record<CalendarEventType, string> = {
  *  in the owner's actual Google Calendar app — not a second, unrelated
  *  colour scheme invented just for this dashboard. */
 export const EVENT_TYPE_COLOR: Record<CalendarEventType, string> = {
-  MEETING: '#9b88ff', TASK: '#73d9ff', CALL: '#5ff0bf', DEADLINE: '#ff5d8f', TRAINING: '#ffc348', OTHER: '#8a94a6',
+  MEETING: '#9277ff', TASK: '#5ee1ff', CALL: '#35d49a', DEADLINE: '#f05d75', TRAINING: '#f6b84a', OTHER: '#8c94a3',
 };
 
 export const CALENDAR_STATUS_REASON_TEXT: Record<string, string> = {
