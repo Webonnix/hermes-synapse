@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+dist.before-*
+
+# Playwright smoke output (browser-smoke workflow)
+test-results/
+playwright-report/

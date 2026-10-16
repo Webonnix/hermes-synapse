@@ -1,0 +1,129 @@
+name: Docker smoke
+
+# Catches the class of failure that unit tests structurally cannot: the image
+# builds, but what it actually serves is wrong. Both incidents this guards
+# against looked identical from a green test run — a blank dashboard and a
+# deploy that "changed nothing" because the old bundle was still being served.
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+
+jobs:
+  frontend-image:
+    name: Frontend image serves the app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the frontend image
+        run: |
+          docker build \
+            --build-arg HERMES_BUILD_ID="${GITHUB_SHA::12}" \
+            -t hermes-frontend:smoke \
+            ./frontend
+
+      - name: Run it
+        run: |
+          # The nginx config terminates TLS, so the image cannot start without a
+          # certificate. A throwaway self-signed pair is enough: the smoke test
+          # asserts what is served, not who signed it.
+          mkdir -p /tmp/smoke-ssl
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -keyout /tmp/smoke-ssl/hermes.key -out /tmp/smoke-ssl/hermes.crt \
+            -subj "/CN=localhost" >/dev/null 2>&1
+          docker run -d --name hermes-frontend-smoke -p 8443:443 \
+            -v /tmp/smoke-ssl:/etc/nginx/ssl:ro \
+            -e ROUTER_HOSTNAME=router.invalid \
+            -e LLM_PROXY_TOKEN=smoke \
+            hermes-frontend:smoke
+          for attempt in $(seq 1 30); do
+            if curl -fsSk https://localhost:8443/ >/dev/null 2>&1; then exit 0; fi
+            sleep 1
+          done
+          echo "::error::nginx never started serving"
+          docker logs hermes-frontend-smoke
+          exit 1
+
+      - name: The served page is the app, not an error page
+        run: |
+          set -euo pipefail
+          body="$(curl -fsSk https://localhost:8443/)"
+          # A 200 is not enough: nginx happily serves its own default page.
+          grep -q 'id="root"' <<<"$body"
+          grep -q '<script type="module"' <<<"$body"
+          # The referenced bundle must actually exist in the image. A dangling
+          # asset reference is exactly what a blank screen looks like.
+          asset="$(grep -o '/assets/[A-Za-z0-9_.-]*\.js' <<<"$body" | head -1)"
+          test -n "$asset"
+          curl -fsSk -o /dev/null "https://localhost:8443${asset}"
+
+      - name: index.html is never cached, hashed assets are
+        run: |
+          set -euo pipefail
+          # A cached index.html is how a stale bundle outlives a deploy.
+          curl -fsSkI https://localhost:8443/ | tr -d '\r' | grep -qi 'cache-control:.*no-cache'
+          asset="$(curl -fsSk https://localhost:8443/ | grep -o '/assets/[A-Za-z0-9_.-]*\.js' | head -1)"
+          curl -fsSkI "https://localhost:8443${asset}" | tr -d '\r' | grep -qi 'cache-control:.*immutable'
+
+      - name: The PWA is installable and the service worker is not cacheable
+        run: |
+          set -euo pipefail
+          curl -fsSk https://localhost:8443/manifest.json | grep -q '"start_url"'
+          curl -fsSkI https://localhost:8443/sw.js | tr -d '\r' | grep -qi 'cache-control:.*no-store'
+          # The cache key must be this build, or a deploy cannot invalidate it.
+          curl -fsSk https://localhost:8443/sw.js | grep -q "BUILD_ID = '${GITHUB_SHA::12}'"
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs hermes-frontend-smoke || true
+
+      - name: Stop
+        if: always()
+        run: docker rm -f hermes-frontend-smoke || true
+
+  backend-boot:
+    name: Backend boots and answers its health probe
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install runtime dependencies
+        working-directory: backend
+        run: |
+          pip install uv
+          uv sync --dev
+
+      - name: Boot the app and probe it
+        working-directory: backend
+        env:
+          PYTHONPATH: ..
+          OPENROUTER_API_KEY: "mock-openrouter-key"
+          TELEGRAM_BOT_TOKEN: "mock-bot-token"
+          TELEGRAM_CHAT_ID: "123456789"
+          LLM_MODEL: "google/gemini-2.5-flash"
+        run: |
+          set -euo pipefail
+          # Import-time and startup errors do not show up in unit tests that
+          # import individual modules — only a real boot finds them.
+          uv run uvicorn backend.main:app --host 127.0.0.1 --port 8000 > boot.log 2>&1 &
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/health/live >/dev/null 2>&1; then
+              echo "backend is live"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::backend never became live"
+          cat boot.log
+          exit 1
+
+      - name: Startup log
+        if: failure()
+        working-directory: backend
+        run: cat boot.log || true

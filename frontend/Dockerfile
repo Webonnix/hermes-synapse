@@ -4,9 +4,15 @@ FROM node:20-alpine AS build
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
-RUN npm install
+RUN npm ci
 
 COPY . .
+
+# Build identity for the service worker's cache key. The image build has no git
+# checkout, so the deploy passes it in; without it the plugin falls back to a
+# build timestamp, which still changes per build.
+ARG HERMES_BUILD_ID=""
+ENV HERMES_BUILD_ID=$HERMES_BUILD_ID
 RUN npm run build
 
 # Stage 2: Serve application using Nginx
@@ -19,7 +25,7 @@ COPY --from=build /app/dist /usr/share/nginx/html
 # entrypoint envsubst's *.template files under /etc/nginx/templates/ into
 # /etc/nginx/conf.d/ (stripping the .template suffix) at container start,
 # substituting only variables that are actually set in the container's
-# environment. This is how OLLAMA_PROXY_TOKEN gets baked into the config.
+# environment. This is how LLM_PROXY_TOKEN gets baked into the config.
 COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 
 # Expose Nginx port

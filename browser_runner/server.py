@@ -45,11 +45,11 @@ READ_ONLY_EXCLUDED_ACTIONS = ["click", "input", "upload_file", "select_dropdown"
 # RFC1918/localhost IP literals; this list covers the same targets reached by
 # Docker DNS name, which IP-literal blocking alone would not catch. This is
 # the actual containment control here — the container needs open internet
-# egress plus a route to `ollama` to do its job, so network topology alone
+# egress plus a route to the local LLM server (`hermes-llama`) to do its job, so network topology alone
 # can't isolate it the way dev-runner's egress-less network does.
 INTERNAL_HOSTS = [
     "localhost", "127.0.0.1", "0.0.0.0", "host.docker.internal",
-    "ollama", "qdrant", "backend", "xtts", "valkey", "gitea",
+    "hermes-llama", "llama", "qdrant", "backend", "xtts", "valkey", "gitea",
     "dev-runner", "browser-runner", "frontend",
 ]
 
@@ -87,15 +87,18 @@ def _build_llm():
     consistently with the rest of the stack. AGENT_MODEL_BROWSER overrides the
     model, same pattern as AGENT_MODEL_RESEARCH/AGENT_MODEL_CODE.
     """
-    provider = os.getenv("LLM_PROVIDER", "ollama").strip().lower()
+    provider = os.getenv("LLM_PROVIDER", "llamacpp").strip().lower()
     model = os.getenv("AGENT_MODEL_BROWSER", "").strip() or os.getenv("LLM_MODEL", "").strip()
     if not model:
         raise RuntimeError("No model configured (set AGENT_MODEL_BROWSER or LLM_MODEL)")
 
-    if provider == "ollama":
-        from browser_use import ChatOllama
-        host = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
-        return ChatOllama(model=model, host=host)
+    if provider in ("llamacpp", "local"):
+        # The local llama.cpp server speaks the OpenAI API under /v1.
+        from browser_use import ChatOpenAI
+        base_url = os.getenv("LLAMACPP_BASE_URL", "http://hermes-llama:8080").rstrip("/")
+        if not base_url.endswith("/v1"):
+            base_url += "/v1"
+        return ChatOpenAI(model=model, base_url=base_url, api_key=os.getenv("LLAMACPP_API_KEY", "") or "not-needed")
 
     if provider == "openrouter":
         # Not re-exported from the top-level `browser_use` package in this

@@ -1,4 +1,4 @@
-# NOTE: xtts, ollama, dev-runner and browser-runner are deliberately not part
+# NOTE: xtts, llama, dev-runner and browser-runner are deliberately not part
 # of this lean dev stack (same as production's opt-in profile) — add them
 # individually if you're working on one of those integrations.
 services:
