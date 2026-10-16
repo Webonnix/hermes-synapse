@@ -417,7 +417,8 @@ describe('ContentFactoryTab', () => {
     );
     expect(JSON.parse(String((request?.[1] as RequestInit).body)).apiKey).toBe('sk-test-key');
     // The card renders what the backend sent back, which never includes a key.
-    expect(screen.queryByDisplayValue('sk-test-key')).toBeNull();
+    // That re-render lands after the PUT resolves, so wait for it.
+    await waitFor(() => expect(screen.queryByDisplayValue('sk-test-key')).toBeNull());
   });
 
   it('saves settings only after an explicit save', async () => {

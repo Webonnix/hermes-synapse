@@ -2,6 +2,7 @@
 
 import logging
 import threading
+import time
 
 import pytest
 
@@ -13,6 +14,12 @@ def clean_registry(monkeypatch):
     monkeypatch.setattr(rd, "_in_flight", {})
     monkeypatch.setattr(rd, "_watchdog", None)
     yield
+
+
+def _past_threshold() -> float:
+    # An explicit clock: begin() -> _scan_once() can take less than the
+    # threshold when the watchdog thread starts fast, which made these flaky.
+    return time.monotonic() + 60.0
 
 
 def test_a_fast_request_is_never_reported(caplog):
@@ -28,7 +35,7 @@ def test_a_stuck_request_is_reported_with_its_path_and_a_stack_dump(caplog, monk
     monkeypatch.setattr(rd, "SLOW_REQUEST_SECONDS", 0.0001)
     rd.begin("GET", "/api/metrics")
     with caplog.at_level(logging.WARNING, logger="hermes.slowreq"):
-        assert rd._scan_once() == 1
+        assert rd._scan_once(now=_past_threshold()) == 1
     message = caplog.records[0].getMessage()
     assert "/api/metrics" in message
     assert "Traceback" in message or "File " in message
@@ -40,16 +47,16 @@ def test_a_stuck_request_is_reported_once_not_every_tick(caplog, monkeypatch):
     monkeypatch.setattr(rd, "SLOW_REQUEST_SECONDS", 0.0001)
     rd.begin("POST", "/api/chat")
     with caplog.at_level(logging.WARNING, logger="hermes.slowreq"):
-        assert rd._scan_once() == 1
-        assert rd._scan_once() == 0
-        assert rd._scan_once() == 0
+        assert rd._scan_once(now=_past_threshold()) == 1
+        assert rd._scan_once(now=_past_threshold()) == 0
+        assert rd._scan_once(now=_past_threshold()) == 0
     assert len(caplog.records) == 1
 
 
 def test_a_reported_request_logs_its_total_duration_when_it_finishes(caplog, monkeypatch):
     monkeypatch.setattr(rd, "SLOW_REQUEST_SECONDS", 0.0001)
     request_id = rd.begin("GET", "/api/models")
-    rd._scan_once()
+    rd._scan_once(now=_past_threshold())
     with caplog.at_level(logging.WARNING, logger="hermes.slowreq"):
         duration = rd.finish(request_id)
     assert duration > 0

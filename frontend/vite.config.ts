@@ -18,6 +18,9 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: './src/setupTests.ts',
+    // Above the 10s asyncUtilTimeout in setupTests, so a slow findBy fails with
+    // its own message instead of the generic test timeout.
+    testTimeout: 20000,
     // `tests/` holds checks that read the source tree itself, so they need node
     // types the app build does not have — they live outside `src` for that
     // reason and are typed by tsconfig.node.json.

@@ -204,8 +204,10 @@ describe('ClientsTab', () => {
     stubFetch();
     render(<ClientsTab />);
     await openClientsList();
-    expect(await screen.findByText('Оплачено')).toBeInTheDocument();
-    expect(screen.getByText('Просрочено')).toBeInTheDocument();
+    // The KPI cards and the status filter carry the same words; the chip is
+    // the row's payment status.
+    expect(await screen.findByText('Оплачено', { selector: '.admin-status-chip' })).toBeInTheDocument();
+    expect(screen.getByText('Просрочено', { selector: '.admin-status-chip' })).toBeInTheDocument();
   });
 
   it('sends search and filters to the backend rather than filtering locally', async () => {
