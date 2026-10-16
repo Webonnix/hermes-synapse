@@ -19,41 +19,18 @@ RUN sed -Ei 's/Components: main$/Components: main non-free/' /etc/apt/sources.li
     rhvoice-english \
     && rm -rf /var/lib/apt/lists/*
 
-# Install python dependencies directly
-RUN pip install --no-cache-dir \
-    "fastapi>=0.100.0" \
-    "uvicorn>=0.22.0" \
-    "python-telegram-bot>=20.3" \
-    "httpx>=0.24.1" \
-    "python-dotenv>=1.0.0" \
-    "pydantic>=2.0" \
-    "websockets>=11.0" \
-    "psutil>=5.9.0" \
-    "fastembed>=0.2.0" \
-    "qdrant-client>=1.13.2" \
-    "matplotlib>=3.7.0" \
-    "docker>=6.1.0" \
-    "pandas>=2.0.0" \
-    "openpyxl>=3.1.0" \
-    "pypdf>=4.0.0" \
-    "python-docx>=1.1.0" \
-    "beautifulsoup4>=4.12.0" \
-    "python-multipart>=0.0.7" \
-    "google-auth>=2.20.0" \
-    "google-auth-oauthlib>=1.0.0" \
-    "google-auth-httplib2>=0.2.0" \
-    "google-api-python-client>=2.95.0" \
-    "todoist-api-python>=2.1.3" \
-    "pytest==8.3.5" \
-    "pytest-asyncio==0.25.3" \
-    "respx>=0.20" \
-    "faster-whisper>=1.1.0" \
-    "redis>=5.0.0" \
-    "matrix-nio[e2e]>=0.24.0" \
-    "discord.py>=2.4.0" \
-    "slack-bolt>=1.20.0" \
-    "piper-tts>=1.6.0" \
-    "cryptography>=41.0.0"
+# Python dependencies come from backend/uv.lock only — the exact versions CI
+# tested — so a rebuild can never pick up a newer release than the one that
+# passed. A hand-written ">=" list here used to let the prod image drift from CI.
+# The dev group stays in: autonomy.py probes for pytest in this container.
+# Installed into the system interpreter (not a venv), as before, so `python`,
+# `pip` and console scripts behave exactly as they did.
+COPY --from=ghcr.io/astral-sh/uv:0.12.1@sha256:cf4eedcaa81655197f625739489effcbe71b61ceb1506f332c3facae5deceded /uv /usr/local/bin/uv
+COPY backend/pyproject.toml backend/uv.lock /tmp/uv-lock/
+RUN cd /tmp/uv-lock \
+    && uv export --quiet --frozen --no-emit-project --group dev --format requirements-txt -o requirements.txt \
+    && uv pip install --system --no-cache --require-hashes -r requirements.txt \
+    && rm -rf /tmp/uv-lock
 
 # Git is a required read-only workspace capability for planning and verification.
 RUN apt-get update && apt-get install -y --no-install-recommends git \
