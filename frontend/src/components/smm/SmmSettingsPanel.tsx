@@ -83,7 +83,7 @@ export function SmmSettingsPanel() {
             <Check size={13} /><span>{saving ? '...' : 'Сохранить'}</span>
           </button>
           {saved && (
-            <code style={{ fontSize: '0.76rem', color: 'var(--text-dim, #8a94a6)' }}>
+            <code style={{ fontSize: '0.76rem', color: 'var(--text-dim, #8c94a3)' }}>
               {saved}/api/social/webhook/&lt;платформа&gt;
             </code>
           )}
@@ -94,7 +94,7 @@ export function SmmSettingsPanel() {
       <div className="glass-panel" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
         <strong style={{ fontSize: '0.9rem' }}>Каналы, которым нужен вебхук</strong>
         {webhookChannels.length === 0 ? (
-          <span style={{ fontSize: '0.8rem', color: 'var(--text-dim, #8a94a6)' }}>
+          <span style={{ fontSize: '0.8rem', color: 'var(--text-dim, #8c94a3)' }}>
             Пока нет ни одного подключения Instagram, Facebook или WhatsApp.
           </span>
         ) : (
@@ -108,7 +108,7 @@ export function SmmSettingsPanel() {
                 <div key={binding.id} className="admin-item-row">
                   <div>
                     <strong style={{ fontSize: '0.85rem' }}>{binding.bot_username}</strong>
-                    <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-dim, #8a94a6)' }}>
+                    <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-dim, #8c94a3)' }}>
                       {PLATFORM_LABELS[binding.platform as Platform] || binding.platform} · {binding.agent_name}
                       {binding.external_account_id ? ` · id ${binding.external_account_id}` : ''}
                     </span>

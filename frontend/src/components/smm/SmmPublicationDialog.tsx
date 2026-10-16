@@ -39,7 +39,7 @@ export function SmmPublicationDialog({ post, onClose, onEdit }: Props) {
       onClick={event => { if (event.target === event.currentTarget) onClose(); }}
       style={{
         position: 'fixed', inset: 0, zIndex: 60, display: 'flex', alignItems: 'center',
-        justifyContent: 'center', padding: 20, background: 'rgba(6, 7, 14, 0.72)',
+        justifyContent: 'center', padding: 20, background: 'rgba(6, 7, 11, 0.72)',
         backdropFilter: 'blur(3px)',
       }}
     >

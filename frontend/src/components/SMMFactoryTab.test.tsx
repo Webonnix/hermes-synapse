@@ -19,12 +19,20 @@ const bindings = [{
   response_mode: 'draft', access_mode: 'owner_only', external_account_id: '42',
 }];
 
+// Two services on purpose: the dialogs panel navigates service → account →
+// dialog, and a single-platform fixture would let a broken filter pass.
 const conversations = [{
   id: 'conv-1', binding_id: 'vkbind-1', platform: 'vk', chat_id: '777', display_name: 'Иван',
   handling_mode: 'ai', updated_at: '2026-08-30T09:00:00Z', created_at: '2026-08-30T08:00:00Z',
   session_id: 'vk:vkbind-1:777', messages_count: 4, last_message_at: '2026-08-30T09:00:00Z',
   last_message_preview: 'сколько стоит?', last_message_role: 'user',
   agent_name: 'DevOps Senior Assistant', account: 'Моё сообщество (@mygroup)', response_mode: 'draft',
+}, {
+  id: 'conv-2', binding_id: 'mxbind-1', platform: 'matrix', chat_id: '!room:senla.eu', display_name: 'Дарья',
+  handling_mode: 'pending_choice', updated_at: '2026-08-30T10:00:00Z', created_at: '2026-08-30T07:00:00Z',
+  session_id: 'matrix:mxbind-1:!room:senla.eu', messages_count: 22, last_message_at: '2026-08-30T10:00:00Z',
+  last_message_preview: 'Альберт сейчас занят', last_message_role: 'assistant',
+  agent_name: 'DevOps Senior Assistant', account: '@albert_yehiazaran:senla.eu', response_mode: 'draft',
 }];
 
 const publications = [
@@ -57,6 +65,12 @@ const drafts = [{
   status: 'pending', created_at: '2026-08-30T09:00:00Z', updated_at: '2026-08-30T09:00:00Z',
 }];
 
+const providerBindings = [{
+  id: 'prov-9r', name: '9router', provider_type: 'openai_compatible',
+  api_base: 'http://9router:20128/v1', status: 'active',
+  created_at: '2026-08-09T10:36:20Z', updated_at: '2026-08-09T10:37:16Z',
+}];
+
 function stubFetch(overrides: Record<string, unknown> = {}) {
   const calls: string[] = [];
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
@@ -72,6 +86,8 @@ function stubFetch(overrides: Record<string, unknown> = {}) {
       if (path.startsWith('/api/messenger-bindings')) return bindings;
       if (path.startsWith('/api/channel-replies')) return drafts;
       if (path.startsWith('/api/access/plans')) return [];
+      if (path.includes('/models')) return { models: ['ag/gemini-pro-agent', 'ds/deepseek-chat'], error: null };
+      if (path.startsWith('/api/providers')) return providerBindings;
       if (path.startsWith('/api/smm/settings')) return { public_base_url: '' };
       return {};
     })();
@@ -163,14 +179,56 @@ describe('SMMFactoryTab', () => {
     });
   });
 
+  it('opens on «Диалоги» when another section asked for a conversation', async () => {
+    stubFetch();
+    localStorage.setItem('smm_factory_view', 'publications');
+    localStorage.setItem('inbox_open_conversation', 'ibx-1');
+    render(<SMMFactoryTab agents={agents} />);
+    expect(await screen.findByRole('navigation', { name: 'Разделы диалогов' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Диалоги/ })).toHaveClass('is-active');
+  });
+
+  it('shows the unread-dialogs count on «Диалоги»', async () => {
+    stubFetch();
+    render(<SMMFactoryTab agents={agents} unreadDialogs={3} />);
+    const dialogsTab = await screen.findByRole('button', { name: /^Диалоги/ });
+    expect(within(dialogsTab).getByText('3')).toBeInTheDocument();
+  });
+
   it('shows every channel’s conversations in one cross-channel list', async () => {
     stubFetch();
     render(<SMMFactoryTab agents={agents} />);
     fireEvent.click(await screen.findByRole('button', { name: /Диалоги/ }));
+    // The agents' memory view is the old cross-channel panel, one level down now.
+    fireEvent.click(await screen.findByRole('button', { name: /Память агентов/ }));
     expect(await screen.findByText('Иван')).toBeInTheDocument();
     // The row names the account and agent, because in this panel the channel is
     // not implied by where you are.
     expect(screen.getByText(/Моё сообщество \(@mygroup\).*DevOps Senior Assistant/)).toBeInTheDocument();
+  });
+
+  it('narrows the dialogs by service, then by account', async () => {
+    stubFetch();
+    render(<SMMFactoryTab agents={agents} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Диалоги/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Память агентов/ }));
+    await screen.findByText('Иван');
+    const [services, accounts] = Array.from(document.querySelectorAll<HTMLElement>('.smm-branch-column'));
+
+    // Picking a service drops every dialog that belongs to another one...
+    fireEvent.click(within(services).getByRole('button', { name: /Element \/ Matrix/ }));
+    expect(screen.getByText('Дарья')).toBeInTheDocument();
+    expect(screen.queryByText('Иван')).not.toBeInTheDocument();
+
+    // ...and the account column now offers only that service's accounts.
+    expect(within(accounts).queryByRole('button', { name: /Моё сообщество/ })).not.toBeInTheDocument();
+    fireEvent.click(within(accounts).getByRole('button', { name: /@albert_yehiazaran:senla\.eu/ }));
+    expect(screen.getByText('Дарья')).toBeInTheDocument();
+
+    // Back to everything in one list — the cross-channel view is one click away.
+    fireEvent.click(within(services).getByRole('button', { name: /Все сервисы/ }));
+    expect(screen.getByText('Иван')).toBeInTheDocument();
+    expect(screen.getByText('Дарья')).toBeInTheDocument();
   });
 
   it('counts waiting drafts on the tab itself', async () => {
@@ -338,5 +396,50 @@ describe('SMMFactoryTab', () => {
     expect(await screen.findByDisplayValue('Обновление платформы VEXA')).toBeInTheDocument();
     expect(screen.getByDisplayValue('обновление')).toBeInTheDocument();
     expect(screen.getByText('Редактирование публикации')).toBeInTheDocument();
+  });
+
+  // ── Per-channel model ──────────────────────────────────────────────────────
+  // A channel used to be stuck with its agent's model: the columns existed and
+  // every bot runtime read them, but only creation could write them and this
+  // form never did. These cover the edit path that fixes that.
+
+  it('offers a per-channel provider and model on an existing channel', async () => {
+    stubFetch();
+    render(<SMMFactoryTab agents={agents} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Подключения/ }));
+    await screen.findByText(/Моё сообщество \(@mygroup\)/);
+    fireEvent.click(screen.getByTitle('Настроить промпт/режим'));
+
+    expect(await screen.findByText('Модель этого канала')).toBeInTheDocument();
+    expect(await screen.findByRole('option', { name: 'Как у агента' })).toBeInTheDocument();
+    expect(await screen.findByRole('option', { name: '9router' })).toBeInTheDocument();
+  });
+
+  it('sends the chosen provider and model when the channel is saved', async () => {
+    const { fetchMock } = stubFetch();
+    render(<SMMFactoryTab agents={agents} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Подключения/ }));
+    await screen.findByText(/Моё сообщество \(@mygroup\)/);
+    fireEvent.click(screen.getByTitle('Настроить промпт/режим'));
+
+    const providerSelect = await screen.findByRole('option', { name: '9router' });
+    fireEvent.change(providerSelect.closest('select')!, { target: { value: 'prov-9r' } });
+
+    // The model list is fetched from that provider, not from a hardcoded table.
+    const modelOption = await screen.findByRole('option', { name: 'ag/gemini-pro-agent' });
+    fireEvent.change(modelOption.closest('select')!, { target: { value: 'ag/gemini-pro-agent' } });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить' }));
+
+    await waitFor(() => {
+      const patch = fetchMock.mock.calls.find(
+        ([url, init]) => String(url).startsWith('/api/messenger-bindings/vkbind-1')
+          && (init as RequestInit | undefined)?.method === 'PATCH',
+      );
+      expect(patch).toBeTruthy();
+      const body = JSON.parse(String((patch![1] as RequestInit).body));
+      expect(body.model_provider).toBe('prov-9r');
+      expect(body.model).toBe('ag/gemini-pro-agent');
+    });
   });
 });

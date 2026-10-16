@@ -14,6 +14,10 @@
  * (backend/smm_posts.py) and one editor, because a draft, a scheduled post and
  * a published one are the same object at different stages.
  *
+ * "Диалоги" is the former top-level «Входящие» section (components/smm/dialogs):
+ * the conversation archive, calls, rules and the agents' memory, each a
+ * sub-section of its own.
+ *
  * The rest are deliberately thin wrappers over what already worked:
  * "Подключения", "Черновики" and "Журнал" are the same MessengerChannelsTab
  * rendered one block at a time (see its `view` prop), so there is one
@@ -27,7 +31,8 @@ import {
 import { styles } from '../styles';
 import type { AgentModel } from '../types';
 import { MessengerChannelsTab } from './MessengerChannelsTab';
-import { SmmDialogsPanel } from './smm/SmmDialogsPanel';
+import { DialogsSection } from './smm/dialogs/DialogsSection';
+import { OPEN_INBOX_EVENT, OPEN_INBOX_KEY } from './smm/dialogs/inboxApi';
 import { SmmSettingsPanel } from './smm/SmmSettingsPanel';
 import { SmmPublicationsPanel } from './smm/SmmPublicationsPanel';
 import { SmmDesignerPanel } from './smm/SmmDesignerPanel';
@@ -48,12 +53,25 @@ const VIEWS: [View, string, typeof Link2][] = [
 
 const VIEW_KEYS = VIEWS.map(([key]) => key);
 
-interface SMMFactoryTabProps {
-  agents: AgentModel[];
+function conversationRequested(): boolean {
+  try {
+    return Boolean(localStorage.getItem(OPEN_INBOX_KEY));
+  } catch {
+    return false;
+  }
 }
 
-export function SMMFactoryTab({ agents }: SMMFactoryTabProps) {
+interface SMMFactoryTabProps {
+  agents: AgentModel[];
+  /** Conversations with unread customer messages — shown on «Диалоги». */
+  unreadDialogs?: number;
+  onOpenClient?: (clientId: string) => void;
+}
+
+export function SMMFactoryTab({ agents, unreadDialogs = 0, onOpenClient }: SMMFactoryTabProps) {
   const [view, setView] = useState<View>(() => {
+    // Another section (the client card) asked for one conversation: open on it.
+    if (conversationRequested()) return 'dialogs';
     const stored = localStorage.getItem('smm_factory_view') as View | null;
     // A view name from an older build (or a hand-edited key) must not leave the
     // section rendering nothing at all.
@@ -68,6 +86,14 @@ export function SMMFactoryTab({ agents }: SMMFactoryTabProps) {
   useEffect(() => {
     localStorage.setItem('smm_factory_view', view);
   }, [view]);
+
+  // Already mounted on another view: switch to «Диалоги»; the section picks the
+  // conversation id up from storage when it mounts.
+  useEffect(() => {
+    const open = () => setView('dialogs');
+    window.addEventListener(OPEN_INBOX_EVENT, open);
+    return () => window.removeEventListener(OPEN_INBOX_EVENT, open);
+  }, []);
 
   useEffect(() => {
     const load = () => {
@@ -98,7 +124,7 @@ export function SMMFactoryTab({ agents }: SMMFactoryTabProps) {
           <h2 className="glow-text-cyan" style={styles.tabTitle}>SMM FACTORY</h2>
           <p style={styles.tabSubtitle}>
             Создавайте, публикуйте и отслеживайте посты в соцсетях — вместе с подключениями,
-            живыми диалогами и черновиками ответов на подтверждение
+            диалогами и звонками клиентов и черновиками ответов на подтверждение
           </p>
         </div>
       </div>
@@ -111,6 +137,9 @@ export function SMMFactoryTab({ agents }: SMMFactoryTabProps) {
               <span>{label}</span>
               {key === 'drafts' && pendingDrafts > 0 && (
                 <span className="admin-subnav-count">{pendingDrafts}</span>
+              )}
+              {key === 'dialogs' && unreadDialogs > 0 && (
+                <span className="admin-subnav-count" aria-label={`${unreadDialogs} диалогов с непрочитанными`}>{unreadDialogs}</span>
               )}
             </button>
           ))}
@@ -126,7 +155,7 @@ export function SMMFactoryTab({ agents }: SMMFactoryTabProps) {
         <SmmDesignerPanel post={editing} onSaved={closeDesigner} onCancel={closeDesigner} />
       )}
       {view === 'connections' && <MessengerChannelsTab agents={agents} view="connections" />}
-      {view === 'dialogs' && <SmmDialogsPanel />}
+      {view === 'dialogs' && <DialogsSection onOpenClient={onOpenClient} />}
       {view === 'drafts' && <MessengerChannelsTab agents={agents} view="drafts" />}
       {view === 'activity' && <MessengerChannelsTab agents={agents} view="activity" />}
       {view === 'settings' && <SmmSettingsPanel />}

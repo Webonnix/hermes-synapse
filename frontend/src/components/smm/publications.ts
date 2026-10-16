@@ -83,17 +83,17 @@ export interface PostPlatform {
 }
 
 export const POST_PLATFORMS: PostPlatform[] = [
-  { id: 'telegram', label: 'Telegram', icon: Send, color: '#3aa8e0', deliverable: true, limit: 4096, targetHint: 'ID канала или @username, куда публиковать' },
-  { id: 'vk', label: 'VK', icon: MessageCircle, color: '#5b8ac7', deliverable: true, limit: 16000, targetHint: 'ID беседы или пользователя' },
-  { id: 'discord', label: 'Discord', icon: MessageCircle, color: '#8b93e8', deliverable: true, limit: 2000, targetHint: 'ID канала Discord' },
-  { id: 'slack', label: 'Slack', icon: MessageCircle, color: '#5ecfa8', deliverable: true, limit: 4000, targetHint: 'ID или #название канала' },
-  { id: 'instagram', label: 'Instagram', icon: Instagram, color: '#e072b8', deliverable: false, limit: 2200 },
-  { id: 'facebook', label: 'Facebook', icon: Facebook, color: '#5b8ac7', deliverable: false, limit: 63206 },
-  { id: 'twitter', label: 'Twitter / X', icon: Twitter, color: '#c8cede', deliverable: false, limit: 280 },
-  { id: 'linkedin', label: 'LinkedIn', icon: Linkedin, color: '#4f9fd4', deliverable: false, limit: 3000 },
-  { id: 'youtube', label: 'YouTube', icon: Youtube, color: '#e8687f', deliverable: false, limit: 5000 },
-  { id: 'whatsapp', label: 'WhatsApp', icon: MessageCircle, color: '#5ff0bf', deliverable: true, limit: 4096, targetHint: 'Номер получателя в формате E.164' },
-  { id: 'email', label: 'Email-рассылка', icon: AtSign, color: '#ffc348', deliverable: false, limit: 0 },
+  { id: 'telegram', label: 'Telegram', icon: Send, color: '#36cffb', deliverable: true, limit: 4096, targetHint: 'ID канала или @username, куда публиковать' },
+  { id: 'vk', label: 'VK', icon: MessageCircle, color: '#3b82f6', deliverable: true, limit: 16000, targetHint: 'ID беседы или пользователя' },
+  { id: 'discord', label: 'Discord', icon: MessageCircle, color: '#9277ff', deliverable: true, limit: 2000, targetHint: 'ID канала Discord' },
+  { id: 'slack', label: 'Slack', icon: MessageCircle, color: '#35d49a', deliverable: true, limit: 4000, targetHint: 'ID или #название канала' },
+  { id: 'instagram', label: 'Instagram', icon: Instagram, color: '#ff6ad5', deliverable: false, limit: 2200 },
+  { id: 'facebook', label: 'Facebook', icon: Facebook, color: '#3b82f6', deliverable: false, limit: 63206 },
+  { id: 'twitter', label: 'Twitter / X', icon: Twitter, color: '#c9cfd8', deliverable: false, limit: 280 },
+  { id: 'linkedin', label: 'LinkedIn', icon: Linkedin, color: '#36cffb', deliverable: false, limit: 3000 },
+  { id: 'youtube', label: 'YouTube', icon: Youtube, color: '#f05d75', deliverable: false, limit: 5000 },
+  { id: 'whatsapp', label: 'WhatsApp', icon: MessageCircle, color: '#35d49a', deliverable: true, limit: 4096, targetHint: 'Номер получателя в формате E.164' },
+  { id: 'email', label: 'Email-рассылка', icon: AtSign, color: '#f6b84a', deliverable: false, limit: 0 },
 ];
 
 const FALLBACK_PLATFORM: PostPlatform = {
