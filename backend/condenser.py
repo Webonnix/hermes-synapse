@@ -54,8 +54,7 @@ async def _summarize_chunk(agent: Any, previous_summary: str, new_messages: List
         max_tokens=500,
         provider_options={
             "provider": agent.provider,
-            "num_ctx": agent.ollama_num_ctx,
-            "keep_alive": agent.ollama_keep_alive,
+            "num_ctx": agent.local_num_ctx,
         },
     )
     return (result.content or "").strip()

@@ -20,7 +20,7 @@ const MAX_IDLE_RETRIES = 3;
 const APP_VERSION = '2.0.1';
 
 function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem('jarvis_auth_token');
+  const token = localStorage.getItem('vexa_auth_token');
   return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
 }
 
@@ -153,7 +153,7 @@ export function VexaCommandCenter({
   const [providers, setProviders] = useState<ProviderBinding[]>([]);
   const [pendingExternalId, setPendingExternalId] = useState<string | null>(null);
   const [pendingModelName, setPendingModelName] = useState('');
-  const [jarvisSaving, setJarvisSaving] = useState(false);
+  const [vexaSaving, setVexaSaving] = useState(false);
 
   const [audioAnalyser] = useState(() => new VexaAudioAnalyser(micStreamRef, ttsAudioElRef));
   useEffect(() => () => audioAnalyser.dispose(), [audioAnalyser]);
@@ -169,12 +169,12 @@ export function VexaCommandCenter({
   }, [draft]);
 
   // ---- derived agent/voice facts -------------------------------------------
-  const jarvisAgent = useMemo(() => agents.find(agent => agent.id === 'jarvis'), [agents]);
-  const [initialLocalModel] = useState(() => jarvisAgent?.model || 'qwen3:8b');
+  const vexaAgent = useMemo(() => agents.find(agent => agent.id === 'vexa'), [agents]);
+  const [initialLocalModel] = useState(() => vexaAgent?.model || 'qwen3.8-27b');
   const activeProviders = useMemo(() => providers.filter(item => item.status === 'active'), [providers]);
-  const effectiveProviderValue = jarvisAgent && activeProviders.some(item => item.id === jarvisAgent.model_provider)
-    ? jarvisAgent.model_provider!
-    : 'ollama';
+  const effectiveProviderValue = vexaAgent && activeProviders.some(item => item.id === vexaAgent.model_provider)
+    ? vexaAgent.model_provider!
+    : 'local';
   const activeProviderName = activeProviders.find(item => item.id === effectiveProviderValue)?.name;
 
   // Outcomes of the assistant runs present in the loaded history — the only accuracy
@@ -243,17 +243,17 @@ export function VexaCommandCenter({
   }, []);
 
   // ---- model switching ------------------------------------------------------
-  const saveJarvisProvider = async (nextProviderId: string, nextModel: string) => {
-    if (!jarvisAgent || !nextModel.trim()) return;
-    setJarvisSaving(true);
+  const saveVexaProvider = async (nextProviderId: string, nextModel: string) => {
+    if (!vexaAgent || !nextModel.trim()) return;
+    setVexaSaving(true);
     try {
       const response = await fetch('/api/agents', {
         method: 'POST',
         headers: authHeaders(),
         body: JSON.stringify({
-          ...jarvisAgent,
+          ...vexaAgent,
           model_provider: nextProviderId,
-          model_type: nextProviderId === 'ollama' ? 'local' : 'external',
+          model_type: nextProviderId === 'local' ? 'local' : 'external',
           model: nextModel.trim(),
         }),
       });
@@ -263,7 +263,7 @@ export function VexaCommandCenter({
         setPendingModelName('');
       }
     } finally {
-      setJarvisSaving(false);
+      setVexaSaving(false);
     }
   };
 
@@ -276,8 +276,8 @@ export function VexaCommandCenter({
     // instead of silently dropping it.
     if (isGenerating && !window.confirm(copy.modelSwitchBusy)) return;
     if (isGenerating) onStop();
-    if (value === 'ollama') {
-      void saveJarvisProvider('ollama', initialLocalModel);
+    if (value === 'local') {
+      void saveVexaProvider('local', initialLocalModel);
     } else {
       setPendingExternalId(value);
       setPendingModelName('');
@@ -495,18 +495,18 @@ export function VexaCommandCenter({
 
         <div className="vx-area-system vx-column">
           <SystemStatusCard copy={copy} overview={telemetry.overview} />
-          {jarvisAgent && (
+          {vexaAgent && (
             <ModelSelectorCard
               copy={copy}
               providers={activeProviders}
               selectedProviderId={effectiveProviderValue}
               pendingProviderId={pendingExternalId}
               pendingModelName={pendingModelName}
-              saving={jarvisSaving}
+              saving={vexaSaving}
               activeProviderName={activeProviderName}
               onSelectProvider={handleProviderSelect}
               onPendingModelChange={setPendingModelName}
-              onApply={() => pendingExternalId && void saveJarvisProvider(pendingExternalId, pendingModelName)}
+              onApply={() => pendingExternalId && void saveVexaProvider(pendingExternalId, pendingModelName)}
               onCancel={() => { setPendingExternalId(null); setPendingModelName(''); }}
             />
           )}
@@ -588,7 +588,7 @@ export function VexaCommandCenter({
             copy={copy}
             agents={agents}
             activeCount={activeAgents.length}
-            selectedAgentId="jarvis"
+            selectedAgentId="vexa"
             onOpenAgent={agentId => onOpenAgentChat(agentId)}
             onOpenAll={() => onOpenAgentChat()}
           />

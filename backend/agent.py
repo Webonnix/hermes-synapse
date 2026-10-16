@@ -2,6 +2,8 @@ import os
 import time
 import logging
 import asyncio
+import contextlib
+import contextvars
 import hashlib
 import re
 import json
@@ -10,6 +12,14 @@ import httpx
 from dotenv import load_dotenv
 
 from backend.tool_permissions import MAIN_AGENT_ID, LEGACY_MAIN_AGENT_ID
+from backend.llamacpp_client import (
+    DEFAULT_MODEL as DEFAULT_LOCAL_MODEL,
+    LOCAL_PROVIDER,
+    is_llamacpp_provider,
+    is_local_provider_id,
+    normalize_base_url as normalize_llamacpp_base_url,
+    normalize_provider,
+)
 
 logger = logging.getLogger("hermes.agent")
 
@@ -86,11 +96,46 @@ def _work_discipline(tool_names: Set[str]) -> str:
     lines.append(_WORK_DISCIPLINE_ALWAYS)
     return "\n\nКак вести работу:\n" + "\n".join(lines)
 
+# How many times in a row the model may issue the byte-identical set of tool
+# calls before the turn is treated as stuck. Consecutive is the load-bearing
+# word: re-running the same command after changing something in between is
+# ordinary work, repeating it back-to-back with nothing in between is a loop.
+_REPEATED_TOOL_CALL_LIMIT = 3
+
+# Stop the tool loop once the prompt reaches this share of num_ctx. Past the
+# window llama.cpp silently drops the oldest tokens — which is the system
+# prompt — so the model keeps answering while quietly losing who it is. Better
+# to wrap up on our terms while the context still holds the whole turn.
+_CONTEXT_STOP_RATIO = 0.85
+
+
 FINAL_ANSWER_RETRY_PROMPT = (
     "Предыдущая генерация не дала видимого финального ответа: она была пустой, "
     "содержала только скрытые рассуждения или оборвалась по лимиту токенов. "
     "Ответь на последний запрос пользователя заново. Не показывай ход рассуждений. "
     "Верни только короткий финальный ответ на языке пользователя."
+)
+
+# The same recovery, but for a turn whose tools already ran. Repeating the plain
+# prompt there invites the model to start the work over from scratch and blow the
+# budget the same way; the results it needs are already sitting in `messages`.
+FINAL_ANSWER_RETRY_PROMPT_AFTER_TOOLS = (
+    "Предыдущая генерация оборвалась и не дала видимого ответа. "
+    "Инструменты уже выполнены, их результаты есть выше в истории. "
+    "Не вызывай инструменты снова и не начинай работу заново. "
+    "Не показывай ход рассуждений. Коротко сформулируй финальный ответ пользователю "
+    "по уже полученным результатам на языке пользователя; если данных не хватает, "
+    "прямо скажи, что именно осталось сделать."
+)
+
+# Asked of the model when the loop stops before it volunteered a final answer.
+# By then the turn may hold dozens of real tool results, and ending on a canned
+# apology throws all of it away.
+LOOP_WRAP_UP_PROMPT = (
+    "Остановись и подведи итог: лимит шагов в этом ходе исчерпан. "
+    "Не вызывай больше инструменты. По уже полученным результатам напиши "
+    "пользователю на его языке, что сделано, что выяснилось и что осталось "
+    "сделать следующим шагом. Не показывай ход рассуждений."
 )
 
 TOOL_INTENT_KEYWORDS = {
@@ -99,6 +144,24 @@ TOOL_INTENT_KEYWORDS = {
     ],
     "get_weather": [
         "погода", "температура", "прогноз", "weather", "forecast"
+    ],
+    # Self-knowledge and self-extension. These had no keywords, so "что ты
+    # умеешь" or "подключи мне X" could only reach them if the model happened
+    # to call list_tools first — the agent could not answer questions about
+    # itself without a lucky guess.
+    "diagnose_capabilities": [
+        "что ты умеешь", "твои возможност", "какие инструменты", "диагностик",
+        "self-check", "what can you do"
+    ],
+    "request_capability": [
+        "новая возможност", "добавь возможност", "запроси доступ", "не хватает инструмент"
+    ],
+    "request_mcp_connection": [
+        "mcp", "подключи сервис", "подключи api", "интеграци"
+    ],
+    "generate_image": [
+        "нарисуй", "картинк", "изображени", "иллюстрац", "сгенерируй фото",
+        "сгенерируй изображение", "draw", "image of"
     ],
     "get_current_time_israel": [
         "время", "дата", "день недели", "который час", "time", "date"
@@ -168,6 +231,14 @@ TOOL_INTENT_KEYWORDS = {
     "call_subagent": [
         "передай агенту", "спроси агента", "call subagent"
     ],
+    "phone_call": [
+        "позвони", "набери", "обзвони", "сделай звонок", "позвонить клиенту", "phone call", "call them",
+    ],
+    "take_message": [
+        "перезвон", "свяжитесь со мной", "свяжется со мной", "пусть свяжется", "передайте",
+        "передай ему", "передай ей", "оставить сообщение", "оставлю сообщение", "позвоните мне",
+        "напишите мне", "call me back", "leave a message", "contact me", "get back to me",
+    ],
     "list_subagents": [
         "список агентов", "list agents", "list subagents"
     ],
@@ -212,11 +283,30 @@ TOOL_INTENT_BUNDLES: Dict[str, Dict[str, List[str]]] = {
             "почини", "исправь", "ошибк", "тест", "test", "pytest",
             "разработ", "реализуй", "имплемент", "implement", "pull request",
             "напиши функц", "напиши скрипт", "напиши класс", "деплой", "deploy",
+            # Building a product, not editing a file. Deliberately phrased as
+            # verb+noun rather than the bare word "сайт": "почитай сайт X" is a
+            # research request and must stay routable to the research agent.
+            "сделай сайт", "сделать сайт", "создай сайт", "создать сайт",
+            "построй сайт", "напиши сайт", "сверстай", "лендинг", "landing page",
+            "сделай приложение", "создай приложение", "веб-приложение",
+            "интернет-магазин", "прототип",
+            # Watching the autonomous board.
+            "прогон", "канбан", "kanban", "карточк",
         ],
         "tools": [
             "dev_list_dir", "dev_read_file", "dev_write_file", "dev_patch",
             "dev_exec", "dev_run_tests",
             "git_status", "git_diff", "git_commit", "git_push",
+            # Shipping the result, not just writing it: without these the agent
+            # could build a site in the sandbox and had no way to publish it or
+            # to look at what it had published.
+            "dev_publish_demo", "dev_review_demo",
+            # Handing the whole job to the autonomous executor, and following it.
+            "start_dev_run", "list_dev_runs",
+            # Real development needs facts — an API's actual signature, a
+            # library's current version, a product's real specification. Writing
+            # those from memory is how a run shipped invented prices.
+            "web_search", "browser_read",
         ],
     },
     "agents": {
@@ -364,7 +454,7 @@ def _is_local_llm_endpoint(api_base: str) -> bool:
         "127.0.0.1",
         "0.0.0.0",
         "host.docker.internal",
-        "ollama",
+        "hermes-llama",
         "lmstudio",
         "lm-studio",
         "localai",
@@ -389,13 +479,13 @@ def _local_model_system_hint(model: str, api_base: str, think: Any = None) -> st
     output.  Hermes, Llama, Mistral and most other local models do NOT need
     this hint — it can actually confuse them.
 
-    ``think`` is the active ``ollama_think`` setting. When the owner has
+    ``think`` is the active ``local_think`` setting. When the owner has
     deliberately turned reasoning on (Qwen3.x hybrids take "low"/"medium"/
     "high"), sending ``/no_think`` in the same request fights that setting and
     strips exactly the planning the model needs for multi-step tool chains —
     delegation and code work suffer most. In that case we only ask it to keep
-    the reasoning out of the *visible* answer, which Ollama already does by
-    returning it on a separate channel.
+    the reasoning out of the *visible* answer, which llama.cpp already does by
+    returning it as reasoning_content.
     """
     if not _is_qwen_model(model):
         return ""
@@ -427,9 +517,8 @@ _KNOWN_PROVIDER_HOSTS = {
 def _provider_display_name(api_base: str, is_openmodel: bool = False, provider: str = "") -> str:
     if is_openmodel:
         return "OpenModel"
-    from backend.ollama_client import is_ollama_provider
-    if is_ollama_provider(api_base, provider):
-        return "Ollama"
+    if is_llamacpp_provider(api_base, provider):
+        return "llama.cpp"
     if _is_local_llm_endpoint(api_base):
         return "локальной LLM"
     # Any provider_bindings target that isn't a recognized name still gets a real
@@ -444,8 +533,7 @@ def _provider_cost(
     api_base: str, provider: str, model: str, input_tokens: int, output_tokens: int,
     provider_id: Optional[str] = None,
 ) -> float:
-    from backend.ollama_client import is_ollama_provider
-    if is_ollama_provider(api_base, provider):
+    if is_llamacpp_provider(api_base, provider):
         return 0.0
     return calculate_cost(model, input_tokens, output_tokens, provider_id=provider_id)
 
@@ -523,7 +611,27 @@ def _resolve_agent_llm_config(
     wins; falls back to the local model if none resolve, or if the agent's
     tier forbids external providers outright. provider_id is None for the
     local fallback, else the provider_bindings id actually used (for billing:
-    calculate_cost's optional pricing-override lookup)."""
+    calculate_cost's optional pricing-override lookup).
+
+    A per-turn override (the chat's model picker) outranks the row: the user
+    picked a model for *this* conversation, and the agent row would otherwise
+    win the `model` while the override still supplied `api_base` — the exact
+    crossing that sent a local model id to the 9Router endpoint and came back
+    404. Endpoint, key, model and provider are taken as one set or not at all.
+    """
+    override = current_llm_override()
+    if override:
+        api_base = override.get("api_base") or fallback_api_base
+        provider_name = override.get("provider") or fallback_provider_name
+        return (
+            api_base,
+            override.get("api_key", fallback_api_key),
+            override.get("model") or fallback_model,
+            provider_name,
+            not is_llamacpp_provider(api_base, provider_name),
+            None,
+        )
+
     from backend.agent_provider_access import resolve_best_provider
     provider_id, resolved = resolve_best_provider(agent_row)
     api_base, api_key, provider_name, is_external = fallback_api_base, fallback_api_key, fallback_provider_name, False
@@ -531,7 +639,7 @@ def _resolve_agent_llm_config(
         api_base, api_key = resolved
         provider_name = "openai_compatible"
         is_external = True
-    elif (agent_row.get("model_provider") or "ollama") != "ollama":
+    elif not is_local_provider_id(agent_row.get("model_provider")):
         logger.warning(
             "Agent '%s' is bound to provider '%s' (and any configured fallbacks) but none are "
             "active/resolvable — falling back to the local model.",
@@ -539,6 +647,16 @@ def _resolve_agent_llm_config(
         )
     model = agent_row.get("model") or fallback_model
     return api_base, api_key, model, provider_name, is_external, provider_id
+
+
+def _is_failure_text(response_text: str) -> bool:
+    """Whether a finished turn is one of the apology strings the orchestration
+    paths return in place of an answer. Both languages appear in practice —
+    orchestrator.py emits the English one, this module the Russian one — and a
+    decision log that only knew about one of them recorded half the failures as
+    successes."""
+    text = (response_text or "").lstrip()
+    return text.startswith("Apologies, Albert.") or text.startswith("Простите, Альберт.")
 
 
 def _agent_budget_exceeded_status(agent_id: str) -> Optional[Dict[str, Any]]:
@@ -585,6 +703,20 @@ def _parse_tool_arguments(raw_args: Any) -> Dict[str, Any]:
         from backend.redaction import safe_log_preview
         logger.warning("Could not parse tool arguments as JSON (%s)", safe_log_preview(raw_args))
         return {}
+
+
+def _tool_call_signature(tool_calls: List[Dict[str, Any]]) -> str:
+    """A stable identity for one iteration's set of tool calls.
+
+    Names plus arguments, so `dev_exec` on two different commands reads as two
+    different moves. The call id is deliberately left out — it changes every
+    turn and would make every signature unique.
+    """
+    parts = []
+    for call in tool_calls or []:
+        fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+        parts.append(f"{fn.get('name')}:{_safe_json_dumps(fn.get('arguments', ''))}")
+    return "|".join(sorted(parts))
 
 
 def _normalize_tool_calls(tool_calls: Any) -> List[Dict[str, Any]]:
@@ -645,9 +777,19 @@ def _should_retry_empty_clean_response(clean_text: str) -> bool:
     return not clean_text.strip()
 
 
-def _visible_answer_retry_budget(configured_max_tokens: int) -> int:
-    """Give a no-thinking recovery enough room without allowing an unbounded retry."""
-    return max(512, min(4096, int(configured_max_tokens or 0)))
+def _visible_answer_retry_budget(configured_max_tokens: int, finish_reason: Optional[str] = None) -> int:
+    """Give a no-thinking recovery enough room without allowing an unbounded retry.
+
+    When the call being recovered stopped on ``length`` the budget it just ran
+    out of is precisely the thing that must not be repeated: retrying with the
+    same ceiling reproduces the truncation and the user gets the fallback text
+    twice over. Double it (bounded) so the recovery can actually finish a
+    sentence; every other empty-response cause keeps the original modest cap.
+    """
+    configured = int(configured_max_tokens or 0)
+    if finish_reason == "length":
+        return max(2048, min(8192, configured * 2))
+    return max(512, min(4096, configured))
 
 
 # Generation settings an agent may set per model. Anything outside this list
@@ -681,16 +823,36 @@ def _visible_answer_retry_options(provider_options: Dict[str, Any]) -> Dict[str,
     return {**provider_options, "think": False}
 
 
-def _empty_model_response_fallback(agent_name: str = "Vexa", finish_reason: Optional[str] = None) -> str:
+def _empty_model_response_fallback(
+    agent_name: str = "Vexa",
+    finish_reason: Optional[str] = None,
+    *,
+    retry_attempted: bool = True,
+    max_tokens: Optional[int] = None,
+) -> str:
+    """User-facing text for a turn that produced nothing.
+
+    It used to blame the reasoning channel for every ``length`` stop and claim a
+    no-reasoning retry had been made — both were often false. A turn that writes
+    a long tool call (a script passed to ``dev_exec``, a file body) runs out of
+    ``num_predict`` mid-JSON with reasoning switched off entirely, and the
+    recovery call was skipped outright once any tool had run. Say what actually
+    happened and name the knob that actually helps.
+    """
+    retry_note = (
+        " Автоматическая повторная попытка тоже не дала текста."
+        if retry_attempted else ""
+    )
     if finish_reason == "length":
+        budget = f" (сейчас {int(max_tokens)})" if max_tokens else ""
         return (
-            f"{agent_name} не успела сформировать финальный ответ: модель израсходовала "
-            "лимит генерации на внутреннее рассуждение. Автоматическая попытка без reasoning "
-            "тоже не дала текста. Увеличьте лимит ответа или переключите режим на balanced."
+            f"{agent_name} не успела сформировать финальный ответ: генерация оборвалась "
+            f"по лимиту токенов{budget} — ответ или вызов инструмента не поместился "
+            f"в бюджет.{retry_note} Увеличьте лимит ответа в настройках или переключитесь "
+            "на /mode deep, либо разбейте задачу на шаги поменьше."
         )
     return (
-        f"{agent_name} получила от модели пустой финальный ответ. "
-        "Автоматическая повторная генерация без reasoning не помогла. "
+        f"{agent_name} получила от модели пустой финальный ответ.{retry_note} "
         "Попробуйте повторить запрос или выбрать другой режим модели."
     )
 
@@ -955,9 +1117,16 @@ async def classify_complexity(user_message: str, api_key: str, api_base: str, pr
     if routing_mode == "always_orchestrate":
         return "orchestrate"
     
-    # Try LLM classifier with the fast/cheap planner model
+    # Try LLM classifier with the fast/cheap planner model. `api_base` is the
+    # caller's — including the chat's per-turn pick — so an active override
+    # decides the model too: AGENT_MODEL_PLANNER/LLM_MODEL name the local
+    # model, which a 9Router endpoint answers with a 404.
     from backend.subagents import get_agent_model
-    classifier_model = get_agent_model("planner", os.getenv("LLM_MODEL", "qwen3:8b"))
+    override = current_llm_override()
+    if override and override.get("model"):
+        classifier_model = override["model"]
+    else:
+        classifier_model = get_agent_model("planner", os.getenv("LLM_MODEL", "") or agent_instance.configured_model)
     
     try:
         from backend.llm_client import call_llm_normalized
@@ -976,8 +1145,7 @@ async def classify_complexity(user_message: str, api_key: str, api_base: str, pr
             max_retries=0,
             provider_options={
                 "provider": provider,
-                "num_ctx": _env_int("OLLAMA_NUM_CTX", 8192),
-                "keep_alive": os.getenv("OLLAMA_KEEP_ALIVE", "5m"),
+                "num_ctx": _env_int("LOCAL_NUM_CTX", 32768),
                 "think": False,
             },
         )
@@ -1115,18 +1283,142 @@ CRITICAL RULES FOR OBSIDIAN:
 If the user asks what you can do, or requests info about a specific skill, describe its capabilities in a detailed, polite, and signature manner using these user-friendly names. Never use technical function names like "get_weather" in dialogue unless the user explicitly asks for them.
 """
 
+# ── Per-turn model override ──────────────────────────────────────────────────
+# The chat UI lets a single message be sent to a model other than the globally
+# configured one (a bigger local model, or anything in the 9Router catalogue).
+# The agent is a process-wide singleton shared by every WebSocket connection,
+# the Telegram bot and the schedulers, so swapping self.model for the duration
+# of a turn would leak that choice into whatever else happened to be running.
+# A ContextVar is task-local and is copied into anything the turn spawns
+# (asyncio.to_thread included), so the override reaches every self.model read
+# inside the turn and nothing outside it.
+_LLM_OVERRIDE: contextvars.ContextVar[Optional[Dict[str, str]]] = contextvars.ContextVar(
+    "hermes_llm_override", default=None,
+)
+
+# What a reply keeps in messages.run_meta, so its stats survive a page reload.
+_PERSISTED_RUN_META_KEYS = (
+    "status", "model", "provider", "finish_reason", "latency_ms",
+    "generation_ms", "decode_ms", "prompt_ms",
+    "input_tokens", "output_tokens", "tool_iterations",
+)
+
+
+def _override_field(field: str) -> Optional[str]:
+    override = _LLM_OVERRIDE.get()
+    if not override:
+        return None
+    value = override.get(field)
+    return value if value else None
+
+
+def current_llm_override() -> Optional[Dict[str, str]]:
+    """The per-turn model override in force right now, or None.
+
+    Anything that resolves an endpoint *and* a model name as a pair has to ask,
+    because the two must travel together: applying the override's api_base while
+    letting a DB row supply the model is what sends `unsloth-mtp-q4km` to
+    9Router (HTTP 404 "No active credentials for provider: openai")."""
+    override = _LLM_OVERRIDE.get()
+    return dict(override) if override else None
+
+
+@contextlib.contextmanager
+def no_llm_override():
+    """Run a block outside the chat's per-turn model choice.
+
+    Used at delegation boundaries: a sub-agent is a configured entity with its
+    own model and provider, so the model the *user* picked for their own
+    conversation must not follow the work into it.
+
+    Drops the orchestration helpers' per-turn endpoint along with it: the two
+    are one decision, and leaving the endpoint behind would recreate the same
+    model-vs-endpoint crossing one layer down."""
+    from backend.subagents import default_llm_runtime
+    token = _LLM_OVERRIDE.set(None)
+    try:
+        with default_llm_runtime():
+            yield
+    finally:
+        _LLM_OVERRIDE.reset(token)
+
+
 class VexaAgent:
+    # These four are read all over respond() and its helpers. Routing them
+    # through the per-turn override here means the whole call tree — cost
+    # accounting, the local-model prompt hint, the local-vs-remote branch —
+    # follows the picked model without a single extra parameter being threaded
+    # through it. Outside a turn the ContextVar is empty and they behave like
+    # the plain attributes they used to be.
+    @property
+    def model(self) -> str:
+        return _override_field("model") or self._model
+
+    @model.setter
+    def model(self, value: str) -> None:
+        self._model = value
+
+    @property
+    def api_base(self) -> str:
+        return _override_field("api_base") or self._api_base
+
+    @api_base.setter
+    def api_base(self, value: str) -> None:
+        self._api_base = value
+
+    @property
+    def api_key(self) -> str:
+        override = _LLM_OVERRIDE.get()
+        # Unlike the others an empty key is legitimate (the local llama.cpp server), so the
+        # presence of the override decides, not the truthiness of the value.
+        if override and "api_key" in override:
+            return override["api_key"]
+        return self._api_key
+
+    @api_key.setter
+    def api_key(self, value: str) -> None:
+        self._api_key = value
+
+    @property
+    def provider(self) -> str:
+        return _override_field("provider") or self._provider
+
+    @provider.setter
+    def provider(self, value: str) -> None:
+        self._provider = value
+
+    # The same four values as the dashboard has them configured, ignoring any
+    # per-turn choice. Read these wherever the *configured local* endpoint is
+    # what is meant regardless of what the chat is being held against — the
+    # redaction confirmation pass (which must never leave the box) is the
+    # clearest case.
+    @property
+    def configured_model(self) -> str:
+        return self._model
+
+    @property
+    def configured_api_base(self) -> str:
+        return self._api_base
+
+    @property
+    def configured_api_key(self) -> str:
+        return self._api_key
+
+    @property
+    def configured_provider(self) -> str:
+        return self._provider
+
     def __init__(self):
-        self.provider = os.getenv("LLM_PROVIDER", "ollama").strip().lower()
+        self.provider = normalize_provider(os.getenv("LLM_PROVIDER", LOCAL_PROVIDER)) or LOCAL_PROVIDER
         self.lock_provider_endpoint = _env_bool("LLM_LOCK_PROVIDER_ENDPOINT", False)
         self.api_key = os.getenv("OPENROUTER_API_KEY", "")
-        self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+        self.local_base_url = normalize_llamacpp_base_url(os.getenv("LLAMACPP_BASE_URL"))
         self.openai_api_base = os.getenv("LLM_API_BASE", "https://openrouter.ai/api/v1").rstrip("/")
-        if self.provider == "ollama":
-            self.api_base = self.ollama_base_url
+        if self.provider == LOCAL_PROVIDER:
+            self.api_base = self.local_base_url
         else:
             self.api_base = self.openai_api_base
-        self.model = os.getenv("LLM_MODEL", "qwen3:8b")
+        self.model = os.getenv("LLM_MODEL", DEFAULT_LOCAL_MODEL)
         self.system_prompt = DEFAULT_SYSTEM_PROMPT
         self.fast_mode = _env_bool("LLM_FAST_MODE", False)
         self.max_history_len = _env_int("LLM_MAX_HISTORY_MESSAGES", 6 if self.fast_mode else 20)
@@ -1135,16 +1427,29 @@ class VexaAgent:
         # condense cycle. See condenser.py.
         self.condenser_enabled = _env_bool("LLM_CONDENSER_ENABLED", False)
         self.condense_trigger_extra = _env_int("LLM_CONDENSE_TRIGGER_MESSAGES", 10)
-        self.max_tokens = _env_int("LLM_MAX_TOKENS", 1024 if self.fast_mode else 2048)
-        self.tool_max_tokens = _env_int("LLM_TOOL_MAX_TOKENS", 1024 if self.fast_mode else 2048)
+        self.max_tokens = _env_int("LLM_MAX_TOKENS", 1024 if self.fast_mode else 4096)
+        # A tool-loop turn spends its budget on the *arguments* — a script handed to
+        # dev_exec, a file body handed to dev_write_file — and when num_predict runs
+        # out mid-JSON the provider's parser drops the incomplete call, so the turn
+        # comes back with neither content nor tool calls. 2048 was routinely too
+        # small for that; give tool turns more room than plain prose turns.
+        self.tool_max_tokens = _env_int("LLM_TOOL_MAX_TOKENS", 2048 if self.fast_mode else 6144)
         self.temperature = _env_float("LLM_TEMPERATURE", 0.3 if self.fast_mode else 0.7)
-        self.ollama_num_ctx = _env_int("OLLAMA_NUM_CTX", 8192)
-        self.ollama_keep_alive = os.getenv("OLLAMA_KEEP_ALIVE", "5m")
-        self.ollama_think: Any = os.getenv("OLLAMA_THINK", "false")
+        # The context the local server runs with (LLAMA_CTX_SIZE). main.py's
+        # startup check adopts the real value from the server's /props, so the
+        # context guards below measure against what is actually allocated.
+        self.local_num_ctx = _env_int("LOCAL_NUM_CTX", 32768)
+        self.local_think: Any = os.getenv("LOCAL_THINK", "false")
         # Hard ceilings to prevent runaway agent loops / cost (audit P0, P1-4).
         # 8 was too tight for a real code change: list → read → patch → test →
         # fix → test → commit is already 7 calls before anything is reported.
-        self.max_tool_iterations = _env_int("LLM_MAX_TOOL_ITERATIONS", 12)
+        # 12 was low enough that ordinary multi-step work ("собери отчёт по
+        # серверу") died on the cap rather than finishing. The cap is no longer
+        # the only thing standing between a stuck model and an endless tool
+        # loop — _REPEATED_TOOL_CALL_LIMIT and the context guard in respond()
+        # catch the two ways a turn actually runs away — so it can be a real
+        # working budget instead of a tripwire.
+        self.max_tool_iterations = _env_int("LLM_MAX_TOOL_ITERATIONS", 50)
         self.request_timeout = _env_float("LLM_REQUEST_TIMEOUT", 60.0)
         self.auto_rag = _env_bool("RAG_AUTO_CONTEXT", False)
         self.memory_enabled = _env_bool("MEMORY_ENABLED", True)
@@ -1180,11 +1485,10 @@ class VexaAgent:
             self.update_runtime_config(
                 provider=settings.get("provider"),
                 api_base=settings.get("api_base"),
-                ollama_base_url=settings.get("ollama_base_url"),
+                local_base_url=settings.get("local_base_url"),
                 openai_api_base=settings.get("openai_api_base"),
-                ollama_num_ctx=settings.get("ollama_num_ctx"),
-                ollama_keep_alive=settings.get("ollama_keep_alive"),
-                ollama_think=settings.get("ollama_think"),
+                local_num_ctx=settings.get("local_num_ctx"),
+                local_think=settings.get("local_think"),
                 fast_mode=settings.get("fast_mode"),
                 max_history_len=settings.get("max_history_len"),
                 condenser_enabled=settings.get("condenser_enabled"),
@@ -1225,11 +1529,10 @@ class VexaAgent:
             "provider": self.provider,
             "provider_endpoint_locked": self.lock_provider_endpoint,
             "api_base": self.api_base,
-            "ollama_base_url": self.ollama_base_url,
+            "local_base_url": self.local_base_url,
             "openai_api_base": self.openai_api_base,
-            "ollama_num_ctx": self.ollama_num_ctx,
-            "ollama_keep_alive": self.ollama_keep_alive,
-            "ollama_think": self.ollama_think,
+            "local_num_ctx": self.local_num_ctx,
+            "local_think": self.local_think,
             "fast_mode": self.fast_mode,
             "max_history_len": self.max_history_len,
             "condenser_enabled": self.condenser_enabled,
@@ -1247,7 +1550,7 @@ class VexaAgent:
     def update_runtime_config(self, **kwargs):
         if not self.lock_provider_endpoint:
             for key, attribute in (
-                ("ollama_base_url", "ollama_base_url"),
+                ("local_base_url", "local_base_url"),
                 ("openai_api_base", "openai_api_base"),
             ):
                 if kwargs.get(key) is not None:
@@ -1256,25 +1559,23 @@ class VexaAgent:
                         setattr(self, attribute, value)
             previous_provider = self.provider
             if kwargs.get("provider") is not None:
-                provider = str(kwargs["provider"]).strip().lower()
-                if provider in {"ollama", "openrouter", "openai_compatible"}:
+                provider = normalize_provider(kwargs["provider"])
+                if provider in {LOCAL_PROVIDER, "openrouter", "openai_compatible"}:
                     self.provider = provider
             if self.provider != previous_provider and kwargs.get("api_base") is None:
-                self.api_base = self.ollama_base_url if self.provider == "ollama" else self.openai_api_base
+                self.api_base = self.local_base_url if self.provider == LOCAL_PROVIDER else self.openai_api_base
             if kwargs.get("api_base") is not None:
                 value = str(kwargs["api_base"]).strip().rstrip("/")
                 if value.startswith(("http://", "https://")):
                     self.api_base = value
-                    if self.provider == "ollama":
-                        self.ollama_base_url = value
+                    if self.provider == LOCAL_PROVIDER:
+                        self.local_base_url = normalize_llamacpp_base_url(value)
                     else:
                         self.openai_api_base = value
-        if kwargs.get("ollama_num_ctx") is not None:
-            self.ollama_num_ctx = max(512, min(262144, int(kwargs["ollama_num_ctx"])))
-        if kwargs.get("ollama_keep_alive") is not None:
-            self.ollama_keep_alive = str(kwargs["ollama_keep_alive"]).strip() or "5m"
-        if kwargs.get("ollama_think") is not None:
-            self.ollama_think = kwargs["ollama_think"]
+        if kwargs.get("local_num_ctx") is not None:
+            self.local_num_ctx = max(512, min(262144, int(kwargs["local_num_ctx"])))
+        if kwargs.get("local_think") is not None:
+            self.local_think = kwargs["local_think"]
         if kwargs.get("fast_mode") is not None:
             self.fast_mode = bool(kwargs["fast_mode"])
         if kwargs.get("max_history_len") is not None:
@@ -1305,7 +1606,7 @@ class VexaAgent:
             mode = str(kwargs["telegram_reply_mode"]).strip().lower()
             if mode in ("text", "voice", "both"):
                 self.telegram_reply_mode = mode
-        if self.provider == "ollama" and _is_qwen_model(self.model) and _thinking_enabled(self.ollama_think):
+        if self.provider == LOCAL_PROVIDER and _is_qwen_model(self.model) and _thinking_enabled(self.local_think):
             # Qwen can consume its entire budget in the reasoning channel before ever
             # emitting visible text — empirically, a moderately complex question alone
             # can burn 1500-2000+ tokens on <think> content. 1024 was observed to still
@@ -1320,9 +1621,8 @@ class VexaAgent:
                 self.api_base,
                 {
                     "provider": self.provider,
-                    "num_ctx": self.ollama_num_ctx,
-                    "keep_alive": self.ollama_keep_alive,
-                    "think": self.ollama_think,
+                    "num_ctx": self.local_num_ctx,
+                    "think": self.local_think,
                 },
             )
         except Exception as exc:
@@ -1353,20 +1653,82 @@ class VexaAgent:
         session_id: str = "default",
         stream_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
         images: Optional[List[str]] = None,
+        llm_override: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """Run one agent turn, optionally against a model other than the
+        configured default.
+
+        ``llm_override`` comes from backend/chat_models.resolve_chat_model — it
+        is always a catalogue entry the server itself resolved, never an
+        endpoint named by the client. It is installed for the duration of this
+        turn only; see _LLM_OVERRIDE above for why that is a ContextVar and not
+        an attribute swap.
+
+        ``None`` is installed just as deliberately as a real override: a tool
+        that delegates (tools.call_subagent → respond(session_id=<child>)) runs
+        inside the caller's context, so without this reset the chat's picked
+        model would follow the delegation into an agent that has its own model
+        and its own endpoint — the one crossing that produces a local model name
+        sent to 9Router (HTTP 404) or vice versa."""
+        from backend.llm_client import track_turn_usage
+
+        token = _LLM_OVERRIDE.set(llm_override or None)
+        # Paths that never write run metadata (the orchestrator-agent branch)
+        # would otherwise hand main.py the previous turn's numbers.
+        self.last_run_metadata.pop(session_id, None)
+        started_at = time.time()
+        try:
+            with track_turn_usage() as turn_usage:
+                response_text = await self._respond(user_message, session_id, stream_callback, images)
+            self._fill_run_stats(session_id, turn_usage, int((time.time() - started_at) * 1000))
+            return response_text
+        finally:
+            _LLM_OVERRIDE.reset(token)
+
+    def _fill_run_stats(self, session_id: str, turn_usage: Any, latency_ms: int) -> None:
+        """Complete the reply's generation stats from the turn tracker.
+
+        Values _respond measured itself win; the tracker only fills what a path
+        left out — everything, for an orchestrated turn, and decode/prompt time
+        for a sub-agent. Without this the UI stats button has nothing to show
+        for most replies in the simple chat."""
+        if not turn_usage.calls:
+            return
+        try:
+            meta = dict(self.last_run_metadata.get(session_id) or {})
+            for key, value in turn_usage.as_meta().items():
+                if not meta.get(key):
+                    meta[key] = value
+            if not meta.get("latency_ms"):
+                meta["latency_ms"] = latency_ms
+            self.last_run_metadata[session_id] = meta
+
+            from backend.database import update_message_meta
+            update_message_meta(
+                self.last_saved_ids.get(session_id, {}).get("assistant"),
+                {key: meta[key] for key in _PERSISTED_RUN_META_KEYS if meta.get(key) is not None},
+            )
+        except Exception:
+            logger.exception("Could not attach generation stats for session %s", session_id)
+
+    async def _respond(
+        self,
+        user_message: str,
+        session_id: str = "default",
+        stream_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        images: Optional[List[str]] = None,
     ) -> str:
         """Run one agent turn and optionally emit native provider stream chunks."""
-        from backend.ollama_client import is_ollama_provider
-        if not self.api_key and not is_ollama_provider(self.api_base, self.provider):
+        if not self.api_key and not is_llamacpp_provider(self.api_base, self.provider):
             return "Ошибка: OPENROUTER_API_KEY не задан в конфигурации .env, Альберт."
 
-        from backend.subagents import configure_llm_runtime
-        configure_llm_runtime(
+        from backend.subagents import use_llm_runtime
+        use_llm_runtime(
             self.api_base,
             {
                 "provider": self.provider,
-                "num_ctx": self.ollama_num_ctx,
-                "keep_alive": self.ollama_keep_alive,
-                "think": self.ollama_think,
+                "num_ctx": self.local_num_ctx,
+                "think": self.local_think,
             },
         )
 
@@ -1409,7 +1771,10 @@ class VexaAgent:
                             f"Бюджет исчерпан (${budget_status['used_usd']:.4f}/${budget_status['budget_usd_limit']:.2f}) — переключение на локальную модель.",
                             "info", task=user_message,
                         )
-                        orch_api_base, orch_api_key, orch_provider_name = self.api_base, self.api_key, self.provider
+                        orch_api_base, orch_api_key, orch_provider_name = (
+                            self.configured_api_base, self.configured_api_key, self.configured_provider,
+                        )
+                        orch_model = subagent.get("model") or self.configured_model
                         orch_is_external, orch_provider_id, budget_status = False, None, None
                     elif budget_status:
                         update_agent_runtime_state(
@@ -1422,8 +1787,13 @@ class VexaAgent:
                             f"(${budget_status['used_usd']:.4f} / ${budget_status['budget_usd_limit']:.2f}, "
                             f"период: {budget_status['budget_period']}). Обратитесь к владельцу, чтобы увеличить лимит."
                         )
-                from backend.subagents import configure_llm_runtime as _configure_orch_runtime
-                _configure_orch_runtime(orch_api_base, {"provider": orch_provider_name, "num_ctx": self.ollama_num_ctx, "keep_alive": self.ollama_keep_alive, "think": self.ollama_think})
+                from backend.subagents import use_llm_runtime as _configure_orch_runtime
+                _configure_orch_runtime(orch_api_base, {"provider": orch_provider_name, "num_ctx": self.local_num_ctx, "think": self.local_think})
+                # Measured, not derived: the decision log below reads latency_ms,
+                # and until this existed it raised UnboundLocalError *after* a
+                # perfectly good answer — the reply was saved to the DB and then
+                # never broadcast, so every orchestrator-agent chat looked mute.
+                orch_started_at = time.time()
                 try:
                     orch_result = await run_orchestration(user_message, orch_api_key, orch_model, chat_id=session_id)
                     response_text = orch_result["response"]
@@ -1470,9 +1840,9 @@ class VexaAgent:
                     "timestamp": datetime.now(ZoneInfo("Asia/Jerusalem")).strftime("%Y-%m-%d %H:%M:%S"),
                     "session_id": session_id,
                     "model": orch_model,
-                    "latency_ms": latency_ms,
-                    "success": not response_text.startswith("Apologies, Albert."),
-                    "error": None if not response_text.startswith("Apologies, Albert.") else response_text,
+                    "latency_ms": int((time.time() - orch_started_at) * 1000),
+                    "success": not _is_failure_text(response_text),
+                    "error": None if not _is_failure_text(response_text) else response_text,
                     "prompt_tokens_estimate": prompt_est,
                     "user_message": user_message,
                     "assistant_response": response_text,
@@ -1623,8 +1993,8 @@ class VexaAgent:
                     error_msg = "budget_exceeded"
                     self.last_run_metadata[session_id] = {"is_complex": True, "complexity": complexity, "steps": [], "error": "budget_exceeded"}
                 else:
-                    from backend.subagents import configure_llm_runtime as _configure_orch_runtime
-                    _configure_orch_runtime(orch_api_base, {"provider": orch_provider_name, "num_ctx": self.ollama_num_ctx, "keep_alive": self.ollama_keep_alive, "think": self.ollama_think})
+                    from backend.subagents import use_llm_runtime as _configure_orch_runtime
+                    _configure_orch_runtime(orch_api_base, {"provider": orch_provider_name, "num_ctx": self.local_num_ctx, "think": self.local_think})
                     orch_result = await run_orchestration(context_query, orch_api_key, orch_model, chat_id=session_id)
                     response_text = orch_result["response"]
                     traces = orch_result["traces"]
@@ -1774,16 +2144,16 @@ class VexaAgent:
                 f"Отвечай кратко и напрямую. Не показывай ход рассуждений."
             )
         system_prompt = FAST_SYSTEM_PROMPT if self.fast_mode else self.system_prompt
-        system_info += _local_model_system_hint(self.model, self.api_base, self.ollama_think)
+        system_info += _local_model_system_hint(self.model, self.api_base, self.local_think)
         system_info += _address_directive()
         messages = [{"role": "system", "content": system_prompt + system_info}]
         for msg in history:
             messages.append(msg)
         user_message_payload: Dict[str, Any] = {"role": "user", "content": user_content}
         if images:
-            # Only the native Ollama chat path (used by the local vision-capable model)
-            # forwards this field — see OllamaClient._normalize_message. OpenAI-
-            # compatible providers strip unknown message keys in
+            # Only the local llama.cpp path (the vision-capable local model) forwards
+            # this field, as image_url parts — see llamacpp_client._openai_messages.
+            # OpenAI-compatible providers strip unknown message keys in
             # _sanitize_message_for_provider, so images are silently dropped there
             # rather than sent broken.
             user_message_payload["images"] = images
@@ -1797,7 +2167,7 @@ class VexaAgent:
         # it), so tokens ÷ latency would report a "speed" that says more about the
         # tools than about the model.
         generation_ms = 0
-        # Pure decode time when the provider reports it (Ollama does). This is
+        # Pure decode time when the provider reports it (llama.cpp does). This is
         # what a "tokens per second" figure should be divided by — generation_ms
         # still includes prompt ingestion and any model load.
         decode_ms = 0
@@ -1812,6 +2182,20 @@ class VexaAgent:
         last_finish_reason = None
         last_request_id = None
         response_status = "success"
+        # A turn that runs out of num_predict while writing a tool call gets one
+        # more attempt at the same move with a doubled budget. Once per turn:
+        # the flag is what keeps a model that simply cannot fit its call from
+        # spinning here (max_tool_iterations does not bound this branch, since
+        # nothing was executed).
+        budget_boost = 1
+        truncation_retry_used = False
+        # Runaway-loop detection: the signature of the previous iteration's tool
+        # calls, and how many times in a row it has now repeated.
+        last_tool_signature: Optional[str] = None
+        repeated_tool_calls = 1
+        # Prompt size of the most recent call, straight from the provider's own
+        # token count — the only honest measure of how full the window is.
+        context_tokens = 0
 
         try:
             from backend.llm_client import (
@@ -1823,7 +2207,7 @@ class VexaAgent:
                 call_llm_normalized,
             )
             # Only when this agent has no explicit global provider override
-            # (self.provider == 'ollama', the default) does the local model get
+            # (self.provider == 'llamacpp', the default) does the local model get
             # to decide per-turn whether to answer itself or escalate up the
             # AI Router fallback chain (backend/router_tiers.py) — an explicit
             # provider switch from the dashboard is a deliberate admin choice
@@ -1831,25 +2215,92 @@ class VexaAgent:
             route_state: Dict[str, Any] = {}
             async with httpx.AsyncClient(timeout=self.request_timeout) as client:
                 while True:
-                    # Hard cap on agent-loop iterations to prevent runaway
-                    # tool loops and unbounded cost (audit P0/P1-4).
+                    # Three independent ways a tool loop runs out of room. The
+                    # iteration cap bounds cost, the repeat check catches a model
+                    # stuck re-issuing the same call, and the context guard stops
+                    # before llama.cpp starts silently evicting the system prompt.
+                    stop_reason = None
                     if tool_iterations >= self.max_tool_iterations:
-                        logger.warning(
-                            "Agent loop hit max iterations (%s) for session %s; stopping.",
-                            self.max_tool_iterations, session_id,
-                        )
+                        stop_reason = "iterations"
                         error_msg = f"max_tool_iterations ({self.max_tool_iterations}) reached"
+                        stop_note = (
+                            f"Ход остановлен на лимите шагов ({self.max_tool_iterations}). "
+                            "Продолжите следующим сообщением или разбейте задачу на части."
+                        )
+                    elif repeated_tool_calls >= _REPEATED_TOOL_CALL_LIMIT:
+                        stop_reason = "repeat"
+                        error_msg = f"repeated identical tool calls x{repeated_tool_calls}"
+                        stop_note = (
+                            f"Ход остановлен: модель {repeated_tool_calls} раза подряд повторила "
+                            "один и тот же вызов инструмента и не двигалась дальше."
+                        )
+                    elif context_tokens > self.local_num_ctx * _CONTEXT_STOP_RATIO:
+                        stop_reason = "context"
+                        error_msg = f"context window {context_tokens}/{self.local_num_ctx} exhausted"
+                        stop_note = (
+                            f"Ход остановлен: контекст заполнен ({context_tokens} из "
+                            f"{self.local_num_ctx} токенов). Начните новый чат для продолжения."
+                        )
+                    if stop_reason:
+                        logger.warning(
+                            "Agent loop stopping for session %s after %s iterations (%s).",
+                            session_id, tool_iterations, error_msg,
+                        )
+                        # The turn may already hold a lot of real work. Spend one
+                        # tool-free call turning it into an answer rather than
+                        # discarding it behind a canned apology; the call carries
+                        # no `tools`, so it cannot start anything new.
+                        wrap_up = ""
+                        if tool_executed:
+                            try:
+                                _wrap_started = time.perf_counter()
+                                wrap = await call_llm_normalized(
+                                    api_base=self.api_base, api_key=self.api_key, model=self.model,
+                                    messages=messages + [{"role": "user", "content": LOOP_WRAP_UP_PROMPT}],
+                                    temperature=min(self.temperature, 0.3),
+                                    max_tokens=self.max_tokens, timeout=self.request_timeout,
+                                    max_retries=0, client=client,
+                                    stream_callback=stream_callback,
+                                    provider_options=_visible_answer_retry_options({
+                                        "provider": self.provider,
+                                        "num_ctx": self.local_num_ctx,
+                                        "think": self.local_think,
+                                    }),
+                                )
+                                generation_ms += int((time.perf_counter() - _wrap_started) * 1000)
+                                decode_ms += wrap.eval_ms or 0
+                                prompt_ms += wrap.prompt_ms or 0
+                                total_prompt_tokens += wrap.usage.input_tokens or 0
+                                total_completion_tokens += wrap.usage.output_tokens or 0
+                                wrap_up = (wrap.content or "").strip()
+                            except Exception as exc:
+                                logger.warning("Loop wrap-up call failed (%s)", exc)
                         if not response_text.strip():
-                            response_text = (
-                                "Альберт, задача потребовала слишком много последовательных "
-                                "шагов и была остановлена в целях безопасности. "
-                                "Пожалуйста, уточните запрос или разбейте его на части."
-                            )
+                            response_text = f"{wrap_up}\n\n{stop_note}" if wrap_up else stop_note
+                        # This exit never persisted its reply: the turn left the
+                        # user's message in the history with no answer beside it,
+                        # so the next turn re-read a conversation that looked
+                        # like Vexa had ignored them. Save it like any other.
+                        cost_usd = _provider_cost(
+                            self.api_base, self.provider, self.model,
+                            total_prompt_tokens, total_completion_tokens,
+                        )
+                        self.last_costs[session_id] = cost_usd
+                        from backend import database as db
+                        assistant_msg_id = db.save_message(
+                            session_id, "assistant", response_text, cost_usd=cost_usd,
+                        )
+                        self.last_saved_ids[session_id] = {
+                            "user": current_user_msg_id, "assistant": assistant_msg_id,
+                        }
                         break
                     call_kwargs = dict(
                         messages=messages,
                         temperature=self.temperature,
-                        max_tokens=self.tool_max_tokens if selected_tools else self.max_tokens,
+                        max_tokens=min(
+                            16384,
+                            (self.tool_max_tokens if selected_tools else self.max_tokens) * budget_boost,
+                        ),
                         tools=selected_tools or None,
                         timeout=self.request_timeout,
                         # Once a tool ran it may have had side effects. Never replay
@@ -1859,16 +2310,15 @@ class VexaAgent:
                         stream_callback=stream_callback,
                     )
                     _call_started = time.perf_counter()
-                    if self.provider == "ollama":
+                    if self.provider == LOCAL_PROVIDER:
                         from backend.local_orchestrator import route_llm_call
                         normalized = await route_llm_call(
                             route_state=route_state,
                             local_api_base=self.api_base, local_api_key=self.api_key,
                             local_model=self.model, local_provider=self.provider,
                             provider_options={
-                                "num_ctx": self.ollama_num_ctx,
-                                "keep_alive": self.ollama_keep_alive,
-                                "think": self.ollama_think,
+                                "num_ctx": self.local_num_ctx,
+                                "think": self.local_think,
                             },
                             **call_kwargs,
                         )
@@ -1879,9 +2329,8 @@ class VexaAgent:
                             model=self.model,
                             provider_options={
                                 "provider": self.provider,
-                                "num_ctx": self.ollama_num_ctx,
-                                "keep_alive": self.ollama_keep_alive,
-                                "think": self.ollama_think,
+                                "num_ctx": self.local_num_ctx,
+                                "think": self.local_think,
                             },
                             **call_kwargs,
                         )
@@ -1893,6 +2342,7 @@ class VexaAgent:
                     last_finish_reason = normalized.finish_reason
                     last_request_id = normalized.request_id
                     response_status = normalized.status
+                    context_tokens = normalized.usage.input_tokens or context_tokens
 
                     if normalized.status in (STATUS_TIMEOUT, STATUS_PROVIDER_ERROR, STATUS_PARSE_ERROR):
                         error_msg = normalized.error_message or normalized.status
@@ -1906,13 +2356,50 @@ class VexaAgent:
 
                     tool_calls = normalized.tool_calls
                     if not tool_calls:
+                        # Nothing at all came back and the model stopped on the
+                        # token ceiling: it was mid-way through something — most
+                        # often a tool call whose arguments (a script, a file
+                        # body) outgrew num_predict, which the provider's parser
+                        # then discards, leaving neither content nor a call.
+                        # Nothing was executed, so re-running the identical move
+                        # with more room is exactly what a larger budget would
+                        # have done in the first place, and it lets the turn
+                        # finish the work instead of apologising for it.
+                        if (
+                            normalized.status == STATUS_EMPTY
+                            and normalized.finish_reason == "length"
+                            and selected_tools
+                            # Reasoning that ate the budget is a different
+                            # failure: more room mostly buys more reasoning.
+                            # That one belongs to the no-thinking recovery below.
+                            and not normalized.reasoning
+                            and not truncation_retry_used
+                        ):
+                            truncation_retry_used = True
+                            budget_boost = 2
+                            logger.info(
+                                "Turn truncated at the token ceiling with nothing to show for "
+                                "session %s; retrying once at %sx budget.",
+                                session_id, budget_boost,
+                            )
+                            continue
+
                         # Final text response reached
                         response_text = normalized.content or ""
                         retry_error = None
 
-                        # A semantic empty retry is safe only before any tool with
-                        # possible side effects. It is separate from transport retry.
-                        if normalized.status == STATUS_EMPTY and not tool_executed:
+                        # A semantic empty retry is separate from transport retry.
+                        # It used to be gated on `not tool_executed`, which meant
+                        # the single most common way to end up here — the model
+                        # burning the whole budget writing a long tool call after
+                        # the first tool already ran, so the parser drops the
+                        # truncated call and returns nothing — got no recovery at
+                        # all, while the fallback text still claimed one had been
+                        # tried. The recovery call passes no `tools`, so the model
+                        # physically cannot invoke anything: it can only produce
+                        # prose from the tool results already in `messages`. That
+                        # is side-effect-free, and therefore safe after tools too.
+                        if normalized.status == STATUS_EMPTY:
                             # If the primary call above was routed to an external
                             # tier, retry on that same tier — not back on self.*,
                             # which may now be stale (retrying a different
@@ -1924,17 +2411,24 @@ class VexaAgent:
                             }
                             retry_options = _visible_answer_retry_options({
                                 "provider": retry_target["provider"],
-                                "num_ctx": self.ollama_num_ctx,
-                                "keep_alive": self.ollama_keep_alive,
-                                "think": self.ollama_think,
+                                "num_ctx": self.local_num_ctx,
+                                "think": self.local_think,
                             })
+                            retry_prompt = (
+                                FINAL_ANSWER_RETRY_PROMPT_AFTER_TOOLS if tool_executed
+                                else FINAL_ANSWER_RETRY_PROMPT
+                            )
                             _retry_started = time.perf_counter()
                             retry = await call_llm_normalized(
                                 api_base=retry_target["api_base"], api_key=retry_target["api_key"],
                                 model=retry_target["model"],
-                                messages=messages + [{"role": "user", "content": FINAL_ANSWER_RETRY_PROMPT}],
+                                messages=messages + [{"role": "user", "content": retry_prompt}],
                                 temperature=min(self.temperature, 0.3),
-                                max_tokens=_visible_answer_retry_budget(self.max_tokens), timeout=self.request_timeout,
+                                max_tokens=_visible_answer_retry_budget(
+                                    self.tool_max_tokens if tool_executed else self.max_tokens,
+                                    normalized.finish_reason,
+                                ),
+                                timeout=self.request_timeout,
                                 max_retries=0, client=client,
                                 stream_callback=stream_callback,
                                 provider_options=retry_options,
@@ -1974,7 +2468,11 @@ class VexaAgent:
                             )
                             response_status = "empty"
                             error_msg = retry_error or normalized.error_message
-                            response_text = _empty_model_response_fallback("Vexa", last_finish_reason)
+                            response_text = _empty_model_response_fallback(
+                                "Vexa", last_finish_reason,
+                                retry_attempted=(normalized.status == STATUS_EMPTY),
+                                max_tokens=self.tool_max_tokens if tool_executed else self.max_tokens,
+                            )
                         
                         # Calculate cost
                         cost_usd = _provider_cost(self.api_base, self.provider, self.model, total_prompt_tokens, total_completion_tokens)
@@ -2001,6 +2499,11 @@ class VexaAgent:
                     logger.info(f"Vexa selected tools: {[tc.get('function', {}).get('name') for tc in tool_calls]}")
                     tool_executed = True
                     tool_iterations += 1
+                    signature = _tool_call_signature(tool_calls)
+                    repeated_tool_calls = (
+                        repeated_tool_calls + 1 if signature == last_tool_signature else 1
+                    )
+                    last_tool_signature = signature
                     
                     from backend.activity_logger import log_activity
                     log_activity(
@@ -2183,11 +2686,7 @@ class VexaAgent:
                 self.last_saved_ids.get(session_id, {}).get("assistant"),
                 {
                     key: meta_for_history.get(key)
-                    for key in (
-                        "status", "model", "provider", "finish_reason", "latency_ms",
-                        "generation_ms", "decode_ms", "prompt_ms",
-                        "input_tokens", "output_tokens", "tool_iterations",
-                    )
+                    for key in _PERSISTED_RUN_META_KEYS
                     if meta_for_history.get(key) is not None
                 },
             )
@@ -2212,7 +2711,7 @@ class VexaAgent:
         system_prompt = subagent["system_prompt"]
         subagent_model = subagent["model"]
 
-        # Per-agent provider routing. "ollama" (the default persisted by
+        # Per-agent provider routing. "local" (the default persisted by
         # database.py's subagents schema) keeps today's behavior — routed through
         # the main agent's global api_base/api_key/provider, itself subject to
         # the global router_tiers fallback chain narrowed to this agent's own
@@ -2233,7 +2732,7 @@ class VexaAgent:
             subagent_api_base, subagent_api_key = _resolved_creds
             subagent_provider_name = "openai_compatible"
             subagent_is_external = True
-        elif (subagent.get("model_provider") or "ollama") != "ollama":
+        elif not is_local_provider_id(subagent.get("model_provider")):
             logger.warning(
                 "Sub-agent '%s' is bound to provider '%s' (and any configured fallbacks) but none are "
                 "active/resolvable — falling back to the local model.",
@@ -2244,11 +2743,30 @@ class VexaAgent:
         # = unrestricted, unchanged legacy behavior).
         subagent_chain_allowed_ids = allowed_binding_ids_for_chain(subagent)
 
+        # This function answers two very different calls: the chat's own agent
+        # (a plain `agent`-type session, reached from _respond) and a delegated
+        # sub-agent inside an orchestration. Only the first may carry the chat's
+        # per-turn model choice — the delegation boundary clears the override
+        # (see no_llm_override) — and when it does, the pick wins over the row,
+        # endpoint *and* model together. Taking one without the other is what
+        # posted a local model id to 9Router and got HTTP 404 back.
+        # The row's own model is kept for the budget-degrade path below, which
+        # must land on something the local llama.cpp server actually serves.
+        subagent_local_model = subagent_model
+        _turn_override = current_llm_override()
+        if _turn_override:
+            subagent_api_base = _turn_override.get("api_base") or subagent_api_base
+            subagent_api_key = _turn_override.get("api_key", subagent_api_key)
+            subagent_provider_name = _turn_override.get("provider") or subagent_provider_name
+            subagent_model = _turn_override.get("model") or subagent_model
+            subagent_is_external = not is_llamacpp_provider(subagent_api_base, subagent_provider_name)
+            subagent_provider_id = None
+
         # Hard budget gate: an agent with a configured budget_usd_limit that has
         # already spent it out is blocked from making ANY further external-provider
         # call — the turn ends here with a clear message instead of silently
         # falling back to the local model (which would defeat the point of a limit)
-        # or silently burning more spend. Local/Ollama-routed agents are unaffected.
+        # or silently burning more spend. Agents on the local model are unaffected.
         if subagent_is_external:
             from backend.database import get_agent_budget_status
             budget_status = get_agent_budget_status(subagent["id"])
@@ -2266,8 +2784,9 @@ class VexaAgent:
                         f"${budget_status['budget_usd_limit']:.2f}) — переключение на локальную модель."
                     ),
                 )
-                subagent_api_base, subagent_api_key = self.api_base, self.api_key
-                subagent_provider_name = self.provider
+                subagent_api_base, subagent_api_key = self.configured_api_base, self.configured_api_key
+                subagent_provider_name = self.configured_provider
+                subagent_model = subagent_local_model
                 subagent_is_external = False
                 subagent_provider_id = None
                 # Budget is exhausted — degrade to local only, don't let the
@@ -2382,14 +2901,31 @@ class VexaAgent:
             f"КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО искать, использовать, упоминать, цитировать или пересказывать в ответах Альберту готовые прогнозы, чужие статьи, советы или мнения о валуйных ставках (например, 'готовые прогнозы', 'валуйные ставки по версии LiveSport', 'экспертные мнения'). Вы должны искать исключительно сырые числовые данные: пары соперников, точное время начала матчей и коэффициенты (odds/котировки) букмекеров. Любые выводы и математические расчеты валуйности (EV = Probability * Odds - 1) вы обязаны делать строго самостоятельно и приводить только свои собственные результаты, не ссылаясь на чужие мнения!\n"
             f"Вы не имеете права лениться делать расчеты: если точных числовых коэффициентов в поиске нет, вы обязаны провести математическое прогнозирование (например, рассчитать вероятности победы/ничьей/поражения по распределению Пуассона на основе средней результативности или статистики голов команд) и рассчитать ожидаемую валуйность (EV = P * Odds - 1) на основе расчетных вероятностей и примерных коэффициентов, вместо выдачи сухого отказа или цитирования чужих прогнозов."
         )
-        system_info += _local_model_system_hint(subagent_model, self.api_base, self.ollama_think)
+        # The hint is about the endpoint this sub-agent actually talks to, which
+        # is not necessarily the main agent's (own provider binding, or the
+        # chat's per-turn pick).
+        system_info += _local_model_system_hint(subagent_model, subagent_api_base, self.local_think)
         system_info += _address_directive()
+        # Operator whispers from the inbox (backend/inbox.py). System message only:
+        # never the user's turn and never the stored history, so a note to the
+        # agent is neither presented as the customer's words nor replayed later.
+        try:
+            from backend import inbox as _inbox
+            system_info += await asyncio.to_thread(_inbox.consume_whisper_block, session_id)
+        except Exception:
+            logger.exception("Could not attach operator whispers for session %s", session_id)
+        # A live phone call (backend/phone_context.py): spoken-style directive here,
+        # reasoning off and the call tools always offered further below.
+        from backend import phone_context as _phone_context
+        phone_call = _phone_context.current()
+        if phone_call is not None:
+            system_info += _phone_context.voice_directive(phone_call)
         messages = [{"role": "system", "content": system_prompt + system_info}]
         for msg in history:
             messages.append({"role": msg["role"], "content": msg["content"]})
         subagent_user_payload: Dict[str, Any] = {"role": "user", "content": user_content}
         if images:
-            # Same convention as respond(): only the native Ollama chat path forwards
+            # Same convention as respond(): only the local llama.cpp path forwards
             # this field, OpenAI-compatible providers strip it silently — see the
             # comment on the equivalent block above in respond().
             subagent_user_payload["images"] = images
@@ -2419,8 +2955,11 @@ class VexaAgent:
             "set_timer",
             "set_alarm",
             "cancel_timer_or_alarm",
+            # Writes a callback request into the inbox conversation this turn
+            # belongs to; outside a channel conversation it refuses on its own.
+            "take_message",
         }
-        
+
         skill_to_tools = {
             "web_search": ["web_search", "get_current_time_israel", "get_weather", "get_rss_digest"],
             "market_monitor": ["get_market_prices", "add_price_alert"],
@@ -2513,6 +3052,19 @@ class VexaAgent:
         selected_subagent_tools = _with_discovery_tool(
             _select_tools_for_query(user_message, subagent_tools), subagent_tools
         )
+        if phone_call is not None:
+            # A phone turn always carries its call tools: "соедините с Альбертом"
+            # matches no keyword list, and a model that cannot see
+            # phone_transfer_to_owner promises a transfer it cannot make. The
+            # principal filter still decides — nothing here widens it.
+            present = {t["function"]["name"] for t in selected_subagent_tools}
+            phone_allowed = tool_permissions.filter_tool_names(
+                tool_principal, _phone_context.PHONE_TOOL_NAMES, plan_allowed_tools=plan_allowed_tools
+            )
+            selected_subagent_tools = selected_subagent_tools + [
+                t for t in TOOLS_SCHEMA
+                if t["function"]["name"] in phone_allowed and t["function"]["name"] not in present
+            ]
 
         start_time = time.time()
         response_text = ""
@@ -2553,7 +3105,10 @@ class VexaAgent:
                         messages=messages,
                         extra_payload=_agent_generation_params(subagent),
                         temperature=subagent.get("temperature", 0.7),
-                        max_tokens=self.tool_max_tokens if selected_subagent_tools else self.max_tokens,
+                        max_tokens=(
+                            _phone_context.PHONE_MAX_TOKENS if phone_call is not None
+                            else (self.tool_max_tokens if selected_subagent_tools else self.max_tokens)
+                        ),
                         tools=selected_subagent_tools or None,
                         timeout=self.request_timeout,
                         max_retries=0 if tool_executed else None,
@@ -2565,9 +3120,10 @@ class VexaAgent:
                             api_base=subagent_api_base, api_key=subagent_api_key, model=subagent_model,
                             provider_options={
                                 "provider": subagent_provider_name,
-                                "num_ctx": self.ollama_num_ctx,
-                                "keep_alive": self.ollama_keep_alive,
-                                "think": self.ollama_think,
+                                "num_ctx": self.local_num_ctx,
+                                # A caller does not wait through a reasoning pass:
+                                # measured 0.25 s to first word without it, ~3 s with.
+                                "think": False if phone_call is not None else self.local_think,
                             },
                             **call_kwargs,
                         )
@@ -2578,9 +3134,8 @@ class VexaAgent:
                             local_api_base=subagent_api_base, local_api_key=subagent_api_key,
                             local_model=subagent_model, local_provider=subagent_provider_name,
                             provider_options={
-                                "num_ctx": self.ollama_num_ctx,
-                                "keep_alive": self.ollama_keep_alive,
-                                "think": self.ollama_think,
+                                "num_ctx": self.local_num_ctx,
+                                "think": False if phone_call is not None else self.local_think,
                             },
                             allowed_binding_ids=subagent_chain_allowed_ids,
                             **call_kwargs,
@@ -2618,20 +3173,31 @@ class VexaAgent:
                         retry_error = None
                         retry_finish_reason = None
 
-                        if normalized.status == STATUS_EMPTY and not tool_executed:
+                        # Same reasoning as the main loop above: the recovery
+                        # call carries no `tools`, so it cannot re-trigger a side
+                        # effect and is safe once tools have already run — which
+                        # is exactly when a long truncated tool call leaves this
+                        # branch with nothing to show.
+                        if normalized.status == STATUS_EMPTY:
                             logger.info("Sub-agent '%s' final response was empty after cleanup. Retrying for visible final answer...", subagent_name)
                             retry = await call_llm_normalized(
                                 api_base=subagent_api_base,
                                 api_key=subagent_api_key,
                                 model=subagent_model,
-                                messages=messages + [{"role": "user", "content": FINAL_ANSWER_RETRY_PROMPT}],
+                                messages=messages + [{"role": "user", "content": (
+                                    FINAL_ANSWER_RETRY_PROMPT_AFTER_TOOLS if tool_executed
+                                    else FINAL_ANSWER_RETRY_PROMPT
+                                )}],
                                 temperature=min(subagent.get("temperature", 0.7), 0.3),
-                                max_tokens=_visible_answer_retry_budget(self.max_tokens),
+                                max_tokens=_visible_answer_retry_budget(
+                                    self.tool_max_tokens if tool_executed else self.max_tokens,
+                                    normalized.finish_reason,
+                                ),
                                 timeout=self.request_timeout,
                                 max_retries=0,
                                 client=client,
                                 stream_callback=stream_callback,
-                                provider_options=_visible_answer_retry_options({"provider": subagent_provider_name, "num_ctx": self.ollama_num_ctx, "keep_alive": self.ollama_keep_alive, "think": self.ollama_think}),
+                                provider_options=_visible_answer_retry_options({"provider": subagent_provider_name, "num_ctx": self.local_num_ctx, "think": self.local_think}),
                             )
                             total_prompt_tokens += retry.usage.input_tokens or 0
                             total_completion_tokens += retry.usage.output_tokens or 0
@@ -2645,13 +3211,29 @@ class VexaAgent:
                         if not response_text.strip() and approval_pending:
                             response_status = "awaiting_approval"
                             response_text = "Действие не выполнено и ожидает подтверждения владельца в Control Plane."
-                        elif not response_text.strip() and tool_executed:
+                        elif (
+                            not response_text.strip() and tool_executed
+                            # A turn cut off by the token budget is not a
+                            # completed one: reporting success there hides a
+                            # half-finished job behind a confirmation.
+                            and "length" not in (normalized.finish_reason or "", retry_finish_reason or "")
+                        ):
                             response_text = "Действия успешно выполнены, Альберт."
                         if not response_text.strip():
-                            logger.warning("Sub-agent '%s' returned an empty final response for session %s", subagent_name, session_id)
+                            logger.warning(
+                                "Sub-agent '%s' returned an empty final response for session %s "
+                                "(finish_reason=%s)",
+                                subagent_name, session_id,
+                                retry_finish_reason or normalized.finish_reason,
+                            )
                             response_status = "empty"
                             error_msg = retry_error or normalized.error_message
-                            response_text = _empty_model_response_fallback(subagent_name, retry_finish_reason or normalized.finish_reason)
+                            response_text = _empty_model_response_fallback(
+                                subagent_name,
+                                retry_finish_reason or normalized.finish_reason,
+                                retry_attempted=(normalized.status == STATUS_EMPTY),
+                                max_tokens=self.tool_max_tokens if tool_executed else self.max_tokens,
+                            )
 
                         # normalized.content (and hence response_text) already has any
                         # [SECRET_xxxxxx] placeholders swapped back for their real values

@@ -12,7 +12,7 @@ interface MCPServer {
 }
 
 const AUTH = (): Record<string, string> => {
-  const token = localStorage.getItem('jarvis_auth_token');
+  const token = localStorage.getItem('vexa_auth_token');
   return token ? { 'Authorization': `Bearer ${token}` } : {};
 };
 
@@ -89,7 +89,7 @@ export function MCPTab() {
     load();
   };
 
-  const statusColor = (connected: boolean) => connected ? '#10b981' : '#ef4444';
+  const statusColor = (connected: boolean) => connected ? '#35d49a' : '#f05d75';
   const statusLabel = (connected: boolean) => connected ? 'CONNECTED' : 'DISCONNECTED';
 
   return (
@@ -118,7 +118,7 @@ export function MCPTab() {
           <form onSubmit={handleSave} style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '16px' }} className="glass-panel">
             <h3 style={{ fontSize: '1rem', color: '#fff', fontWeight: 600, margin: 0 }} className="glow-text-cyan">NEW MCP SERVER</h3>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 10px', border: '1px solid rgba(0,240,255,0.16)', borderRadius: '6px', color: '#75d9ef', background: 'rgba(0,140,190,0.06)', fontSize: '0.78rem', fontWeight: 600 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 10px', border: '1px solid rgba(157,166,181,0.112)', borderRadius: '6px', color: '#5ee1ff', background: 'rgba(54,207,251,0.06)', fontSize: '0.78rem', fontWeight: 600 }}>
               <Globe size={14} />
               <span>Governed OpenAPI Bridge · R4</span>
             </div>
@@ -183,9 +183,9 @@ export function MCPTab() {
                         <span style={{ fontWeight: 700, fontSize: '0.95rem', color: '#fff' }}>{server.name}</span>
                         <span style={{
                           fontSize: '0.65rem',
-                          background: isOpenAPI ? 'rgba(16,185,129,0.1)' : 'rgba(0,240,255,0.1)',
-                          border: isOpenAPI ? '1px solid rgba(16,185,129,0.2)' : '1px solid rgba(0,240,255,0.2)',
-                          color: isOpenAPI ? '#10b981' : '#00f0ff',
+                          background: isOpenAPI ? 'rgba(53,212,154,0.1)' : 'rgba(94,225,255,0.1)',
+                          border: isOpenAPI ? '1px solid rgba(53,212,154,0.2)' : '1px solid rgba(94,225,255,0.2)',
+                          color: isOpenAPI ? '#35d49a' : '#5ee1ff',
                           borderRadius: '4px',
                           padding: '1px 5px',
                           fontWeight: 600
@@ -200,7 +200,7 @@ export function MCPTab() {
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                     {server.tools_count > 0 && (
-                      <span style={{ fontSize: '0.72rem', color: '#00f0ff', background: 'rgba(0,240,255,0.1)', border: '1px solid rgba(0,240,255,0.2)', borderRadius: '12px', padding: '2px 8px' }}>
+                      <span style={{ fontSize: '0.72rem', color: '#5ee1ff', background: 'rgba(94,225,255,0.1)', border: '1px solid rgba(157,166,181,0.14)', borderRadius: '12px', padding: '2px 8px' }}>
                         {server.tools_count} tools
                       </span>
                     )}
@@ -209,7 +209,7 @@ export function MCPTab() {
                       {statusLabel(server.connected)}
                     </span>
                     <button onClick={(e) => { e.stopPropagation(); handleDelete(server.name); }}
-                      style={{ background: 'none', border: 'none', color: 'rgba(239,68,68,0.6)', cursor: 'pointer', padding: '4px', display: 'flex', alignItems: 'center', borderRadius: '4px' }}>
+                      style={{ background: 'none', border: 'none', color: 'rgba(240,93,117,0.6)', cursor: 'pointer', padding: '4px', display: 'flex', alignItems: 'center', borderRadius: '4px' }}>
                       <Trash2 size={14} />
                     </button>
                   </div>
@@ -221,7 +221,7 @@ export function MCPTab() {
                       {isOpenAPI ? (
                         <>
                           <span style={{ color: 'var(--text-muted)' }}>Specification URL:</span>
-                          <span style={{ fontFamily: 'var(--font-mono)', color: '#00f0ff', wordBreak: 'break-all' }}>{server.env.OPENAPI_URL}</span>
+                          <span style={{ fontFamily: 'var(--font-mono)', color: '#5ee1ff', wordBreak: 'break-all' }}>{server.env.OPENAPI_URL}</span>
                           {server.env.AUTH_TOKEN_URL && (
                             <>
                               <span style={{ color: 'var(--text-muted)' }}>Auth Endpoint:</span>
@@ -244,7 +244,7 @@ export function MCPTab() {
                       ) : (
                         <>
                           <span style={{ color: 'var(--text-muted)' }}>Command:</span>
-                          <span style={{ fontFamily: 'var(--font-mono)', color: '#00f0ff' }}>{server.command}</span>
+                          <span style={{ fontFamily: 'var(--font-mono)', color: '#5ee1ff' }}>{server.command}</span>
                           <span style={{ color: 'var(--text-muted)' }}>Args:</span>
                           <span style={{ fontFamily: 'var(--font-mono)', color: '#fff', wordBreak: 'break-all' }}>{server.args.join(' ') || '—'}</span>
                           {Object.keys(server.env).length > 0 && (
@@ -259,7 +259,7 @@ export function MCPTab() {
                       )}
                     </div>
                     {!server.connected && (
-                      <p style={{ fontSize: '0.75rem', color: '#f59e0b', margin: 0 }}>
+                      <p style={{ fontSize: '0.75rem', color: '#f6b84a', margin: 0 }}>
                         ⚠ Server is not connected — the process may have failed to start or spec was unreachable. Check logs for details.
                       </p>
                     )}
@@ -271,7 +271,7 @@ export function MCPTab() {
         )}
 
         {/* Docs hint */}
-        <div style={{ padding: '14px 16px', borderRadius: '10px', background: 'rgba(0,240,255,0.04)', border: '1px solid rgba(0,240,255,0.1)' }}>
+        <div style={{ padding: '14px 16px', borderRadius: '10px', background: 'rgba(94,225,255,0.04)', border: '1px solid rgba(157,166,181,0.07)' }}>
           <p style={{ fontSize: '0.75rem', color: 'var(--text-dim)', margin: 0, lineHeight: 1.6 }}>
             <strong style={{ color: 'var(--text-muted)' }}>Governed connection:</strong> OpenAPI bridges are validated first and activated only after two explicit approvals in Processes &amp; Control.
           </p>

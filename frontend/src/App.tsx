@@ -1,4 +1,8 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { ErrorBoundary } from './ErrorBoundary';
+import { uiCopy } from './uiCopy';
+import { RunCursorTracker, reconnectDelayMs } from './wsResume';
+import { notify, confirmAction } from './components/Notifications';
+import React, { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react';
 import {
   Settings,
   Terminal, 
@@ -23,12 +27,14 @@ import {
   Briefcase,
   Coins,
   Factory,
-  Megaphone
+  Megaphone,
+  Shuffle,
+  ExternalLink,
 } from 'lucide-react';
 
 import type { AppSettings, ChatMessage, ChatSession, DecisionLog, ActivityLog, SystemConfig, AgentModel, Project, SystemStats } from './types';
 import { styles } from './styles';
-import { translate, type Language } from './i18n';
+import { translate, normalizeLanguage, type Language } from './i18n';
 import { 
   playBeep, 
   playAlarmSound, 
@@ -39,35 +45,38 @@ import {
 // Import sub-components
 import { ChatTab } from './components/ChatTab';
 import { SimpleChatView } from './components/SimpleChatView';
-import { ConfigTab } from './components/ConfigTab';
-import { LogsTab } from './components/LogsTab';
-import { ActivityTab } from './components/ActivityTab';
-import { MemoryTab } from './components/MemoryTab';
-import { ToolsTab } from './components/ToolsTab';
-import { ScheduleTab } from './components/ScheduleTab';
-import { SubagentsTab } from './components/SubagentsTab';
-import { ObsidianTab } from './components/ObsidianTab';
-import { NetworkTab } from './components/NetworkTab';
-import { MCPTab } from './components/MCPTab';
-import { AgentsAdminTab } from './components/AgentsAdminTab';
-import { ApiKeysTab } from './components/ApiKeysTab';
+import { loadSelection, saveSelection } from './components/simple/chatModels';
+import type { ModelSelection } from './components/simple/chatModels';
+const ConfigTab = lazy(() => import('./components/ConfigTab').then(module => ({ default: module.ConfigTab })));
+const LogsTab = lazy(() => import('./components/LogsTab').then(module => ({ default: module.LogsTab })));
+const ActivityTab = lazy(() => import('./components/ActivityTab').then(module => ({ default: module.ActivityTab })));
+const MemoryTab = lazy(() => import('./components/MemoryTab').then(module => ({ default: module.MemoryTab })));
+const ToolsTab = lazy(() => import('./components/ToolsTab').then(module => ({ default: module.ToolsTab })));
+const ScheduleTab = lazy(() => import('./components/ScheduleTab').then(module => ({ default: module.ScheduleTab })));
+const SubagentsTab = lazy(() => import('./components/SubagentsTab').then(module => ({ default: module.SubagentsTab })));
+const ObsidianTab = lazy(() => import('./components/ObsidianTab').then(module => ({ default: module.ObsidianTab })));
+const NetworkTab = lazy(() => import('./components/NetworkTab').then(module => ({ default: module.NetworkTab })));
+const MCPTab = lazy(() => import('./components/MCPTab').then(module => ({ default: module.MCPTab })));
+const AgentsAdminTab = lazy(() => import('./components/AgentsAdminTab').then(module => ({ default: module.AgentsAdminTab })));
+const ApiKeysTab = lazy(() => import('./components/ApiKeysTab').then(module => ({ default: module.ApiKeysTab })));
 import { splitForSpeech } from './speechChunks';
-import { ProcessesTab } from './components/ProcessesTab';
+const ProcessesTab = lazy(() => import('./components/ProcessesTab').then(module => ({ default: module.ProcessesTab })));
 import { HermesMark } from './components/HermesMark';
 import { VexaLogo } from './components/VexaLogo';
-import { MetricsTab } from './components/MetricsTab';
+const MetricsTab = lazy(() => import('./components/MetricsTab').then(module => ({ default: module.MetricsTab })));
 import { FloatingWindow } from './components/FloatingWindow';
 import { BrowserLiveView } from './components/BrowserLiveView';
 import { VexaCommandCenter } from './components/VexaCommandCenter';
 import type { DashboardRoute } from './components/vexa/vexaDashboardTypes';
-import { DevRunsTab } from './components/DevRunsTab';
-import { KanbanTab } from './components/KanbanTab';
-import { ClientsTab } from './components/ClientsTab';
-import { CurrencySettingsTab } from './components/CurrencySettingsTab';
+const DevRunsTab = lazy(() => import('./components/DevRunsTab').then(module => ({ default: module.DevRunsTab })));
+const KanbanTab = lazy(() => import('./components/KanbanTab').then(module => ({ default: module.KanbanTab })));
+const ClientsTab = lazy(() => import('./components/ClientsTab').then(module => ({ default: module.ClientsTab })));
+import { INBOX_UPDATE_EVENT, OPEN_INBOX_EVENT, useInboxUnread } from './components/smm/dialogs/inboxApi';
+const CurrencySettingsTab = lazy(() => import('./components/CurrencySettingsTab').then(module => ({ default: module.CurrencySettingsTab })));
 import { AppHeader } from './components/AppHeader';
 import type { DevRunEvent } from './types';
-import { ContentFactoryTab } from './components/ContentFactoryTab';
-import { SMMFactoryTab } from './components/SMMFactoryTab';
+const ContentFactoryTab = lazy(() => import('./components/ContentFactoryTab').then(module => ({ default: module.ContentFactoryTab })));
+const SMMFactoryTab = lazy(() => import('./components/SMMFactoryTab').then(module => ({ default: module.SMMFactoryTab })));
 import type { CFEvent } from './components/content-factory/types';
 
 // Initialize global fetch interceptor
@@ -84,21 +93,32 @@ const langToLocale: Record<string, string> = {
 // flag is set. Without this ceiling one hung request would freeze the conversation loop.
 const TTS_PENDING_TIMEOUT_MS = 25000;
 
+const tabs = ['vexa', 'processes', 'devruns', 'kanban', 'clients', 'agents', 'schedule', 'contentfactory', 'smm', 'settings', 'network', 'metrics'] as const;
+type AppTab = typeof tabs[number];
+// «Входящие» used to be a top-level tab; it is SMM Factory → Диалоги now, so a
+// bookmarked #tab=inbox (or a saved tab from an older build) lands there.
+export const normalizeTab = (value: string | null): AppTab => {
+  if (value === 'inbox') return 'smm';
+  return tabs.includes(value as AppTab) ? value as AppTab : 'vexa';
+};
+
 export default function App() {
   const legacySettingsTabs = ['config', 'logs', 'activity', 'memory', 'tools', 'subagents', 'obsidian', 'mcp'];
   const [activeTab, setActiveTab] = useState<'vexa' | 'processes' | 'devruns' | 'kanban' | 'clients' | 'agents' | 'schedule' | 'contentfactory' | 'smm' | 'settings' | 'network' | 'metrics'>(() => {
-    const saved = localStorage.getItem('jarvis_active_tab');
-    if (saved === 'chat') return 'vexa';
-    if (saved === 'settings' || (saved && legacySettingsTabs.includes(saved))) return 'settings';
-    return (saved as any) || 'vexa';
+    const saved = localStorage.getItem('vexa_active_tab');
+    const requested = new URLSearchParams(window.location.hash.slice(1)).get('tab') ?? saved;
+    if (requested === 'inbox') localStorage.setItem('smm_factory_view', 'dialogs');
+    if (!window.location.hash && saved === 'chat') return 'vexa';
+    if (!window.location.hash && (saved === 'settings' || (saved && legacySettingsTabs.includes(saved)))) return 'settings';
+    return normalizeTab(new URLSearchParams(window.location.hash.slice(1)).get('tab') ?? saved);
   });
   // 'channels' is deliberately absent: the messenger/social channels are now the
   // SMM Factory section, and a saved 'channels' from before that move falls back
   // to the first settings page instead of rendering an empty one.
   const [settingsSection, setSettingsSection] = useState<'config' | 'currency' | 'tools' | 'subagents' | 'mcp' | 'obsidian' | 'memory' | 'logs' | 'activity' | 'keys'>(() => {
-    const savedSection = localStorage.getItem('jarvis_settings_section');
+    const savedSection = new URLSearchParams(window.location.hash.slice(1)).get('section') ?? localStorage.getItem('vexa_settings_section');
     if (savedSection && [...legacySettingsTabs, 'keys', 'currency'].includes(savedSection)) return savedSection as any;
-    const savedTab = localStorage.getItem('jarvis_active_tab');
+    const savedTab = localStorage.getItem('vexa_active_tab');
     return (savedTab && legacySettingsTabs.includes(savedTab) ? savedTab : 'config') as any;
   });
   /** Overdue-task count for the Клиенты nav badge — polled independently
@@ -106,6 +126,15 @@ export default function App() {
    *  the badge has to stay live while the user is on an entirely different
    *  tab, where ClientsTab itself is unmounted. */
   const [overdueTaskCount, setOverdueTaskCount] = useState(0);
+  const inboxUnread = useInboxUnread();
+  // The client card (and anything else) can ask to open one conversation; SMM
+  // Factory → Диалоги picks the id up from storage when it mounts, or from the
+  // event if it already is.
+  useEffect(() => {
+    const openInbox = () => setActiveTab('smm');
+    window.addEventListener(OPEN_INBOX_EVENT, openInbox);
+    return () => window.removeEventListener(OPEN_INBOX_EVENT, openInbox);
+  }, []);
   const [vexaTranscriptOpen, setVexaTranscriptOpen] = useState(false);
   /** Which bottom-nav destination is open as a floating window over the Vexa dashboard. */
   const [vexaFloatingPanel, setVexaFloatingPanel] = useState<Exclude<DashboardRoute, 'terminal'> | null>(null);
@@ -117,10 +146,32 @@ export default function App() {
     localStorage.setItem('hermes_vexa_ui_mode', vexaUiMode);
   }, [vexaUiMode]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  /**
+   * Which model the open conversation is pinned to — null means "whatever the
+   * backend is configured with". Held here rather than inside the chat view
+   * because sendChatText has to put it on every outgoing frame; the ref is what
+   * that (memoised) callback reads, so picking a model never has to rebuild it.
+   */
+  const [modelSelection, setModelSelection] = useState<ModelSelection | null>(null);
+  const modelSelectionRef = useRef<ModelSelection | null>(null);
+  useEffect(() => { modelSelectionRef.current = modelSelection; }, [modelSelection]);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => localStorage.getItem('hermes_sidebar_collapsed') === '1');
-  const [language, setLanguageState] = useState<Language>(() => (localStorage.getItem('hermes_language') as Language) || 'ru');
+  /**
+   * Public dashboard URL of the 9Router sidecar, so the sidebar can offer a
+   * one-click jump into it. Comes from the backend rather than being hardcoded
+   * because the URL differs per deployment (localhost:20128 in dev, the public
+   * tunnel host in prod) — see ROUTER_PUBLIC_BASE_URL. Null until loaded or
+   * when the sidecar isn't configured, in which case the entry stays hidden.
+   */
+  const [routerDashboardUrl, setRouterDashboardUrl] = useState<string | null>(null);
+  // Normalised, never cast: a stale or JSON-encoded value here used to reach
+  // translate() and take the whole dashboard down (see normalizeLanguage).
+  const [language, setLanguageState] = useState<Language>(
+    () => normalizeLanguage(localStorage.getItem('hermes_language')),
+  );
   const [appSettings, setAppSettings] = useState<AppSettings>({ language });
   const appSettingsRef = useRef<AppSettings>({ language });
+  const copy = useCallback((text: string) => uiCopy(language, text), [language]);
   const t = useCallback((key: string) => translate(language, key), [language]);
   const toggleSidebar = useCallback(() => {
     setIsSidebarCollapsed(prev => {
@@ -141,11 +192,13 @@ export default function App() {
   }, []);
 
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([
-    { id: 'dashboard', title: 'Main Terminal', agent_id: 'jarvis' },
+    { id: 'dashboard', title: 'Main Terminal', agent_id: 'vexa' },
   ]);
   const [isConnected, setIsConnected] = useState(false);
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(!!localStorage.getItem('jarvis_auth_token'));
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(!!localStorage.getItem('vexa_auth_token'));
   const [otpCode, setOtpCode] = useState('');
+  const [otpSent, setOtpSent] = useState(false);
+  const lastAttemptedOtp = useRef('');
   const [authStatus, setAuthStatus] = useState<'idle' | 'sending' | 'sent' | 'verifying' | 'error' | 'success'>('idle');
   const [authError, setAuthError] = useState('');
   const [loginMode, setLoginMode] = useState<'telegram' | 'password'>('telegram');
@@ -174,14 +227,13 @@ export default function App() {
   const [isMetricsLoading, setIsMetricsLoading] = useState(false);
   const [config, setConfig] = useState<SystemConfig>({
     system_prompt: '',
-    model: 'qwen3:8b',
-    provider: 'ollama',
-    api_base: 'http://127.0.0.1:11434',
-    ollama_base_url: 'http://127.0.0.1:11434',
+    model: 'qwen3.8-27b',
+    provider: 'llamacpp',
+    api_base: 'http://127.0.0.1:8080',
+    local_base_url: 'http://127.0.0.1:8080',
     openai_api_base: 'https://openrouter.ai/api/v1',
-    ollama_num_ctx: 8192,
-    ollama_keep_alive: '5m',
-    ollama_think: false,
+    local_num_ctx: 32768,
+    local_think: false,
     fast_mode: false,
     max_history_len: 6,
     condenser_enabled: false,
@@ -212,7 +264,10 @@ export default function App() {
   const [isUploading, setIsUploading] = useState(false);
   // File attached to the current chat message (text context, not dataset upload)
   const [attachedFile, setAttachedFile] = useState<{ name: string; content: string; type?: string; pages?: number; truncated?: boolean } | null>(null);
-  const [isGenerating, setIsGenerating] = useState(false);
+  // chat id → run id of the turn still generating there. Per chat, not one global
+  // flag: a long run in one chat used to lock the composer and model picker of
+  // every other chat, including a brand-new empty one.
+  const [generatingRuns, setGeneratingRuns] = useState<Record<string, string>>({});
   const [isTTSEnabled, setIsTTSEnabled] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false);
   // True from the moment a spoken reply starts being fetched until it actually begins
@@ -238,12 +293,14 @@ export default function App() {
   const [editedRuntimeConfig, setEditedRuntimeConfig] = useState<Partial<SystemConfig>>({});
 
   const wsRef = useRef<WebSocket | null>(null);
+  // Per-run stream cursors: what we have already applied, and which runs a
+  // reconnect still needs replayed. Survives socket churn, so it lives in a ref.
+  const runCursorsRef = useRef(new RunCursorTracker());
   const mainChatEndRef = useRef<HTMLDivElement | null>(null);
   const subagentChatEndRef = useRef<HTMLDivElement | null>(null);
   const lastSentTimeRef = useRef<number>(0);
   const ttsEnabledRef = useRef(true);       // ref so WS handler always sees current value
-  const isGeneratingRef = useRef(false);    // ref so send guard sees current value
-  const activeRunIdRef = useRef<string | null>(null);
+  const generatingRunsRef = useRef<Record<string, string>>({}); // ref so send guard sees current value
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const voiceStreamRef = useRef<MediaStream | null>(null);
   const voiceChunksRef = useRef<Blob[]>([]);
@@ -280,14 +337,17 @@ export default function App() {
     return depth;
   }, [projects]);
   const [currentChatId, setCurrentChatId] = useState<string>(() => {
-    return localStorage.getItem('jarvis_current_chat_id') || 'dashboard';
+    return localStorage.getItem('vexa_current_chat_id') || 'dashboard';
   });
-  const currentChatIdRef = useRef(localStorage.getItem('jarvis_current_chat_id') || 'dashboard');
+  const currentChatIdRef = useRef(localStorage.getItem('vexa_current_chat_id') || 'dashboard');
   
   const [newAgentId, setNewAgentId] = useState('');
   const [newAgentName, setNewAgentName] = useState('');
   const [newAgentPrompt, setNewAgentPrompt] = useState('');
-  const [newAgentModel, setNewAgentModel] = useState('qwen3:8b');
+  // Empty, not a model name: the hardcoded 'qwen3:8b' this used to hold has
+  // not been served by this deployment for a long time, so the create form
+  // offered a model the local server does not serve. Filled from the live list below.
+  const [newAgentModel, setNewAgentModel] = useState('');
   const [newAgentSkills, setNewAgentSkills] = useState('');
   const [newAgentTemperature, setNewAgentTemperature] = useState(0.7);
   const [isCreatingAgent, setIsCreatingAgent] = useState(false);
@@ -295,17 +355,37 @@ export default function App() {
   // Connection channel session states
   const [showNewSessionModal, setShowNewSessionModal] = useState(false);
   const [newSessionNameInput, setNewSessionNameInput] = useState('');
-  const [newSessionAgentInput, setNewSessionAgentInput] = useState('jarvis');
+  const [newSessionAgentInput, setNewSessionAgentInput] = useState('vexa');
   const [newSessionProjectInput, setNewSessionProjectInput] = useState('');
 
   const [editingAgentId, setEditingAgentId] = useState('');
   const [editAgentName, setEditAgentName] = useState('');
   const [editAgentPrompt, setEditAgentPrompt] = useState('');
-  const [editAgentModel, setEditAgentModel] = useState('qwen3:8b');
+  const [editAgentModel, setEditAgentModel] = useState('');
   const [editAgentSkills, setEditAgentSkills] = useState('');
   const [editAgentTemperature, setEditAgentTemperature] = useState(0.7);
   const [isUpdatingAgent, setIsUpdatingAgent] = useState(false);
   const [models, setModels] = useState<{ id: string; name: string }[]>([]);
+
+  // A create form that has not been touched takes the first model the box
+  // actually serves. Never overwrites a choice already made, and never touches
+  // the edit form, which is filled from the agent being edited.
+  useEffect(() => {
+    if (models.length === 0) return;
+    setNewAgentModel(current => current || models[0].id);
+  }, [models]);
+
+  useEffect(() => {
+    // Protected endpoint — never poll it from the login screen.
+    if (!isAuthenticated) return;
+    const authToken = localStorage.getItem('vexa_auth_token');
+    fetch('/api/router/stats', {
+      headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+    })
+      .then(response => (response.ok ? response.json() : null))
+      .then(data => setRouterDashboardUrl(data?.dashboard_url || null))
+      .catch(() => setRouterDashboardUrl(null));
+  }, [isAuthenticated]);
 
   const navStyle = useCallback((tab: typeof activeTab) => ({
     ...styles.navBtn,
@@ -315,16 +395,45 @@ export default function App() {
 
   useEffect(() => {
     currentChatIdRef.current = currentChatId;
-    localStorage.setItem('jarvis_current_chat_id', currentChatId);
+    localStorage.setItem('vexa_current_chat_id', currentChatId);
+    // The server only delivers chat traffic to sockets that asked for it, so a
+    // chat switch has to re-declare interest. Subscriptions are additive: the
+    // previous chat stays subscribed, which is what keeps a background run's
+    // completion visible after switching away and back.
+    const socket = wsRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'subscribe', chat_ids: [currentChatId] }));
+    }
   }, [currentChatId]);
 
   useEffect(() => {
-    localStorage.setItem('jarvis_active_tab', activeTab);
+    localStorage.setItem('vexa_active_tab', activeTab);
   }, [activeTab]);
 
   useEffect(() => {
-    localStorage.setItem('jarvis_settings_section', settingsSection);
+    localStorage.setItem('vexa_settings_section', settingsSection);
   }, [settingsSection]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.hash.slice(1));
+    params.set('tab', activeTab);
+    if (activeTab === 'settings') params.set('section', settingsSection);
+    else params.delete('section');
+    const hash = `#${params}`;
+    if (window.location.hash !== hash) window.history.pushState(null, '', hash);
+  }, [activeTab, settingsSection]);
+
+  useEffect(() => {
+    const restoreRoute = () => {
+      const params = new URLSearchParams(window.location.hash.slice(1));
+      setActiveTab(normalizeTab(params.get('tab')));
+      const section = params.get('section');
+      setSettingsSection(section && ['config', 'currency', 'tools', 'subagents', 'mcp', 'obsidian', 'memory', 'logs', 'activity', 'keys'].includes(section) ? section as any : 'config');
+    };
+    window.addEventListener('popstate', restoreRoute);
+    window.addEventListener('hashchange', restoreRoute);
+    return () => { window.removeEventListener('popstate', restoreRoute); window.removeEventListener('hashchange', restoreRoute); };
+  }, []);
 
   // Keep ttsEnabledRef in sync with its state
   useEffect(() => { ttsEnabledRef.current = isTTSEnabled; }, [isTTSEnabled]);
@@ -499,7 +608,7 @@ export default function App() {
       let lookahead: Promise<Blob> | null = null;
 
       try {
-        const authToken = localStorage.getItem('jarvis_auth_token');
+        const authToken = localStorage.getItem('vexa_auth_token');
         const authHeaders: Record<string, string> = authToken ? { 'Authorization': `Bearer ${authToken}` } : {};
         if (serverTtsAvailableRef.current === null) {
           const statusResponse = await fetch('/api/voice/tts/status', { headers: authHeaders });
@@ -578,10 +687,6 @@ export default function App() {
     micStateRef.current = micState;
   }, [micState]);
 
-  useEffect(() => {
-    isGeneratingRef.current = isGenerating;
-  }, [isGenerating]);
-
   // Draft persistence: restore the unsent draft when switching sessions (P0 UX).
   useEffect(() => {
     try {
@@ -589,6 +694,19 @@ export default function App() {
       setInputValue(draft);
     } catch { /* localStorage unavailable — non-fatal */ }
   }, [currentChatId]);
+
+  // A conversation resumes on the model it was last held against, falling back
+  // to the user's pinned default and then to the backend's configured one.
+  useEffect(() => {
+    setModelSelection(loadSelection(currentChatId));
+  }, [currentChatId]);
+
+  // null clears the pick: the chat falls back to the backend's configured
+  // model, which is what happens when a remembered model no longer exists.
+  const handleModelSelect = useCallback((selection: ModelSelection | null) => {
+    setModelSelection(selection);
+    saveSelection(currentChatIdRef.current, selection);
+  }, []);
 
   useEffect(() => {
     try {
@@ -600,12 +718,36 @@ export default function App() {
     } catch { /* localStorage unavailable — non-fatal */ }
   }, [inputValue, currentChatId]);
 
+  const isGenerating = Boolean(generatingRuns[currentChatId]);
+  const isAnyGenerating = Object.keys(generatingRuns).length > 0;
+
+  const markGenerating = useCallback((chatId: string, runId: string) => {
+    const next = { ...generatingRunsRef.current, [chatId]: runId };
+    generatingRunsRef.current = next;
+    setGeneratingRuns(next);
+  }, []);
+
+  /** Ends a run by its id and/or its chat. A frame without a run_id (legacy
+   *  server) clears its chat; one with a run_id never clears a newer run. */
+  const clearGenerating = useCallback((chatId?: string, runId?: string) => {
+    const next: Record<string, string> = {};
+    let changed = false;
+    Object.entries(generatingRunsRef.current).forEach(([chat, run]) => {
+      const ends = (runId && run === runId) || (!runId && chatId !== undefined && chat === chatId);
+      if (ends) changed = true;
+      else next[chat] = run;
+    });
+    if (!changed) return;
+    generatingRunsRef.current = next;
+    setGeneratingRuns(next);
+  }, []);
+
   const sendChatText = useCallback((text: string, targetChatId = currentChatIdRef.current) => {
     const command = text.trim();
     if (!command || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
 
-    // Block concurrent sends while a response is generating (P0 UX).
-    if (isGeneratingRef.current) {
+    // Block concurrent sends while this chat's response is generating (P0 UX).
+    if (generatingRunsRef.current[targetChatId]) {
       console.warn('Response in progress; ignoring new submission.');
       return false;
     }
@@ -620,16 +762,21 @@ export default function App() {
 
     stopSpeech();
     const runId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    activeRunIdRef.current = runId;
+    // The picked model travels with the message, not as a global setting, so
+    // two chats can be held against two different models at once. An id the
+    // server no longer knows resolves back to the configured default there
+    // rather than failing the turn — see backend/chat_models.py.
+    const picked = modelSelectionRef.current;
     wsRef.current.send(JSON.stringify({
       type: 'chat_message',
       content: command,
       chat_id: targetChatId,
-      run_id: runId
+      run_id: runId,
+      ...(picked ? { model: picked.id, model_source: picked.source } : {}),
     }));
-    setIsGenerating(true);
+    markGenerating(targetChatId, runId);
     return true;
-  }, [stopSpeech]);
+  }, [stopSpeech, markGenerating]);
 
   const resetVoiceRecorder = useCallback(() => {
     vadCleanupRef.current?.();
@@ -651,7 +798,7 @@ export default function App() {
     setMicState('transcribing');
     setMicErrorMessage('');
     const formData = new FormData();
-    formData.append('file', blob, `jarvis-voice-${Date.now()}.webm`);
+    formData.append('file', blob, `vexa-voice-${Date.now()}.webm`);
 
     try {
       const res = await fetch('/api/voice/transcribe', {
@@ -681,11 +828,11 @@ export default function App() {
       setInputValue(text);
       await new Promise(resolve => setTimeout(resolve, 200));
 
-      const vexaMode = localStorage.getItem('jarvis_active_tab') === 'vexa';
+      const vexaMode = localStorage.getItem('vexa_active_tab') === 'vexa';
       if (vexaMode && currentChatIdRef.current !== 'dashboard') {
         currentChatIdRef.current = 'dashboard';
         setCurrentChatId('dashboard');
-        localStorage.setItem('jarvis_current_chat_id', 'dashboard');
+        localStorage.setItem('vexa_current_chat_id', 'dashboard');
       }
       const sent = sendChatText(text, vexaMode ? 'dashboard' : currentChatIdRef.current);
       setInputValue(sent ? '' : text);
@@ -695,7 +842,7 @@ export default function App() {
     } catch (err) {
       // A transient "didn't catch that" is routine (short utterance, pause, background
       // noise) — surface it inline through the same mic-status pill used for
-      // listening/capturing/transcribing instead of a blocking native alert().
+      // listening/capturing/transcribing instead of a blocking native notify().
       console.error('Voice transcription error:', err);
       setMicEnabled(false);
       showVoiceError(err instanceof Error ? err.message : 'Voice transcription failed.');
@@ -717,7 +864,7 @@ export default function App() {
 
   const startVoiceRecording = useCallback(async () => {
     if (!window.isSecureContext) {
-      alert(
+      notify(
         appSettingsRef.current.language === 'ru'
           ? 'Браузер блокирует микрофон на обычном HTTP. Откройте Vexa через HTTPS или через http://localhost:9119 по SSH-туннелю.'
           : 'The browser blocks microphone access over plain HTTP. Open Vexa over HTTPS or through http://localhost:9119 using an SSH tunnel.'
@@ -725,7 +872,7 @@ export default function App() {
       return;
     }
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
-      alert('Voice recording is not supported by this browser.');
+      notify(copy('Voice recording is not supported by this browser.'));
       return;
     }
 
@@ -786,7 +933,7 @@ export default function App() {
         resetVoiceRecorder();
         setMicEnabled(false);
         setMicState('off');
-        alert('Voice recorder failed.');
+        notify(copy('Voice recorder failed.'));
       };
 
       // Auto-stop on end-of-speech (simple client-side VAD) so the user doesn't have to
@@ -930,9 +1077,9 @@ export default function App() {
       resetVoiceRecorder();
       setMicEnabled(false);
       setMicState('off');
-      alert('Microphone access was denied or is unavailable.');
+      notify(copy('Microphone access was denied or is unavailable.'));
     }
-  }, [resetVoiceRecorder, stopSpeech, stopVoiceRecording, submitVoiceBlob]);
+  }, [resetVoiceRecorder, stopSpeech, stopVoiceRecording, submitVoiceBlob, copy]);
 
   const handleVoiceToggle = useCallback(() => {
     if (micStateRef.current === 'capturing') {
@@ -999,21 +1146,19 @@ export default function App() {
     const handleUnauthorized = () => {
       setIsAuthenticated(false);
     };
-    window.addEventListener('jarvis-unauthorized', handleUnauthorized);
+    window.addEventListener('vexa-unauthorized', handleUnauthorized);
     return () => {
-      window.removeEventListener('jarvis-unauthorized', handleUnauthorized);
+      window.removeEventListener('vexa-unauthorized', handleUnauthorized);
     };
   }, []);
 
   const fetchWithAuth = useCallback((url: string, options: RequestInit = {}) => {
-    const token = localStorage.getItem('jarvis_auth_token');
-    const headers = {
-      ...options.headers,
-      ...(token ? { 'Authorization': `Bearer ${token}` } : {})
-    };
+    const token = localStorage.getItem('vexa_auth_token');
+    const headers = new Headers(options.headers);
+    if (token) headers.set('Authorization', `Bearer ${token}`);
     return fetch(url, { ...options, headers }).then(res => {
       if (res.status === 401) {
-        localStorage.removeItem('jarvis_auth_token');
+        localStorage.removeItem('vexa_auth_token');
         setIsAuthenticated(false);
       }
       return res;
@@ -1035,6 +1180,9 @@ export default function App() {
   }, [isAuthenticated, fetchWithAuth]);
 
   const handleRequestOtp = async () => {
+    setOtpSent(false);
+    setOtpCode('');
+    lastAttemptedOtp.current = '';
     setAuthStatus('sending');
     setAuthError('');
     try {
@@ -1042,20 +1190,22 @@ export default function App() {
         method: 'POST'
       });
       const data = await res.json();
-      if (data.status === 'success') {
+      if (res.ok && data.status === 'success') {
+        setOtpSent(true);
         setAuthStatus('sent');
       } else {
         setAuthStatus('error');
-        setAuthError(data.message || 'Error sending code.');
+        setAuthError(data.message || copy('Error sending code.'));
       }
     } catch (err) {
       setAuthStatus('error');
-      setAuthError('Error connecting to backend.');
+      setAuthError(copy('Error connecting to backend.'));
     }
   };
 
-  const verifyOtpCode = async (code: string) => {
-    if (!code.trim()) return;
+  const verifyOtpCode = useCallback(async (code: string) => {
+    if (!/^\d{6}$/.test(code) || authStatus === 'verifying') return;
+    lastAttemptedOtp.current = code;
     setAuthStatus('verifying');
     setAuthError('');
     try {
@@ -1066,20 +1216,20 @@ export default function App() {
       });
       if (res.ok) {
         const data = await res.json();
-        localStorage.setItem('jarvis_auth_token', data.token);
+        localStorage.setItem('vexa_auth_token', data.token);
         setIsAuthenticated(true);
         setAuthStatus('success');
         setOtpCode('');
       } else {
         const data = await res.json();
         setAuthStatus('error');
-        setAuthError(data.detail || 'Invalid access code.');
+        setAuthError(data.detail || copy('Invalid access code.'));
       }
     } catch (err) {
       setAuthStatus('error');
-      setAuthError('Error verifying code.');
+      setAuthError(copy('Error verifying code.'));
     }
-  };
+  }, [authStatus, copy]);
 
   const handleVerifyOtp = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1099,25 +1249,25 @@ export default function App() {
       });
       const data = await res.json();
       if (res.ok && data.token) {
-        localStorage.setItem('jarvis_auth_token', data.token);
+        localStorage.setItem('vexa_auth_token', data.token);
         setIsAuthenticated(true);
         setPwPassword('');
         setPwStatus('idle');
       } else {
         setPwStatus('error');
-        setPwError(data.detail || 'Invalid username or password.');
+        setPwError(data.detail || copy('Invalid username or password.'));
       }
     } catch (err) {
       setPwStatus('error');
-      setPwError('Error connecting to backend.');
+      setPwError(copy('Error connecting to backend.'));
     }
   };
 
   useEffect(() => {
-    if (otpCode.length === 6 && authStatus !== 'verifying') {
+    if (otpSent && otpCode.length === 6 && otpCode !== lastAttemptedOtp.current && authStatus !== 'verifying') {
       verifyOtpCode(otpCode);
     }
-  }, [otpCode, authStatus]);
+  }, [otpCode, authStatus, otpSent, verifyOtpCode]);
 
   // Initialize and maintain WebSocket connection
   useEffect(() => {
@@ -1125,6 +1275,9 @@ export default function App() {
     
     let reconnectTimeoutId: any = null;
     let isCleanedUp = false;
+    // Reset on every successful open, so a long-lived connection that drops once
+    // retries immediately instead of inheriting an old backoff.
+    let reconnectAttempt = 0;
 
     const connectWS = () => {
       if (isCleanedUp) return;
@@ -1146,23 +1299,41 @@ export default function App() {
       }
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const token = localStorage.getItem('jarvis_auth_token') || '';
+      const token = localStorage.getItem('vexa_auth_token') || '';
       const wsUrl = `${protocol}//${window.location.host}/api/ws`;
 
       console.log('Connecting to authenticated WebSocket.');
-      const ws = new WebSocket(wsUrl, ['hermes-v1', `hermes-auth.${token}`]);
+      // hermes-v2 = addressed delivery + stream resume. Older servers ignore it
+      // and answer hermes-v1, which still works (they just fan everything out).
+      const ws = new WebSocket(wsUrl, ['hermes-v2', 'hermes-v1', `hermes-auth.${token}`]);
       wsRef.current = ws;
 
       ws.onopen = () => {
         setIsConnected(true);
+        reconnectAttempt = 0;
         console.log('WebSocket connected.');
+        const tracker = runCursorsRef.current;
+        // 'inbox' carries only "conversation X changed" frames; the server drops it
+        // from the subscription for a role without inbox access.
+        const chatIds = Array.from(new Set([currentChatIdRef.current, ...tracker.activeChatIds(), 'inbox']))
+          .filter(Boolean);
+        ws.send(JSON.stringify({ type: 'subscribe', chat_ids: chatIds }));
+        // Ask for the tail of everything that was still running when the socket
+        // died. Without this the tokens streamed during the gap — and the final
+        // answer itself — were lost until a full page reload.
+        const runs = tracker.resumeRequest();
+        if (runs.length > 0) {
+          ws.send(JSON.stringify({ type: 'resume', runs }));
+        }
       };
 
       ws.onclose = () => {
         setIsConnected(false);
-        console.log('WebSocket disconnected. Reconnecting in 3s...');
         if (!isCleanedUp && wsRef.current === ws) {
-          reconnectTimeoutId = setTimeout(connectWS, 3000);
+          const delay = reconnectDelayMs(reconnectAttempt);
+          reconnectAttempt += 1;
+          console.log(`WebSocket disconnected. Reconnecting in ${delay}ms...`);
+          reconnectTimeoutId = setTimeout(connectWS, delay);
         }
       };
 
@@ -1170,7 +1341,50 @@ export default function App() {
         try {
           const data = JSON.parse(event.data);
           console.log('WS Event received:', data);
-          
+
+          if (data.type === 'resume_begin') {
+            // 'gap': the replay starts further back than our cursor, so the
+            // partial text we have for this run is not a prefix of it. Drop the
+            // partial and let the replay rebuild it.
+            if (data.status === 'gap') {
+              runCursorsRef.current.reset(data.run_id);
+              setMessages(prev => prev.map(message => message.run_id === data.run_id
+                ? { ...message, content: '', thinking: '' }
+                : message));
+            } else if (data.status === 'unknown') {
+              // The buffer is gone (expired or never existed). The DB is the only
+              // remaining source of truth for this run.
+              runCursorsRef.current.forget(data.run_id);
+              // No terminal frame will ever come for it — don't leave its chat
+              // stuck on "generating".
+              clearGenerating(undefined, data.run_id);
+              setMessages(prev => prev.map(message => message.run_id === data.run_id
+                ? { ...message, streaming: false }
+                : message));
+              const chatId = String(data.chat_id || currentChatIdRef.current);
+              fetch(`/api/history/${chatId}`)
+                .then(res => res.json())
+                .then(history => {
+                  // Guard the shape: an error payload is an object, and storing
+                  // it where a list belongs is what has blanked the dashboard
+                  // before.
+                  if (Array.isArray(history) && chatId === currentChatIdRef.current) {
+                    setMessages(history);
+                  }
+                })
+                .catch(err => console.error('Resume history reload failed:', err));
+            }
+            return;
+          }
+          if (data.type === 'resume_end' || data.type === 'subscribed') {
+            return;
+          }
+          // A replayed frame the socket already delivered must not be applied
+          // twice: stream chunks are deltas, so a double-apply duplicates text.
+          if (!runCursorsRef.current.accept(data)) {
+            return;
+          }
+
           if (data.type === 'init') {
             setConfig(data.config);
             setEditedPrompt(data.config.system_prompt);
@@ -1179,7 +1393,10 @@ export default function App() {
             if (data.logs) {
               setLogs(data.logs);
             }
-            if (data.history && data.history.length > 0) {
+            // init carries the dashboard's history. Applying it to whatever chat
+            // is open replaced that chat's messages on every reconnect (and
+            // auto-titled a fresh chat from the dashboard's first message).
+            if (data.history && data.history.length > 0 && currentChatIdRef.current === 'dashboard') {
               setMessages(data.history);
             }
             if (data.activity_logs) {
@@ -1237,8 +1454,7 @@ export default function App() {
                 : [...prev, incoming]);
             }
             if (data.role === 'assistant') {
-              activeRunIdRef.current = null;
-              setIsGenerating(false);
+              clearGenerating(msgChatId, data.run_id || undefined);
               if (data.suppress_tts) {
                 stopSpeech();
               } else if (ttsEnabledRef.current && msgChatId === currentChatIdRef.current) {
@@ -1256,14 +1472,14 @@ export default function App() {
                 new Notification('VEXA', {
                   body: preview || 'New Vexa response',
                   icon: '/favicon.svg',
-                  tag: 'jarvis-reply',
+                  tag: 'vexa-reply',
                   silent: false,
                 });
               }
             }
           } else if (data.type === 'chat_cancelled') {
-            const cancelledRunId = String(data.run_id || activeRunIdRef.current || '');
             const cancelledChatId = data.chat_id || currentChatIdRef.current;
+            const cancelledRunId = String(data.run_id || generatingRunsRef.current[cancelledChatId] || '');
             if (cancelledChatId === currentChatIdRef.current) {
               setMessages(prev => prev.map(message =>
                 message.run_id === cancelledRunId
@@ -1275,8 +1491,7 @@ export default function App() {
                   : message
               ));
             }
-            activeRunIdRef.current = null;
-            setIsGenerating(false);
+            clearGenerating(cancelledChatId, cancelledRunId || undefined);
           } else if (data.type === 'user_message_id_update') {
             const msgChatId = data.chat_id || 'dashboard';
             if (msgChatId === currentChatIdRef.current) {
@@ -1324,6 +1539,10 @@ export default function App() {
             speakText(`Albert, the alarm "${data.alarm.label}" has gone off.`);
           } else if (typeof data.type === 'string' && data.type.startsWith('cf.')) {
             setLastCfEvent(data as CFEvent);
+          } else if (data.type === 'inbox_update') {
+            window.dispatchEvent(new CustomEvent(INBOX_UPDATE_EVENT, {
+              detail: { conversation_id: data.conversation_id, kind: data.kind },
+            }));
           } else if (data.type === 'dev_run_event') {
             const runEvent = data as DevRunEvent;
             setLastDevRunEvent(runEvent);
@@ -1368,16 +1587,21 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthenticated]);
 
+  // A failed request (401 after the session lapses, or any error payload) answers
+  // with an object like {detail: "..."}, not a list. Storing that unguarded is
+  // what blanked the whole dashboard: the next render called .map on it, React
+  // 19 unmounted the tree on the uncaught error, and all the user saw was the
+  // body's CSS gradient. A non-list response leaves the previous value alone.
   const fetchDocuments = () => {
     fetch('/api/documents')
       .then(res => res.json())
-      .then(data => setDocuments(data))
+      .then(data => { if (Array.isArray(data)) setDocuments(data); })
       .catch(err => console.log('Error fetching documents:', err));
   };
 
   const fetchMetrics = useCallback(() => {
     setIsMetricsLoading(true);
-    fetchWithAuth('http://localhost:8000/api/metrics')
+    fetchWithAuth('/api/metrics')
       .then(res => res.json())
       .then(data => {
         setMetrics(data);
@@ -1398,7 +1622,7 @@ export default function App() {
   const fetchUploads = () => {
     fetch('/api/uploads')
       .then(res => res.json())
-      .then(data => setUploads(data))
+      .then(data => { if (Array.isArray(data)) setUploads(data); })
       .catch(err => console.log('Error fetching uploads:', err));
   };
 
@@ -1433,7 +1657,17 @@ export default function App() {
     return id;
   };
 
-  const handleCreateNewSessionConfirm = async (name: string, agentId: string = 'jarvis', projectId: string = '') => {
+  /** Creates the session, then names it, assigns its agent and its folder.
+   *
+   *  Those three calls used to be addressed to the backend's own host and port
+   *  as seen from inside the server. In a browser that is the
+   *  *user's own* machine, where nothing answers, so all three failed silently
+   *  (they are each wrapped in a try/catch that only logs). The visible result
+   *  was a chat that kept the name only because `getSessionLabel` reconstructs
+   *  it from the generated id, and an agent choice that never stuck. Everything
+   *  here goes through a relative path, which nginx proxies, like the rest of
+   *  the app already did. */
+  const handleCreateNewSessionConfirm = async (name: string, agentId: string = 'vexa', projectId: string = '') => {
     let sessionId = '';
     const trimmed = name.trim();
     if (trimmed) {
@@ -1444,7 +1678,7 @@ export default function App() {
     }
 
     try {
-      await fetchWithAuth(`http://localhost:8000/api/history/${sessionId}/agent`, {
+      await fetchWithAuth(`/api/history/${sessionId}/agent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ agent_id: agentId })
@@ -1455,7 +1689,7 @@ export default function App() {
 
     if (projectId) {
       try {
-        await fetchWithAuth(`http://localhost:8000/api/history/${sessionId}/project`, {
+        await fetchWithAuth(`/api/history/${sessionId}/project`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ project_id: projectId })
@@ -1467,7 +1701,7 @@ export default function App() {
 
     if (trimmed) {
       try {
-        await fetchWithAuth(`http://localhost:8000/api/history/${sessionId}/rename`, {
+        await fetchWithAuth(`/api/history/${sessionId}/rename`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ title: trimmed })
@@ -1483,14 +1717,14 @@ export default function App() {
 
   const handleCreateNewSession = () => {
     setNewSessionNameInput('');
-    setNewSessionAgentInput('jarvis');
+    setNewSessionAgentInput('vexa');
     setNewSessionProjectInput('');
     setShowNewSessionModal(true);
   };
 
   const handleSetSessionAgent = async (sessionId: string, agentId: string) => {
     try {
-      const res = await fetchWithAuth(`http://localhost:8000/api/history/${sessionId}/agent`, {
+      const res = await fetchWithAuth(`/api/history/${sessionId}/agent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ agent_id: agentId })
@@ -1507,7 +1741,7 @@ export default function App() {
 
   const handleSetSessionProject = async (sessionId: string, projectId: string) => {
     try {
-      const res = await fetchWithAuth(`http://localhost:8000/api/history/${sessionId}/project`, {
+      const res = await fetchWithAuth(`/api/history/${sessionId}/project`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ project_id: projectId || null })
@@ -1522,17 +1756,59 @@ export default function App() {
     }
   };
 
+  /** "+" in the plain chat view: a chat exists the moment you click, with no
+   *  name-and-agent modal in the way — the conversation names itself from its
+   *  first message (see SimpleChatView's auto-title effect). */
+  const handleQuickNewChat = useCallback(() => {
+    const sessionId = `chat_${Date.now()}`;
+    setCurrentChatId(sessionId);
+    currentChatIdRef.current = sessionId;
+    localStorage.setItem('vexa_current_chat_id', sessionId);
+    setMessages([]);
+    void fetchWithAuth(`/api/history/${sessionId}/agent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_id: 'vexa' }),
+    }).then(fetchChatSessions).catch(err => console.error('Error creating chat:', err));
+  }, [fetchWithAuth]);
+
+  const handleRenameSession = useCallback(async (sessionId: string, title: string) => {
+    try {
+      const res = await fetchWithAuth(`/api/history/${sessionId}/rename`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title }),
+      });
+      if (res.ok) {
+        setChatSessions(prev => prev.map(s => (s.id === sessionId ? { ...s, title } : s)));
+      }
+    } catch (e) {
+      console.error('Error renaming session:', e);
+    }
+  }, [fetchWithAuth]);
+
+  /** Drops one message from the open conversation, both on screen and on disk. */
+  const handleDeleteMessage = useCallback(async (messageId: number) => {
+    const chatId = currentChatIdRef.current;
+    try {
+      const res = await fetchWithAuth(`/api/history/${chatId}/messages/${messageId}`, { method: 'DELETE' });
+      if (res.ok) setMessages(prev => prev.filter(m => m.id !== messageId));
+    } catch (e) {
+      console.error('Error deleting message:', e);
+    }
+  }, [fetchWithAuth]);
+
   const fetchSubagents = () => {
     fetch('/api/subagents')
       .then(res => res.json())
-      .then(data => setSubagents(data))
+      .then(data => { if (Array.isArray(data)) setSubagents(data); })
       .catch(err => console.log('Error fetching subagents:', err));
   };
 
   const fetchProjects = () => {
     fetchWithAuth('/api/projects')
       .then(res => res.json())
-      .then(data => setProjects(data))
+      .then(data => { if (Array.isArray(data)) setProjects(data); })
       .catch(err => console.log('Error fetching projects:', err));
   };
 
@@ -1564,7 +1840,7 @@ export default function App() {
   const handleCreateSubagent = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newAgentId.trim() || !newAgentName.trim() || !newAgentPrompt.trim()) {
-      alert('Please fill in all fields.');
+      notify(copy('Please fill in all fields.'));
       return;
     }
     setIsCreatingAgent(true);
@@ -1588,7 +1864,7 @@ export default function App() {
         setNewAgentPrompt('');
         setNewAgentSkills('');
         setNewAgentTemperature(0.7);
-        alert('Sub-agent successfully created.');
+        notify(copy('Sub-agent successfully created.'));
         
         fetch('/api/subagents')
           .then(r => r.json())
@@ -1597,18 +1873,18 @@ export default function App() {
             selectChat(cleanId, data);
           });
       } else {
-        alert('Failed to create sub-agent.');
+        notify(copy('Failed to create sub-agent.'));
       }
     } catch (err) {
       console.error(err);
-      alert('Error creating sub-agent.');
+      notify(copy('Error creating sub-agent.'));
     } finally {
       setIsCreatingAgent(false);
     }
   };
 
   const handleDeleteSubagent = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this sub-agent? The chat history will also be deleted from the server.')) {
+    if (!await confirmAction(language === 'ru' ? 'Удалить агента вместе с историей его чата? Это действие нельзя отменить.' : 'Delete this agent and its chat history? This cannot be undone.')) {
       return;
     }
     try {
@@ -1620,20 +1896,20 @@ export default function App() {
         if (currentChatId === id) {
           selectChat('dashboard');
         }
-        alert('Sub-agent deleted.');
+        notify(copy('Sub-agent deleted.'));
       } else {
-        alert('Failed to delete sub-agent.');
+        notify(copy('Failed to delete sub-agent.'));
       }
     } catch (err) {
       console.error(err);
-      alert('Error during deletion.');
+      notify(copy('Error during deletion.'));
     }
   };
 
   const handleUpdateSubagent = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingAgentId || !editAgentName.trim() || !editAgentPrompt.trim()) {
-      alert('Please fill in all fields.');
+      notify(copy('Please fill in all fields.'));
       return;
     }
     setIsUpdatingAgent(true);
@@ -1651,7 +1927,7 @@ export default function App() {
         })
       });
       if (res.ok) {
-        alert('Sub-agent successfully updated.');
+        notify(copy('Sub-agent successfully updated.'));
         fetch('/api/subagents')
           .then(r => r.json())
           .then(data => {
@@ -1659,11 +1935,11 @@ export default function App() {
             selectChat(editingAgentId, data);
           });
       } else {
-        alert('Failed to update sub-agent.');
+        notify(copy('Failed to update sub-agent.'));
       }
     } catch (err) {
       console.error(err);
-      alert('Error updating sub-agent.');
+      notify(copy('Error updating sub-agent.'));
     } finally {
       setIsUpdatingAgent(false);
     }
@@ -1696,7 +1972,7 @@ export default function App() {
   };
 
   const fetchModels = () => {
-    const token = localStorage.getItem('jarvis_auth_token');
+    const token = localStorage.getItem('vexa_auth_token');
     fetch('/api/models', {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     })
@@ -1743,20 +2019,22 @@ export default function App() {
     fetchChatSessions();
     fetchModels();
 
-    fetchWithAuth('http://localhost:8000/api/settings')
+    fetchWithAuth('/api/settings')
       .then(res => res.json())
       .then(data => {
         if (data?.language) {
-          const nextLanguage = data.language as Language;
+          const nextLanguage = normalizeLanguage(data.language);
           setAppSettings({ language: nextLanguage });
           setLanguageState(nextLanguage);
+          // Storing the normalised value, not the raw one, is what stops a bad
+          // server response from poisoning this browser for every later visit.
           localStorage.setItem('hermes_language', nextLanguage);
         }
       })
       .catch(() => {});
     
     if (isAuthenticated) {
-      const savedChatId = localStorage.getItem('jarvis_current_chat_id') || 'dashboard';
+      const savedChatId = localStorage.getItem('vexa_current_chat_id') || 'dashboard';
       selectChat(savedChatId);
     }
     // These fetch helpers and selectChat are intentionally initialized once per auth session.
@@ -1857,34 +2135,34 @@ export default function App() {
       if (res.ok) {
         setNoteTitle('');
         setNoteContent('');
-        alert('Document indexed, Albert.');
+        notify(copy('Document indexed, Albert.'));
         fetchDocuments();
       } else {
-        alert('Index error.');
+        notify(copy('Index error.'));
       }
     } catch (err) {
       console.error(err);
-      alert('Connection error.');
+      notify(copy('Connection error.'));
     } finally {
       setIsIndexing(false);
     }
   };
 
   const handleDeleteDocument = async (docId: string) => {
-    if (!window.confirm('Delete document from long-term memory?')) return;
+    if (!await confirmAction(language === 'ru' ? 'Удалить документ из долговременной памяти?' : 'Delete document from long-term memory?')) return;
     try {
       const res = await fetch(`/api/documents/${docId}`, {
         method: 'DELETE'
       });
       if (res.ok) {
         fetchDocuments();
-        alert('Document deleted.');
+        notify(copy('Document deleted.'));
       } else {
-        alert('Deletion error.');
+        notify(copy('Deletion error.'));
       }
     } catch (err) {
       console.error(err);
-      alert('Connection error.');
+      notify(copy('Connection error.'));
     }
   };
 
@@ -1898,11 +2176,11 @@ export default function App() {
         const data = await res.json();
         setMemorySearchResults(data);
       } else {
-        alert('Search query error.');
+        notify(copy('Search query error.'));
       }
     } catch (err) {
       console.error(err);
-      alert('Backend connection error.');
+      notify(copy('Backend connection error.'));
     } finally {
       setIsSearchingMemory(false);
     }
@@ -1940,20 +2218,20 @@ export default function App() {
       // ── PDF path: server-side extraction ─────────────────────────────────────
       const MAX_PDF_MB = 25; // raw file size guard before sending to server
       if (file.size > MAX_PDF_MB * 1024 * 1024) {
-        alert(`PDF "${file.name}" exceeds ${MAX_PDF_MB} MB. Please use a smaller file.`);
+        notify(`PDF "${file.name}" exceeds ${MAX_PDF_MB} MB. Please use a smaller file.`);
         return;
       }
       setIsUploading(true);
       try {
         const form = new FormData();
         form.append('file', file);
-        const res = await fetchWithAuth('http://localhost:8000/api/parse-pdf', {
+        const res = await fetchWithAuth('/api/parse-pdf', {
           method: 'POST',
           body: form,
         });
         if (!res.ok) {
           const err = await res.json().catch(() => ({ detail: 'Unknown error' }));
-          alert(`PDF parse failed: ${err.detail}`);
+          notify(`PDF parse failed: ${err.detail}`);
           return;
         }
         const data = await res.json();
@@ -1966,7 +2244,7 @@ export default function App() {
         });
       } catch (err) {
         console.error('PDF parse error:', err);
-        alert('Could not connect to backend to parse PDF.');
+        notify(copy('Could not connect to backend to parse PDF.'));
       } finally {
         setIsUploading(false);
       }
@@ -1974,7 +2252,7 @@ export default function App() {
       // ── Text path: client-side FileReader ────────────────────────────────────
       const MAX_TEXT_BYTES = 150 * 1024; // 150 KB
       if (file.size > MAX_TEXT_BYTES) {
-        alert(`File "${file.name}" is too large for inline chat context (max 150 KB). Use the Memory tab to index it into the knowledge base instead.`);
+        notify(`File "${file.name}" is too large for inline chat context (max 150 KB). Use the Memory tab to index it into the knowledge base instead.`);
         return;
       }
       const reader = new FileReader();
@@ -1983,7 +2261,7 @@ export default function App() {
         setAttachedFile({ name: file.name, content, type: 'text' });
       };
       reader.onerror = () => {
-        alert(`Failed to read file "${file.name}".`);
+        notify(`Failed to read file "${file.name}".`);
       };
       reader.readAsText(file, 'utf-8');
     }
@@ -2001,24 +2279,24 @@ export default function App() {
     if (currentChatIdRef.current !== 'dashboard') {
       currentChatIdRef.current = 'dashboard';
       setCurrentChatId('dashboard');
-      localStorage.setItem('jarvis_current_chat_id', 'dashboard');
+      localStorage.setItem('vexa_current_chat_id', 'dashboard');
     }
     return sendChatText(text, 'dashboard');
   }, [sendChatText]);
 
   const handleStopGeneration = useCallback(() => {
-    const runId = activeRunIdRef.current;
+    const chatId = currentChatIdRef.current;
+    const runId = generatingRunsRef.current[chatId];
     if (runId) {
-      const token = localStorage.getItem('jarvis_auth_token');
+      const token = localStorage.getItem('vexa_auth_token');
       void fetch(`/api/runs/${encodeURIComponent(runId)}/cancel`, {
         method: 'POST',
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
-      activeRunIdRef.current = null;
     }
-    setIsGenerating(false);
+    clearGenerating(chatId);
     stopSpeech();
-  }, [stopSpeech]);
+  }, [stopSpeech, clearGenerating]);
 
   // Re-send the last user message for the current session (P0 UX "Retry").
   const handleRetryLast = useCallback(() => {
@@ -2029,9 +2307,8 @@ export default function App() {
   }, [sendChatText]);
 
   const handleClearChat = async () => {
-    if (!window.confirm('Albert, are you sure you want to completely clear the history of this session?')) return;
+    if (!await confirmAction(language === 'ru' ? 'Удалить всю историю этого чата? Это действие нельзя отменить.' : 'Delete all messages in this chat? This cannot be undone.')) return;
     
-    setMessages([]);
     try {
       const res = await fetch(`/api/history/${currentChatId}`, {
         method: 'DELETE'
@@ -2046,6 +2323,7 @@ export default function App() {
         }
       }
     } catch(e) {
+      notify(copy('Connection error.'));
       console.error('Error clearing history:', e);
     }
   };
@@ -2062,11 +2340,10 @@ export default function App() {
           model: editedModel,
           provider: editedRuntimeConfig.provider,
           api_base: editedRuntimeConfig.api_base,
-          ollama_base_url: editedRuntimeConfig.ollama_base_url,
+          local_base_url: editedRuntimeConfig.local_base_url,
           openai_api_base: editedRuntimeConfig.openai_api_base,
-          ollama_num_ctx: editedRuntimeConfig.ollama_num_ctx,
-          ollama_keep_alive: editedRuntimeConfig.ollama_keep_alive,
-          ollama_think: editedRuntimeConfig.ollama_think,
+          local_num_ctx: editedRuntimeConfig.local_num_ctx,
+          local_think: editedRuntimeConfig.local_think,
           fast_mode: editedRuntimeConfig.fast_mode,
           max_history_len: editedRuntimeConfig.max_history_len,
           condenser_enabled: editedRuntimeConfig.condenser_enabled,
@@ -2087,13 +2364,13 @@ export default function App() {
         setEditedRuntimeConfig(data.config);
         setEditedModel(data.config.model);
         fetchModels();
-        alert('System configuration updated, Albert.');
+        notify(copy('System configuration updated, Albert.'));
       } else {
-        alert('Error updating configuration.');
+        notify(copy('Error updating configuration.'));
       }
     } catch (err) {
       console.error(err);
-      alert('Connection error with backend server.');
+      notify(copy('Connection error with backend server.'));
     } finally {
       setIsSavingConfig(false);
     }
@@ -2108,8 +2385,8 @@ export default function App() {
         justifyContent: 'center',
         minHeight: '100vh',
         width: '100vw',
-        background: 'radial-gradient(circle at center, #0f172a 0%, #020617 100%)',
-        color: '#e2e8f0',
+        background: 'radial-gradient(circle at center, #141820 0%, #06070b 100%)',
+        color: '#e4e8ed',
         fontFamily: 'Inter, sans-serif',
         padding: '20px',
         boxSizing: 'border-box'
@@ -2119,19 +2396,19 @@ export default function App() {
           maxWidth: '400px',
           padding: '40px 30px',
           borderRadius: '16px',
-          boxShadow: '0 0 40px rgba(6, 182, 212, 0.15)',
-          border: '1px solid rgba(6, 182, 212, 0.2)',
+          boxShadow: '0 0 40px rgba(54, 207, 251, 0.075)',
+          border: '1px solid rgba(157, 166, 181, 0.14)',
           textAlign: 'center'
         }} className="glass-panel">
           
           <div className="hermes-auth-brand" style={{ marginBottom: '30px' }}>
             <HermesMark className="hermes-auth-mark" />
             <h1 className="glow-text-cyan" style={{ fontSize: '2.5rem', fontWeight: 800, letterSpacing: 0, margin: 0 }}>HERMES</h1>
-            <p style={{ color: '#06b6d4', fontSize: '0.9rem', letterSpacing: 0, margin: '4px 0 0', textTransform: 'uppercase' }}>Secure Access Link</p>
+            <p style={{ color: '#36cffb', fontSize: '0.9rem', letterSpacing: 0, margin: '4px 0 0', textTransform: 'uppercase' }}>{copy("Secure Access Link")}</p>
           </div>
 
-          <p style={{ color: '#94a3b8', fontSize: '0.95rem', lineHeight: '1.6', marginBottom: '20px' }}>
-            Albert, identity confirmation is required to access the management console.
+          <p style={{ color: '#99a2b1', fontSize: '0.95rem', lineHeight: '1.6', marginBottom: '20px' }}>
+            {copy("Albert, identity confirmation is required to access the management console.")}
           </p>
 
           {loginMode === 'password' ? (
@@ -2140,11 +2417,12 @@ export default function App() {
                 type="text"
                 value={pwUsername}
                 onChange={(e) => setPwUsername(e.target.value)}
-                placeholder="Username"
+                placeholder={copy("Username")}
+                aria-label={copy("Username")}
                 autoComplete="username"
                 style={{
                   width: '100%', padding: '14px', borderRadius: '8px',
-                  border: '1px solid rgba(6, 182, 212, 0.3)', background: 'rgba(15, 23, 42, 0.6)',
+                  border: '1px solid rgba(157, 166, 181, 0.21)', background: 'rgba(20, 24, 32, 0.6)',
                   color: '#fff', fontSize: '1rem', outline: 'none', boxSizing: 'border-box'
                 }}
                 disabled={pwStatus === 'submitting'}
@@ -2154,39 +2432,40 @@ export default function App() {
                 type="password"
                 value={pwPassword}
                 onChange={(e) => setPwPassword(e.target.value)}
-                placeholder="Password"
+                placeholder={copy("Password")}
+                aria-label={copy("Password")}
                 autoComplete="current-password"
                 style={{
                   width: '100%', padding: '14px', borderRadius: '8px',
-                  border: '1px solid rgba(6, 182, 212, 0.3)', background: 'rgba(15, 23, 42, 0.6)',
+                  border: '1px solid rgba(157, 166, 181, 0.21)', background: 'rgba(20, 24, 32, 0.6)',
                   color: '#fff', fontSize: '1rem', outline: 'none', boxSizing: 'border-box'
                 }}
                 disabled={pwStatus === 'submitting'}
               />
               {pwError && (
-                <p style={{ color: '#ef4444', fontSize: '0.85rem', margin: 0 }}>⚠️ {pwError}</p>
+                <p style={{ color: '#f05d75', fontSize: '0.85rem', margin: 0 }}>⚠️ {pwError}</p>
               )}
               <button
                 type="submit"
                 disabled={pwStatus === 'submitting'}
                 style={{
-                  width: '100%', padding: '14px', borderRadius: '8px', border: '1px solid #06b6d4',
-                  background: 'rgba(6, 182, 212, 0.1)', color: '#06b6d4', fontWeight: 600,
+                  width: '100%', padding: '14px', borderRadius: '8px', border: '1px solid #9da6b5b2',
+                  background: 'rgba(54, 207, 251, 0.1)', color: '#36cffb', fontWeight: 600,
                   fontSize: '1rem', cursor: pwStatus === 'submitting' ? 'default' : 'pointer', transition: 'all 0.2s',
                 }}
                 className="glow-btn-cyan"
               >
-                {pwStatus === 'submitting' ? 'Signing in...' : 'Sign in'}
+                {pwStatus === 'submitting' ? copy('Signing in...') : copy('Sign in')}
               </button>
               <button
                 type="button"
                 onClick={() => { setLoginMode('telegram'); setPwError(''); setPwStatus('idle'); }}
-                style={{ background: 'none', border: 'none', color: '#64748b', fontSize: '0.85rem', cursor: 'pointer', textDecoration: 'underline', marginTop: '4px' }}
+                style={{ background: 'none', border: 'none', color: '#6c7381', fontSize: '0.85rem', cursor: 'pointer', textDecoration: 'underline', marginTop: '4px' }}
               >
-                Use Telegram code instead
+                {copy("Use Telegram code instead")}
               </button>
             </form>
-          ) : authStatus === 'idle' && (
+          ) : (authStatus === 'idle' || (authStatus === 'error' && !otpSent)) && (
             <>
               <button
                 onClick={handleRequestOtp}
@@ -2194,9 +2473,9 @@ export default function App() {
                   width: '100%',
                   padding: '14px',
                   borderRadius: '8px',
-                  border: '1px solid #06b6d4',
-                  background: 'rgba(6, 182, 212, 0.1)',
-                  color: '#06b6d4',
+                  border: '1px solid #9da6b5b2',
+                  background: 'rgba(54, 207, 251, 0.1)',
+                  color: '#36cffb',
                   fontWeight: 600,
                   fontSize: '1rem',
                   cursor: 'pointer',
@@ -2204,31 +2483,35 @@ export default function App() {
                 }}
                 className="glow-btn-cyan"
               >
-                Request code in Telegram
+                {copy("Request code in Telegram")}
               </button>
               <button
                 type="button"
                 onClick={() => { setLoginMode('password'); setAuthError(''); }}
-                style={{ background: 'none', border: 'none', color: '#64748b', fontSize: '0.85rem', cursor: 'pointer', textDecoration: 'underline', marginTop: '14px' }}
+                style={{ background: 'none', border: 'none', color: '#6c7381', fontSize: '0.85rem', cursor: 'pointer', textDecoration: 'underline', marginTop: '14px' }}
               >
-                Sign in with username &amp; password
+                {copy("Sign in with username & password")}
               </button>
             </>
           )}
 
-          {authStatus === 'sending' && (
-            <p style={{ color: '#06b6d4', fontSize: '0.95rem' }}>Initializing session and sending code...</p>
+          {loginMode === 'telegram' && !otpSent && authError && <p role="alert" style={{ color: '#f05d75' }}>{authError}</p>}
+          {loginMode === 'telegram' && authStatus === 'sending' && (
+            <p style={{ color: '#36cffb', fontSize: '0.95rem' }}>{copy("Initializing session and sending code...")}</p>
           )}
 
-          {(authStatus === 'sent' || authStatus === 'verifying' || authStatus === 'error') && (
+          {loginMode === 'telegram' && otpSent && (authStatus === 'sent' || authStatus === 'verifying' || authStatus === 'error') && (
             <form onSubmit={handleVerifyOtp} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              <p style={{ color: '#10b981', fontSize: '0.85rem', margin: '0 0 10px' }}>
-                ✓ Authorization code sent to your trusted Telegram chat.
+              <p style={{ color: '#35d49a', fontSize: '0.85rem', margin: '0 0 10px' }}>
+                {copy("\u2713 Authorization code sent to your trusted Telegram chat.")}
               </p>
               
               <input
                 type="text"
                 maxLength={6}
+                aria-label={language === 'ru' ? 'Код из Telegram' : 'Telegram code'}
+                inputMode="numeric"
+                autoComplete="one-time-code"
                 value={otpCode}
                 onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ''))}
                 placeholder="0 0 0 0 0 0"
@@ -2236,8 +2519,8 @@ export default function App() {
                   width: '100%',
                   padding: '16px',
                   borderRadius: '8px',
-                  border: '1px solid rgba(6, 182, 212, 0.3)',
-                  background: 'rgba(15, 23, 42, 0.6)',
+                  border: '1px solid rgba(157, 166, 181, 0.21)',
+                  background: 'rgba(20, 24, 32, 0.6)',
                   color: '#fff',
                   fontSize: '1.5rem',
                   letterSpacing: '12px',
@@ -2250,32 +2533,33 @@ export default function App() {
               />
 
               {authError && (
-                <p style={{ color: '#ef4444', fontSize: '0.85rem', margin: 0 }}>
+                <p style={{ color: '#f05d75', fontSize: '0.85rem', margin: 0 }}>
                   ⚠️ {authError}
                 </p>
               )}
 
               {authStatus === 'verifying' && (
                 <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', padding: '10px 0' }}>
-                  <span className="pulse-dot" style={{ width: 8, height: 8, background: '#06b6d4', boxShadow: '0 0 6px #06b6d4' }} />
-                  <span style={{ color: '#06b6d4', fontSize: '0.9rem', fontFamily: 'var(--font-mono)' }}>VERIFYING CODE...</span>
+                  <span className="pulse-dot" style={{ width: 8, height: 8, background: '#36cffb', boxShadow: '0 0 6px #36cffb80' }} />
+                  <span style={{ color: '#36cffb', fontSize: '0.9rem', fontFamily: 'var(--font-mono)' }}>{copy("VERIFYING CODE...")}</span>
                 </div>
               )}
 
               <button
                 type="button"
                 onClick={handleRequestOtp}
+                disabled={authStatus === 'verifying'}
                 style={{
                   background: 'none',
                   border: 'none',
-                  color: '#64748b',
+                  color: '#6c7381',
                   fontSize: '0.85rem',
                   cursor: 'pointer',
                   textDecoration: 'underline',
                   marginTop: '10px'
                 }}
               >
-                Resend code
+                {copy("Resend code")}
               </button>
             </form>
           )}
@@ -2290,6 +2574,9 @@ export default function App() {
     <div className={`app-container scanlines${activeTab === 'vexa' ? (vexaUiMode === 'immersive' ? ' is-vexa-mode' : ' is-vexa-simple-mode') : ''}`}>
       {/* Mobile Menu Toggle Button */}
       <button 
+        aria-label={language === 'ru' ? 'Меню разделов' : 'Navigation menu'}
+        aria-expanded={sidebarOpen}
+        aria-controls="main-sidebar"
         onClick={() => setSidebarOpen(!sidebarOpen)}
         className="mobile-menu-btn"
         style={{
@@ -2297,8 +2584,8 @@ export default function App() {
           top: '16px',
           left: '16px',
           zIndex: 1100,
-          background: 'rgba(12, 17, 34, 0.8)',
-          border: '1px solid rgba(0, 240, 255, 0.3)',
+          background: 'rgba(15, 18, 24, 0.8)',
+          border: '1px solid rgba(157, 166, 181, 0.21)',
           color: 'var(--accent-cyan)',
           padding: '8px',
           borderRadius: '8px',
@@ -2306,7 +2593,7 @@ export default function App() {
           display: 'none',
           alignItems: 'center',
           justifyContent: 'center',
-          boxShadow: '0 0 10px rgba(0, 240, 255, 0.1)',
+          boxShadow: '0 0 10px rgba(94, 225, 255, 0.05)',
           backdropFilter: 'blur(4px)'
         }}
       >
@@ -2324,7 +2611,7 @@ export default function App() {
             left: 0,
             width: '100vw',
             height: '100vh',
-            backgroundColor: 'rgba(6, 9, 19, 0.6)',
+            backgroundColor: 'rgba(8, 9, 14, 0.6)',
             backdropFilter: 'blur(4px)',
             zIndex: 999,
             display: 'none'
@@ -2336,6 +2623,7 @@ export default function App() {
           grid sizes itself from the space that is left over (container queries in
           vexa.css), so collapsing the rail simply gives the core more room. */}
       <aside
+        id="main-sidebar"
         style={{ ...styles.sidebar, ...(isSidebarCollapsed ? styles.sidebarCollapsed : {}) }}
         className={`glass-panel sidebar ${sidebarOpen ? 'sidebar-open' : ''} ${isSidebarCollapsed ? 'sidebar-collapsed' : ''}`}
       >
@@ -2405,7 +2693,7 @@ export default function App() {
             {overdueTaskCount > 0 && !isSidebarCollapsed && (
               <span style={{
                 marginLeft: 'auto', minWidth: 16, padding: '1px 5px', borderRadius: 9,
-                background: 'rgba(255, 195, 72, 0.22)', color: '#ffe1a1',
+                background: 'rgba(246, 184, 74, 0.22)', color: '#f6b84a',
                 font: '700 0.62rem var(--font-mono)', textAlign: 'center',
               }}>{overdueTaskCount}</span>
             )}
@@ -2439,7 +2727,7 @@ export default function App() {
             {!isSidebarCollapsed && (
               <span style={{
                 marginLeft: 'auto', fontSize: 9, fontWeight: 700, letterSpacing: 0.6,
-                padding: '2px 6px', borderRadius: 4, color: '#0f172a', background: '#22d3ee',
+                padding: '2px 6px', borderRadius: 4, color: '#141820', background: '#36cffb',
               }}>NEW</span>
             )}
           </button>
@@ -2451,6 +2739,13 @@ export default function App() {
           >
             <Megaphone size={18} />
             <span>{t('navSmmFactory')}</span>
+            {inboxUnread > 0 && !isSidebarCollapsed && (
+              <span style={{
+                marginLeft: 'auto', minWidth: 16, padding: '1px 5px', borderRadius: 9,
+                background: 'rgba(124, 92, 252, 0.28)', color: '#B197FF',
+                font: '700 0.62rem var(--font-mono)', textAlign: 'center',
+              }} aria-label={`${inboxUnread} диалогов с непрочитанными`}>{inboxUnread}</span>
+            )}
           </button>
 
           <button
@@ -2462,6 +2757,21 @@ export default function App() {
             <span>{t('navArchitecture')}</span>
           </button>
           
+          {routerDashboardUrl && (
+            <a
+              style={{ ...styles.navBtn, ...(isSidebarCollapsed ? styles.navBtnCollapsed : {}), textDecoration: 'none' }}
+              href={routerDashboardUrl}
+              target="_blank"
+              rel="noreferrer"
+              onClick={() => setSidebarOpen(false)}
+              title="9Router"
+            >
+              <Shuffle size={18} />
+              <span>9Router</span>
+              {!isSidebarCollapsed && <ExternalLink size={12} style={{ marginLeft: 'auto', opacity: 0.6 }} />}
+            </a>
+          )}
+
           <button
             style={navStyle('settings')}
             onClick={() => { setActiveTab('settings'); setSidebarOpen(false); }}
@@ -2510,6 +2820,8 @@ export default function App() {
             : undefined
         }
       >
+        <ErrorBoundary key={`${activeTab}:${settingsSection}`} compact>
+        <Suspense fallback={<div role="status" className="page-loading">{language === 'ru' ? 'Загрузка раздела…' : 'Loading section…'}</div>}>
         {activeTab === 'vexa' && (
           <>
             {vexaUiMode === 'simple' ? (
@@ -2540,6 +2852,18 @@ export default function App() {
                 setIsTTSEnabled={setIsTTSEnabled}
                 isSpeaking={isSpeaking}
                 setIsSpeaking={setIsSpeaking}
+                projects={projects}
+                fetchProjects={fetchProjects}
+                handleSetSessionProject={handleSetSessionProject}
+                modelSelection={modelSelection}
+                onModelSelect={handleModelSelect}
+                onSendText={(text) => sendChatText(text)}
+                onRegenerate={handleRetryLast}
+                onDeleteMessage={handleDeleteMessage}
+                onRenameSession={handleRenameSession}
+                onQuickNewChat={handleQuickNewChat}
+                speakText={speakText}
+                playingMsgIndex={playingMsgIndex}
               />
             ) : (
               <>
@@ -2736,7 +3060,9 @@ export default function App() {
           <ContentFactoryTab language={language} lastEvent={lastCfEvent} onOpenAgents={() => setActiveTab('agents')} />
         )}
 
-        {activeTab === 'smm' && <SMMFactoryTab agents={subagents} />}
+        {activeTab === 'smm' && (
+          <SMMFactoryTab agents={subagents} unreadDialogs={inboxUnread} onOpenClient={() => setActiveTab('clients')} />
+        )}
 
         {activeTab === 'network' && (
           <NetworkTab subagents={subagents} setSubagents={setSubagents} fetchSubagents={fetchSubagents} models={models} />
@@ -2829,7 +3155,7 @@ export default function App() {
 
             {settingsSection === 'activity' && (
               <ActivityTab
-                isGenerating={isGenerating}
+                isGenerating={isAnyGenerating}
                 activityLogs={activityLogs}
                 handleClearActivityLogs={handleClearActivityLogs}
               />
@@ -2915,7 +3241,7 @@ export default function App() {
             )}
 
             {settingsSection === 'obsidian' && (
-              <ObsidianTab authToken={localStorage.getItem('jarvis_auth_token')} />
+              <ObsidianTab authToken={localStorage.getItem('vexa_auth_token')} />
             )}
 
             {settingsSection === 'mcp' && (
@@ -2943,6 +3269,8 @@ export default function App() {
           );
         })()}
 
+        </Suspense>
+        </ErrorBoundary>
       </main>
 
       {/* New Session Custom Modal */}
@@ -2953,7 +3281,7 @@ export default function App() {
           left: 0,
           width: '100vw',
           height: '100vh',
-          backgroundColor: 'rgba(6, 9, 19, 0.85)',
+          backgroundColor: 'rgba(8, 9, 14, 0.85)',
           backdropFilter: 'blur(8px)',
           display: 'flex',
           justifyContent: 'center',
@@ -2963,10 +3291,10 @@ export default function App() {
           <div style={{
             width: '400px',
             padding: '24px',
-            backgroundColor: 'rgba(24, 23, 38, 0.96)',
-            border: '1px solid rgba(155, 136, 255, 0.34)',
+            backgroundColor: 'rgba(21, 25, 33, 0.96)',
+            border: '1px solid rgba(146, 119, 255, 0.34)',
             borderRadius: '8px',
-            boxShadow: '0 22px 60px rgba(0, 0, 0, 0.4), 0 0 28px rgba(155, 136, 255, 0.2)',
+            boxShadow: '0 22px 60px rgba(0, 0, 0, 0.4), 0 0 28px rgba(146, 119, 255, 0.1)',
             display: 'flex',
             flexDirection: 'column',
             gap: '16px'
@@ -3015,10 +3343,12 @@ export default function App() {
                   const nextProjectId = e.target.value;
                   setNewSessionProjectInput(nextProjectId);
                   // Switching project narrows which agent makes sense — reset
-                  // to the default (Vexa) rather than leaving an agent picked
-                  // that belongs to a different project selected.
-                  if (nextProjectId && !subagents.some(a => a.id === newSessionAgentInput && a.project_id === nextProjectId)) {
-                    setNewSessionAgentInput('jarvis');
+                  // to the default (Vexa) only when the picked agent belongs to
+                  // a *different* project. An agent with no project of its own
+                  // stays valid everywhere, same as the list below.
+                  const picked = subagents.find(a => a.id === newSessionAgentInput);
+                  if (nextProjectId && picked && picked.project_id && picked.project_id !== nextProjectId) {
+                    setNewSessionAgentInput('vexa');
                   }
                 }}
                 style={{
@@ -3026,7 +3356,7 @@ export default function App() {
                   padding: '10px 12px',
                   borderRadius: '8px',
                   border: '1px solid rgba(255,255,255,0.1)',
-                  backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                  backgroundColor: 'rgba(20, 24, 32, 0.95)',
                   color: '#fff',
                   fontSize: '0.9rem',
                   outline: 'none',
@@ -3052,16 +3382,19 @@ export default function App() {
                   padding: '10px 12px',
                   borderRadius: '8px',
                   border: '1px solid rgba(255,255,255,0.1)',
-                  backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                  backgroundColor: 'rgba(20, 24, 32, 0.95)',
                   color: '#fff',
                   fontSize: '0.9rem',
                   outline: 'none',
                   cursor: 'pointer'
                 }}
               >
-                <option value="jarvis">👑 Vexa (Main)</option>
+                <option value="vexa">👑 Vexa (Main)</option>
                 {subagents
-                  .filter(a => !newSessionProjectInput || a.project_id === newSessionProjectInput)
+                  // A project narrows the list, but must never hide agents
+                  // nobody has assigned to any project yet — those stay
+                  // available everywhere until someone scopes them.
+                  .filter(a => !newSessionProjectInput || a.project_id === newSessionProjectInput || !a.project_id)
                   .map(a => {
                     const isOrch = a.agent_type === 'orchestrator' || a.agent_type === 'sub-orchestrator';
                     const icon = isOrch ? '🧠' : '🤖';
@@ -3098,8 +3431,8 @@ export default function App() {
                 style={{
                   padding: '8px 16px',
                   borderRadius: '6px',
-                  border: '1px solid rgba(155, 136, 255, 0.45)',
-                  backgroundColor: 'rgba(155, 136, 255, 0.14)',
+                  border: '1px solid rgba(146, 119, 255, 0.45)',
+                  backgroundColor: 'rgba(146, 119, 255, 0.14)',
                   color: '#fff',
                   cursor: 'pointer',
                   fontSize: '0.8rem',

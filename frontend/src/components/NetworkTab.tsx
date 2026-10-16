@@ -4,19 +4,22 @@ import {
   GitBranch, 
   Wrench, 
   Plus, 
-  CheckCircle2, 
-  Trash2 
+  CheckCircle2,
+  Trash2,
+  Mic
 } from 'lucide-react';
+import type { VoiceTarget } from './smm/dialogs/inboxTypes';
+import { voiceApi } from './smm/dialogs/inboxApi';
 
 export const SKILLS_LIST = [
   { id: 'web_search', name: 'Web Search', desc: 'DuckDuckGo search, weather, RSS news', color: 'var(--accent-cyan)' },
-  { id: 'market_monitor', name: 'Market Monitor', desc: 'Stock quotes and alerts', color: '#10b981' },
-  { id: 'obsidian_rag', name: 'Obsidian Vault', desc: 'Read and write Obsidian notes', color: '#8b5cf6' },
-  { id: 'todoist_sync', name: 'Todoist Tasks', desc: 'Sync Todoist task lists', color: '#ef4444' },
-  { id: 'google_calendar', name: 'Google Calendar', desc: 'Calendar scheduling', color: '#f59e0b' },
+  { id: 'market_monitor', name: 'Market Monitor', desc: 'Stock quotes and alerts', color: '#35d49a' },
+  { id: 'obsidian_rag', name: 'Obsidian Vault', desc: 'Read and write Obsidian notes', color: '#7c5cfc' },
+  { id: 'todoist_sync', name: 'Todoist Tasks', desc: 'Sync Todoist task lists', color: '#f05d75' },
+  { id: 'google_calendar', name: 'Google Calendar', desc: 'Calendar scheduling', color: '#f6b84a' },
   { id: 'timers_alarms', name: 'Timers/Alarms', desc: 'Manage timers and alarms', color: '#3b82f6' },
   { id: 'shell_execution', name: 'Terminal Shell', desc: 'Execute server terminal commands', color: '#6b7280' },
-  { id: 'python_sandbox', name: 'Python Sandbox', desc: 'Calculations and mathematical expectations', color: '#14b8a6' }
+  { id: 'python_sandbox', name: 'Python Sandbox', desc: 'Calculations and mathematical expectations', color: '#35d49a' }
 ];
 
 interface NetworkTabProps {
@@ -46,7 +49,7 @@ export function NetworkTab({
 
   // Skill Positions state (saves/loads from localStorage for persistence)
   const [skillPositions, setSkillPositions] = useState<Record<string, { x: number; y: number }>>(() => {
-    const saved = localStorage.getItem('jarvis_skill_positions');
+    const saved = localStorage.getItem('vexa_skill_positions');
     if (saved) {
       try {
         return JSON.parse(saved);
@@ -58,6 +61,30 @@ export function NetworkTab({
     });
     return defaults;
   });
+
+  // External voice targets (backend/voice_providers.py) — conversation-routing
+  // executors that are not agents. They ride on the skills' position map, so the
+  // canvas' existing select/drag handling moves them without a second editor; they
+  // have no ports, because nothing is wired *to* them here — a conversation is
+  // pinned to one from SMM Factory → Диалоги.
+  const [voiceTargets, setVoiceTargets] = useState<VoiceTarget[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    voiceApi.targets()
+      .then(list => {
+        if (cancelled) return;
+        setVoiceTargets(list);
+        setSkillPositions(prev => {
+          const seeded = { ...prev };
+          list.forEach((target, index) => {
+            if (!seeded[target.id]) seeded[target.id] = { x: 3250, y: 50 + index * 110 };
+          });
+          return seeded;
+        });
+      })
+      .catch(() => { if (!cancelled) setVoiceTargets([]); });
+    return () => { cancelled = true; };
+  }, []);
 
   // Zoom & Pan states
   const [zoom, setZoom] = useState(1.0);
@@ -132,7 +159,7 @@ export function NetworkTab({
   const [addPrompt, setAddPrompt] = useState('');
   const [addModel, setAddModel] = useState('google/gemini-2.5-flash');
   const [addType, setAddType] = useState('agent');
-  const [addParent, setAddParent] = useState('jarvis');
+  const [addParent, setAddParent] = useState('vexa');
 
   // Load select node details into inspector form
   useEffect(() => {
@@ -305,7 +332,7 @@ export function NetworkTab({
           skillsToUpdate.forEach(sk => {
             updated[sk.id] = { x: Math.round(sk.x + dx), y: Math.round(sk.y + dy) };
           });
-          localStorage.setItem('jarvis_skill_positions', JSON.stringify(updated));
+          localStorage.setItem('vexa_skill_positions', JSON.stringify(updated));
           return updated;
         });
       }
@@ -438,7 +465,7 @@ export function NetworkTab({
         };
         await saveAgentToServer(updatedAgent);
       }
-    } else if ((sourceType === 'agent' || (sourceType === 'orchestrator' && sourceId !== 'jarvis')) && targetType === 'skill') {
+    } else if ((sourceType === 'agent' || (sourceType === 'orchestrator' && sourceId !== 'vexa')) && targetType === 'skill') {
       // Connect sub-agent or sub-orchestrator to skill
       const agent = subagents.find(n => n.id === sourceId);
       if (agent) {
@@ -544,7 +571,7 @@ export function NetworkTab({
     e.preventDefault();
     const cleanId = addId.replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase();
     if (!cleanId) return;
-    if (subagents.some(n => n.id === cleanId) || cleanId === 'jarvis') {
+    if (subagents.some(n => n.id === cleanId) || cleanId === 'vexa') {
       alert('A node with this ID already exists!');
       return;
     }
@@ -577,7 +604,7 @@ export function NetworkTab({
           flex: 1,
           height: '100%',
           overflow: 'hidden',
-          backgroundColor: '#020617',
+          backgroundColor: '#06070b',
           backgroundImage: 'radial-gradient(rgba(255, 255, 255, 0.05) 1.2px, transparent 0)',
           backgroundSize: `${24 * zoom}px ${24 * zoom}px`,
           backgroundPosition: `${panOffset.x}px ${panOffset.y}px`,
@@ -616,24 +643,24 @@ export function NetworkTab({
             {/* Render connection lines */}
             {/* Main Vexa connections */}
             {subagents.map(n => {
-              if (n.parent_id === 'jarvis') {
-                const jarvisNode = subagents.find(p => p.id === 'jarvis') || { x: 100, y: 200 };
-                const startX = (jarvisNode.x || 100) + 220;
-                const startY = (jarvisNode.y || 200) + 50;
+              if (n.parent_id === 'vexa') {
+                const vexaNode = subagents.find(p => p.id === 'vexa') || { x: 100, y: 200 };
+                const startX = (vexaNode.x || 100) + 220;
+                const startY = (vexaNode.y || 200) + 50;
                 const endX = n.x || 100;
                 const endY = (n.y || 100) + 50;
                 const path = getBezierPath(startX, startY, endX, endY);
                 const midX = (startX + endX) / 2;
                 const midY = (startY + endY) / 2;
                 return (
-                  <g key={`jarvis-${n.id}`}>
+                  <g key={`vexa-${n.id}`}>
                     <path d={path} stroke="var(--accent-cyan)" strokeWidth="2.5" fill="none" opacity="0.6" />
                     {/* Disconnect handle */}
                     <circle 
                       cx={midX} 
                       cy={midY} 
                       r="8" 
-                      fill="#ef4444" 
+                      fill="#f05d75" 
                       style={{ pointerEvents: 'auto', cursor: 'pointer' }} 
                       onClick={() => disconnectParent(n.id)}
                     >
@@ -648,7 +675,7 @@ export function NetworkTab({
 
             {/* Child Connections between custom nodes */}
             {subagents.map(n => {
-              if (n.parent_id && n.parent_id !== 'jarvis') {
+              if (n.parent_id && n.parent_id !== 'vexa') {
                 const parent = subagents.find(p => p.id === n.parent_id);
                 if (parent) {
                   const startX = (parent.x || 100) + 220;
@@ -665,7 +692,7 @@ export function NetworkTab({
                         cx={midX} 
                         cy={midY} 
                         r="8" 
-                        fill="#ef4444" 
+                        fill="#f05d75" 
                         style={{ pointerEvents: 'auto', cursor: 'pointer' }} 
                         onClick={() => disconnectParent(n.id)}
                       >
@@ -696,12 +723,12 @@ export function NetworkTab({
                     const midY = (startY + endY) / 2;
                     return (
                       <g key={`skill-${n.id}-${skId}`}>
-                        <path d={path} stroke="#10b981" strokeWidth="2.5" fill="none" opacity="0.6" />
+                        <path d={path} stroke="#35d49a" strokeWidth="2.5" fill="none" opacity="0.6" />
                         <circle 
                           cx={midX} 
                           cy={midY} 
                           r="8" 
-                          fill="#ef4444" 
+                          fill="#f05d75" 
                           style={{ pointerEvents: 'auto', cursor: 'pointer' }} 
                           onClick={() => disconnectSkill(n.id, skId)}
                         >
@@ -721,7 +748,7 @@ export function NetworkTab({
             {connectingFrom && (
               <path 
                 d={getBezierPath(connectingFrom.x, connectingFrom.y, cursorPos.x, cursorPos.y)} 
-                stroke="#ffd200" 
+                stroke="#f6b84a" 
                 strokeWidth="2.5" 
                 strokeDasharray="5,5" 
                 fill="none" 
@@ -734,7 +761,7 @@ export function NetworkTab({
                 y={Math.min(selectionBox.startY, selectionBox.endY)}
                 width={Math.abs(selectionBox.endX - selectionBox.startX)}
                 height={Math.abs(selectionBox.endY - selectionBox.startY)}
-                fill="rgba(0, 240, 255, 0.08)"
+                fill="rgba(94, 225, 255, 0.08)"
                 stroke="var(--accent-cyan)"
                 strokeWidth="1.5"
                 strokeDasharray="4,3"
@@ -744,11 +771,11 @@ export function NetworkTab({
 
           {/* 2. Custom nodes (Orchestrators, Sub-orchestrators & Sub-agents) */}
           {subagents.map(node => {
-            const isVexaMain = node.id === 'jarvis';
+            const isVexaMain = node.id === 'vexa';
             const isOrch = node.agent_type === 'orchestrator' || node.agent_type === 'sub-orchestrator';
             const isSelected = selectedNodes.some(sn => sn.id === node.id && !sn.isSkill);
-            const borderColor = isSelected ? '#ffd200' : (isVexaMain ? 'var(--accent-cyan)' : (isOrch ? '#8b5cf6' : 'var(--accent-orange)'));
-            const glowColor = isSelected ? 'rgba(255, 210, 0, 0.45)' : (isVexaMain ? 'rgba(0, 240, 255, 0.2)' : (isOrch ? 'rgba(139, 92, 246, 0.25)' : 'rgba(255, 159, 0, 0.2)'));
+            const borderColor = isSelected ? '#f6b84a' : (isVexaMain ? 'var(--accent-cyan)' : (isOrch ? '#7c5cfc' : 'var(--accent-orange)'));
+            const glowColor = isSelected ? 'rgba(246, 184, 74, 0.45)' : (isVexaMain ? 'rgba(94, 225, 255, 0.2)' : (isOrch ? 'rgba(124, 92, 252, 0.25)' : 'rgba(246, 184, 74, 0.2)'));
             const borderWidth = isSelected ? '2px' : '1.5px';
             const glowWidth = isSelected ? '18px' : '12px';
             
@@ -762,7 +789,7 @@ export function NetworkTab({
                   width: '220px',
                   height: '100px',
                   borderRadius: '10px',
-                  backgroundColor: 'rgba(12, 16, 32, 0.85)',
+                  backgroundColor: 'rgba(15, 17, 23, 0.85)',
                   border: `${borderWidth} solid ${borderColor}`,
                   boxShadow: `0 0 ${glowWidth} ${glowColor}`,
                   zIndex: 2,
@@ -787,7 +814,7 @@ export function NetworkTab({
                   }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
-                    {isOrch ? <Layers size={14} style={{ color: '#8b5cf6', flexShrink: 0 }} /> : <GitBranch size={14} style={{ color: 'var(--accent-orange)', flexShrink: 0 }} />}
+                    {isOrch ? <Layers size={14} style={{ color: '#7c5cfc', flexShrink: 0 }} /> : <GitBranch size={14} style={{ color: 'var(--accent-orange)', flexShrink: 0 }} />}
                     <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                       {node.name}
                     </span>
@@ -800,7 +827,7 @@ export function NetworkTab({
                 {/* Subtitle */}
                 <div style={{ flex: 1, padding: '4px 10px', display: 'flex', alignItems: 'center', pointerEvents: 'none' }}>
                   <span style={{ fontSize: '0.62rem', color: 'var(--text-dim)', lineHeight: '1.2' }}>
-                    {node.id === 'jarvis' ? 'Vexa Main Orchestrator' : (node.agent_type === 'sub-orchestrator' ? 'Sub-orchestrator' : 'Sub-agent')} / ID: {node.id}
+                    {node.id === 'vexa' ? 'Vexa Main Orchestrator' : (node.agent_type === 'sub-orchestrator' ? 'Sub-orchestrator' : 'Sub-agent')} / ID: {node.id}
                   </span>
                 </div>
 
@@ -814,8 +841,8 @@ export function NetworkTab({
                       width: '12px',
                       height: '12px',
                       borderRadius: '50%',
-                      backgroundColor: '#9ca3af',
-                      border: '2px solid #030712',
+                      backgroundColor: '#9aa3b2',
+                      border: '2px solid #06070b',
                       cursor: 'pointer',
                       boxShadow: '0 0 5px rgba(255,255,255,0.2)',
                       pointerEvents: 'auto'
@@ -838,7 +865,7 @@ export function NetworkTab({
                     height: '12px',
                     borderRadius: '50%',
                     backgroundColor: borderColor,
-                    border: '2px solid #030712',
+                    border: '2px solid #06070b',
                     cursor: 'pointer',
                     boxShadow: `0 0 8px ${borderColor}`,
                     pointerEvents: 'auto'
@@ -854,8 +881,8 @@ export function NetworkTab({
           {SKILLS_LIST.map((skill, skIndex) => {
             const skillPos = skillPositions[skill.id] || { x: 3500, y: 50 + skIndex * 135 };
             const isSelected = selectedNodes.some(sn => sn.id === skill.id && sn.isSkill);
-            const borderColor = isSelected ? '#ffd200' : '#10b981';
-            const glowColor = isSelected ? 'rgba(255, 210, 0, 0.45)' : 'rgba(16, 185, 129, 0.12)';
+            const borderColor = isSelected ? '#f6b84a' : '#35d49a';
+            const glowColor = isSelected ? 'rgba(246, 184, 74, 0.45)' : 'rgba(53, 212, 154, 0.12)';
             const borderWidth = isSelected ? '2px' : '1.5px';
             const glowWidth = isSelected ? '18px' : '10px';
 
@@ -869,7 +896,7 @@ export function NetworkTab({
                   width: '200px',
                   height: '70px',
                   borderRadius: '8px',
-                  backgroundColor: 'rgba(10, 24, 20, 0.85)',
+                  backgroundColor: 'rgba(18, 21, 28, 0.85)',
                   border: `${borderWidth} solid ${borderColor}`,
                   boxShadow: `0 0 ${glowWidth} ${glowColor}`,
                   padding: '10px',
@@ -884,7 +911,7 @@ export function NetworkTab({
                 onMouseDown={(e) => handleMouseDown(skill.id, e, true)}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', pointerEvents: 'none' }}>
-                  <Wrench size={14} style={{ color: '#10b981' }} />
+                  <Wrench size={14} style={{ color: '#35d49a' }} />
                   <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#fff' }}>{skill.name}</span>
                 </div>
                 <span style={{ fontSize: '0.55rem', color: 'var(--text-dim)', marginTop: '4px', display: 'block', pointerEvents: 'none' }}>{skill.desc}</span>
@@ -898,10 +925,10 @@ export function NetworkTab({
                     width: '12px',
                     height: '12px',
                     borderRadius: '50%',
-                    backgroundColor: '#10b981',
-                    border: '2px solid #030712',
+                    backgroundColor: '#35d49a',
+                    border: '2px solid #06070b',
                     cursor: 'pointer',
-                    boxShadow: '0 0 6px #10b981',
+                    boxShadow: '0 0 6px #35d49a80',
                     pointerEvents: 'auto'
                   }}
                   onClick={(e) => {
@@ -910,6 +937,46 @@ export function NetworkTab({
                   }}
                   title="Connect skill to agent"
                 />
+              </div>
+            );
+          })}
+
+          {/* 4. External voice targets — dashed violet, no ports (routing, not wiring) */}
+          {voiceTargets.map((target, index) => {
+            const pos = skillPositions[target.id] || { x: 3250, y: 50 + index * 110 };
+            const isSelected = selectedNodes.some(sn => sn.id === target.id && sn.isSkill);
+            return (
+              <div
+                key={target.id}
+                data-testid={`voice-node-${target.id}`}
+                style={{
+                  position: 'absolute',
+                  left: `${pos.x}px`,
+                  top: `${pos.y}px`,
+                  width: '200px',
+                  minHeight: '70px',
+                  borderRadius: '8px',
+                  backgroundColor: 'rgba(18, 21, 28, 0.85)',
+                  border: `${isSelected ? '2px' : '1.5px'} dashed ${isSelected ? '#f6b84a' : '#7C5CFC'}`,
+                  boxShadow: `0 0 10px ${target.available ? 'rgba(124, 92, 252, 0.25)' : 'rgba(240, 93, 117, 0.25)'}`,
+                  padding: '10px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  justifyContent: 'center',
+                  zIndex: 2,
+                  pointerEvents: 'auto',
+                  cursor: 'grab',
+                }}
+                onMouseDown={(e) => handleMouseDown(target.id, e, true)}
+                title="Внешний голос — закрепляется за разговором в SMM Factory → «Диалоги»"
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', pointerEvents: 'none' }}>
+                  <Mic size={14} style={{ color: '#B197FF' }} />
+                  <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#fff' }}>{target.name}</span>
+                </div>
+                <span style={{ fontSize: '0.55rem', color: 'var(--text-dim)', marginTop: '4px', display: 'block', pointerEvents: 'none' }}>
+                  {target.capability_mode} · {target.provider_name} · {target.available ? (target.health?.ok === false ? 'ошибка проверки' : 'доступен') : 'недоступен'}
+                </span>
               </div>
             );
           })}
@@ -925,7 +992,7 @@ export function NetworkTab({
             flexDirection: 'column',
             gap: '6px',
             zIndex: 10,
-            backgroundColor: 'rgba(15, 23, 42, 0.85)',
+            backgroundColor: 'rgba(20, 24, 32, 0.85)',
             backdropFilter: 'blur(8px)',
             padding: '6px',
             borderRadius: '8px',
@@ -988,8 +1055,8 @@ export function NetworkTab({
             style={{
               borderRadius: '4px',
               border: 'none',
-              backgroundColor: 'rgba(16, 185, 129, 0.15)',
-              color: '#10b981',
+              backgroundColor: 'rgba(53, 212, 154, 0.15)',
+              color: '#35d49a',
               fontSize: '9px',
               fontWeight: 700,
               cursor: 'pointer',
@@ -998,8 +1065,8 @@ export function NetworkTab({
               transition: 'background-color 0.2s',
               marginBottom: '4px'
             }}
-            onMouseEnter={e => e.currentTarget.style.backgroundColor = 'rgba(16, 185, 129, 0.3)'}
-            onMouseLeave={e => e.currentTarget.style.backgroundColor = 'rgba(16, 185, 129, 0.15)'}
+            onMouseEnter={e => e.currentTarget.style.backgroundColor = 'rgba(53, 212, 154, 0.3)'}
+            onMouseLeave={e => e.currentTarget.style.backgroundColor = 'rgba(53, 212, 154, 0.15)'}
             title="Fit to Screen"
           >
             CENTER
@@ -1012,7 +1079,7 @@ export function NetworkTab({
             style={{
               borderRadius: '4px',
               border: 'none',
-              backgroundColor: 'rgba(0, 240, 255, 0.1)',
+              backgroundColor: 'rgba(94, 225, 255, 0.1)',
               color: 'var(--accent-cyan)',
               fontSize: '9px',
               fontWeight: 700,
@@ -1021,8 +1088,8 @@ export function NetworkTab({
               textAlign: 'center',
               transition: 'background-color 0.2s'
             }}
-            onMouseEnter={e => e.currentTarget.style.backgroundColor = 'rgba(0, 240, 255, 0.2)'}
-            onMouseLeave={e => e.currentTarget.style.backgroundColor = 'rgba(0, 240, 255, 0.1)'}
+            onMouseEnter={e => e.currentTarget.style.backgroundColor = 'rgba(94, 225, 255, 0.2)'}
+            onMouseLeave={e => e.currentTarget.style.backgroundColor = 'rgba(94, 225, 255, 0.1)'}
             title="Reset View"
           >
             RESET
@@ -1044,7 +1111,7 @@ export function NetworkTab({
         <button 
           onClick={() => setShowAddForm(true)} 
           className="btn-primary" 
-          style={{ boxShadow: '0 4px 15px rgba(0, 240, 255, 0.2)' }}
+          style={{ boxShadow: '0 4px 15px rgba(94, 225, 255, 0.1)' }}
         >
           <Plus size={16} />
           <span>Add node</span>
@@ -1057,7 +1124,7 @@ export function NetworkTab({
           style={{
             width: '320px',
             height: '100%',
-            backgroundColor: 'rgba(8, 12, 24, 0.96)',
+            backgroundColor: 'rgba(11, 13, 17, 0.96)',
             borderLeft: '1px solid rgba(255, 255, 255, 0.05)',
             boxShadow: '-10px 0 30px rgba(0,0,0,0.5)',
             display: 'flex',
@@ -1107,9 +1174,9 @@ export function NetworkTab({
                 className="form-input"
               >
                 <option value="">None (Root Node)</option>
-                <option value="jarvis">Vexa Main</option>
+                <option value="vexa">Vexa Main</option>
                 {subagents
-                  .filter(n => n.id !== selectedNodeId && n.id !== 'jarvis' && (n.agent_type === 'orchestrator' || n.agent_type === 'sub-orchestrator'))
+                  .filter(n => n.id !== selectedNodeId && n.id !== 'vexa' && (n.agent_type === 'orchestrator' || n.agent_type === 'sub-orchestrator'))
                   .map(n => <option key={n.id} value={n.id}>{n.name}</option>)
                 }
               </select>
@@ -1169,7 +1236,7 @@ export function NetworkTab({
               type="button" 
               onClick={handleDeleteInspector} 
               className="btn-secondary" 
-              style={{ backgroundColor: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)' }}
+              style={{ backgroundColor: 'rgba(240, 93, 117, 0.1)', color: '#f05d75', border: '1px solid rgba(240, 93, 117, 0.3)' }}
             >
               <Trash2 size={16} />
               <span>Delete Node</span>
@@ -1195,8 +1262,8 @@ export function NetworkTab({
         }}>
           <div style={{
             width: '450px',
-            backgroundColor: 'rgba(10, 15, 30, 0.95)',
-            border: '1px solid rgba(0, 240, 255, 0.2)',
+            backgroundColor: 'rgba(13, 16, 22, 0.95)',
+            border: '1px solid rgba(157, 166, 181, 0.14)',
             borderRadius: '12px',
             padding: '24px',
             boxShadow: '0 20px 50px rgba(0,0,0,0.5)',
@@ -1228,9 +1295,9 @@ export function NetworkTab({
               <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                 <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Parent Node</label>
                 <select value={addParent} onChange={e => setAddParent(e.target.value)} className="form-input">
-                  <option value="jarvis">Vexa Main</option>
+                  <option value="vexa">Vexa Main</option>
                   {subagents
-                    .filter(n => n.id !== 'jarvis' && (n.agent_type === 'orchestrator' || n.agent_type === 'sub-orchestrator'))
+                    .filter(n => n.id !== 'vexa' && (n.agent_type === 'orchestrator' || n.agent_type === 'sub-orchestrator'))
                     .map(n => <option key={n.id} value={n.id}>{n.name}</option>)
                   }
                 </select>

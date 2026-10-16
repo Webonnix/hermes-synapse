@@ -87,7 +87,7 @@ export function MemoryTab({
           </div>
           
           {/* Search Bar */}
-          <form onSubmit={handleSearchMemory} style={{ display: 'flex', gap: '8px', padding: '12px', borderBottom: '1px solid rgba(0, 240, 255, 0.08)' }}>
+          <form onSubmit={handleSearchMemory} style={{ display: 'flex', gap: '8px', padding: '12px', borderBottom: '1px solid rgba(157, 166, 181, 0.056)' }}>
             <input 
               type="text" 
               value={memorySearchQuery} 
@@ -116,7 +116,7 @@ export function MemoryTab({
                     key={idx} 
                     style={{
                       ...styles.logCard,
-                      borderColor: 'rgba(0, 240, 255, 0.15)',
+                      borderColor: 'rgba(157, 166, 181, 0.105)',
                       cursor: 'default',
                       display: 'flex',
                       flexDirection: 'column',
@@ -132,8 +132,8 @@ export function MemoryTab({
                       <span style={{
                         fontSize: '0.75rem',
                         color: 'var(--accent-cyan)',
-                        backgroundColor: 'rgba(0, 240, 255, 0.05)',
-                        border: '1px solid rgba(0, 240, 255, 0.15)',
+                        backgroundColor: 'rgba(94, 225, 255, 0.05)',
+                        border: '1px solid rgba(157, 166, 181, 0.105)',
                         padding: '2px 6px',
                         borderRadius: '4px',
                         fontFamily: 'var(--font-mono)'
@@ -165,7 +165,7 @@ export function MemoryTab({
                     key={idx} 
                     style={{
                       ...styles.logCard,
-                      borderColor: 'rgba(0, 240, 255, 0.08)',
+                      borderColor: 'rgba(157, 166, 181, 0.056)',
                       cursor: 'default',
                       display: 'flex',
                       flexDirection: 'row',
@@ -184,9 +184,9 @@ export function MemoryTab({
                       className="btn-primary" 
                       style={{ 
                         padding: '6px', 
-                        border: '1px solid rgba(239, 68, 68, 0.3)', 
+                        border: '1px solid rgba(240, 93, 117, 0.3)', 
                         background: 'transparent',
-                        color: '#ef4444' 
+                        color: '#f05d75' 
                       }}
                     >
                       <Trash2 size={14} />

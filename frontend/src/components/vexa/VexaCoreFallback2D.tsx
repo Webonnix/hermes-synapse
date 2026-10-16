@@ -136,7 +136,7 @@ export function VexaCoreFallback2D({ phase, audioAnalyser, pulseKey, simpleMode 
       const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius * 0.48);
       glow.addColorStop(0, `rgba(197, 244, 255, ${Math.min(1, pulse * energy + voiceBoost * 0.3)})`);
       glow.addColorStop(0.13, `rgba(38, 174, 255, ${0.35 * energy})`);
-      glow.addColorStop(1, 'rgba(0, 76, 180, 0)');
+      glow.addColorStop(1, 'rgba(59, 130, 246, 0)');
       ctx.fillStyle = glow;
       ctx.beginPath();
       ctx.arc(cx, cy, radius * (0.5 + voiceBoost * 0.06), 0, Math.PI * 2);

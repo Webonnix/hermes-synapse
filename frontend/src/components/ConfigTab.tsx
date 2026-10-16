@@ -2,10 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { Cpu, Shield, Activity, Database, Globe, Server, Zap, KeyRound, Bell } from 'lucide-react';
 import { styles } from '../styles';
 import type { SystemConfig } from '../types';
-import { OllamaManager } from './OllamaManager';
+import { LocalModelPanel } from './LocalModelPanel';
 
 function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem('jarvis_auth_token');
+  const token = localStorage.getItem('vexa_auth_token');
   return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
 }
 
@@ -58,7 +58,7 @@ function AdminPasswordSection() {
     <div className="glass-panel" style={{ ...styles.configForm, marginBottom: '16px' }}>
       <div style={styles.formGroup}>
         <label style={styles.formLabel}>
-          <KeyRound size={16} style={{ color: '#00f0ff' }} />
+          <KeyRound size={16} style={{ color: '#5ee1ff' }} />
           <span>Dashboard login (username &amp; password)</span>
         </label>
         <span style={styles.formHelp}>
@@ -104,7 +104,7 @@ function AdminPasswordSection() {
           required
         />
         {message && (
-          <span style={{ fontSize: '0.85rem', color: status === 'success' ? '#10b981' : '#ef4444' }}>
+          <span style={{ fontSize: '0.85rem', color: status === 'success' ? '#35d49a' : '#f05d75' }}>
             {status === 'success' ? '✓ ' : '⚠️ '}{message}
           </span>
         )}
@@ -194,7 +194,7 @@ export function ConfigTab({
     return typeof value === 'boolean' ? value : fallback;
   };
 
-  const activeProvider = runtimeConfig.provider || 'ollama';
+  const activeProvider = runtimeConfig.provider || 'llamacpp';
 
   const gridStyle: React.CSSProperties = {
     display: 'grid',
@@ -232,7 +232,7 @@ export function ConfigTab({
       <div className="glass-panel" style={{ ...styles.configForm, marginBottom: '16px' }}>
         <div style={styles.formGroup}>
           <label style={styles.formLabel}>
-            <Globe size={16} style={{ color: '#00f0ff' }} />
+            <Globe size={16} style={{ color: '#5ee1ff' }} />
             <span>Response Language</span>
           </label>
           <select
@@ -256,7 +256,7 @@ export function ConfigTab({
       <div className="glass-panel" style={{ ...styles.configForm, marginBottom: '16px' }}>
         <div style={styles.formGroup}>
           <label style={styles.formLabel}>
-            <Bell size={16} style={{ color: '#00f0ff' }} />
+            <Bell size={16} style={{ color: '#5ee1ff' }} />
             <span>Dev-run browser notifications</span>
           </label>
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
@@ -302,14 +302,14 @@ export function ConfigTab({
                 const provider = event.target.value;
                 updateRuntime({
                   provider,
-                  api_base: provider === 'ollama'
-                    ? (runtimeConfig.ollama_base_url || 'http://127.0.0.1:11434')
+                  api_base: provider === 'llamacpp'
+                    ? (runtimeConfig.local_base_url || 'http://127.0.0.1:8080')
                     : (runtimeConfig.openai_api_base || 'https://openrouter.ai/api/v1'),
                 });
               }}
               style={styles.formSelect}
             >
-              <option value="ollama">Ollama — native local API</option>
+              <option value="llamacpp">llama.cpp — local server</option>
               <option value="openrouter">OpenRouter</option>
               <option value="openai_compatible">OpenAI-compatible endpoint</option>
             </select>
@@ -318,21 +318,20 @@ export function ConfigTab({
             <span style={styles.formLabel}>Provider endpoint</span>
             <input
               className="form-input"
-              value={runtimeConfig.api_base || (activeProvider === 'ollama' ? 'http://127.0.0.1:11434' : 'https://openrouter.ai/api/v1')}
+              value={runtimeConfig.api_base || (activeProvider === 'llamacpp' ? 'http://127.0.0.1:8080' : 'https://openrouter.ai/api/v1')}
               onChange={event => updateRuntime({
                 api_base: event.target.value,
-                ...(activeProvider === 'ollama'
-                  ? { ollama_base_url: event.target.value }
+                ...(activeProvider === 'llamacpp'
+                  ? { local_base_url: event.target.value }
                   : { openai_api_base: event.target.value }),
               })}
-              placeholder="http://127.0.0.1:11434"
+              placeholder="http://127.0.0.1:8080"
             />
           </label>
         </div>
 
-        {activeProvider === 'ollama' && (
-          <OllamaManager
-            selectedModel={editedModel}
+        {activeProvider === 'llamacpp' && (
+          <LocalModelPanel
             onSelectModel={setEditedModel}
             activeModel={activeModel}
             onActivated={onModelActivated}
@@ -341,7 +340,7 @@ export function ConfigTab({
 
         <div style={styles.formGroup}>
           <label style={styles.formLabel}>
-            <Cpu size={16} style={{ color: '#00f0ff' }} />
+            <Cpu size={16} style={{ color: '#5ee1ff' }} />
             <span>Base Intelligence Model (LLM)</span>
           </label>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -366,10 +365,10 @@ export function ConfigTab({
                   <option value="__custom__">Custom model…</option>
                 </>
               ) : (
-                activeProvider === 'ollama' ? (
+                activeProvider === 'llamacpp' ? (
                   <>
                     {editedModel && <option value={editedModel}>{editedModel}</option>}
-                    <option value="__custom__">Enter installed model name…</option>
+                    <option value="__custom__">Enter the served model id…</option>
                   </>
                 ) : (
                   <>
@@ -395,12 +394,12 @@ export function ConfigTab({
               />
             )}
           </div>
-          <span style={styles.formHelp}>{activeProvider === 'ollama' ? 'Installed Ollama models are discovered through the native /api/tags endpoint.' : 'Models with function calling support are recommended.'}</span>
+          <span style={styles.formHelp}>{activeProvider === 'llamacpp' ? 'The llama.cpp server serves one model; its id comes from /v1/models.' : 'Models with function calling support are recommended.'}</span>
         </div>
 
         <div style={styles.formGroup}>
           <label style={styles.formLabel}>
-            <Shield size={16} style={{ color: '#00f0ff' }} />
+            <Shield size={16} style={{ color: '#5ee1ff' }} />
             <span>Assistant Personality (System Prompt)</span>
           </label>
           <textarea 
@@ -415,7 +414,7 @@ export function ConfigTab({
 
         <div style={styles.formGroup}>
           <label style={styles.formLabel}>
-            <Zap size={16} style={{ color: '#00f0ff' }} />
+            <Zap size={16} style={{ color: '#5ee1ff' }} />
             <span>Speed and Memory Instructions</span>
           </label>
           <div style={gridStyle}>
@@ -486,26 +485,23 @@ export function ConfigTab({
           </div>
 
           <div style={{ ...gridStyle, marginTop: '14px' }}>
-            {activeProvider === 'ollama' && (
+            {activeProvider === 'llamacpp' && (
               <>
                 <label style={styles.formGroup}>
-                  <span style={styles.formLabel}>Ollama context window</span>
-                  <input type="number" min={512} max={262144} step={512} value={numberValue('ollama_num_ctx', 8192)} onChange={event => updateRuntime({ ollama_num_ctx: Number(event.target.value) })} style={compactInputStyle} className="form-input" />
-                </label>
-                <label style={styles.formGroup}>
-                  <span style={styles.formLabel}>Model keep-alive</span>
-                  <input value={String(runtimeConfig.ollama_keep_alive ?? '5m')} onChange={event => updateRuntime({ ollama_keep_alive: event.target.value })} style={compactInputStyle} className="form-input" placeholder="5m, 1h or -1" />
+                  <span style={styles.formLabel}>Context window (server)</span>
+                  <input type="number" value={numberValue('local_num_ctx', 32768)} readOnly disabled style={compactInputStyle} className="form-input" />
+                  <span style={styles.formHelp}>Fixed when the llama.cpp server starts (LLAMA_CTX_SIZE); read back from the server.</span>
                 </label>
                 <label style={styles.formGroup}>
                   <span style={styles.formLabel}>Thinking output</span>
-                  <select value={String(runtimeConfig.ollama_think ?? 'false')} onChange={event => updateRuntime({ ollama_think: event.target.value })} style={compactInputStyle} className="form-input">
-                    <option value="false">Disabled</option><option value="true">Enabled</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option>
+                  <select value={String(runtimeConfig.local_think ?? 'false')} onChange={event => updateRuntime({ local_think: event.target.value })} style={compactInputStyle} className="form-input">
+                    <option value="false">Disabled</option><option value="true">Enabled</option><option value="low">Low</option><option value="medium">Medium</option><option value="xhigh">Maximum</option>
                   </select>
                 </label>
               </>
             )}
             <label style={styles.formGroup}>
-              <span style={styles.formLabel}><Database size={16} style={{ color: '#00f0ff' }} />Memory facts per request</span>
+              <span style={styles.formLabel}><Database size={16} style={{ color: '#5ee1ff' }} />Memory facts per request</span>
               <input
                 type="number"
                 min={0}

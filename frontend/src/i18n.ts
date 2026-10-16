@@ -72,6 +72,7 @@ export const dictionaries: Record<Language, Dictionary> = {
     adminNavProjects: 'Projects',
     adminNavAccess: 'Bot Access',
     adminNavBilling: 'Billing',
+    adminNavVoice: 'External voice',
     project: 'Project',
     adminNoAgents: 'No agents yet — create one to get started.',
     unassignedProject: 'Unassigned',
@@ -212,6 +213,7 @@ export const dictionaries: Record<Language, Dictionary> = {
     adminNavProjects: 'Проекты',
     adminNavAccess: 'Доступ к ботам',
     adminNavBilling: 'Биллинг',
+    adminNavVoice: 'Внешний голос',
     project: 'Проект',
     adminNoAgents: 'Пока нет агентов — создайте первого.',
     unassignedProject: 'Без проекта',
@@ -285,6 +287,25 @@ export const dictionaries: Record<Language, Dictionary> = {
   },
 };
 
+/** The only safe way to turn a stored or server-supplied value into a Language.
+ *
+ * Both sources are untrusted: localStorage keeps whatever was written there by
+ * any past version of the app (a JSON-encoded `"ru"`, quotes included, is the
+ * one that actually happened), and /api/settings is just as capable of handing
+ * back a value this build has no dictionary for. An unknown value used to reach
+ * `dictionaries[language][key]` and throw, which blanks the whole dashboard —
+ * so anything unrecognised falls back to Russian instead. */
+export function normalizeLanguage(value: unknown): Language {
+  if (typeof value !== 'string') return 'ru';
+  // Tolerate a value that was stored JSON-encoded, so an already-poisoned
+  // browser repairs itself on the next load rather than staying broken.
+  const cleaned = value.trim().replace(/^["']|["']$/g, '').toLowerCase();
+  return cleaned in dictionaries ? (cleaned as Language) : 'ru';
+}
+
 export function translate(language: Language, key: string): string {
-  return dictionaries[language][key] || dictionaries.en[key] || key;
+  // Defensive even though callers normalise: this runs on every label in the
+  // app, and throwing here costs the entire UI.
+  const dictionary = dictionaries[language] || dictionaries.ru;
+  return dictionary[key] || dictionaries.en[key] || key;
 }

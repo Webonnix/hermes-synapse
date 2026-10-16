@@ -11,7 +11,7 @@ behavior so existing agents are unaffected:
    back to besides its own ``model_provider``. Empty means "no extra
    restriction": the agent behaves exactly as before this module existed
    (its single ``model_provider``, or the full global router_tiers chain
-   when that's 'ollama').
+   when that's 'local').
 
 Mirrors the "ceiling narrows, never grants" pattern tool_permissions.py
 already uses for skills/tools: a tier can only take capability away, an
@@ -21,6 +21,8 @@ agent's own allowlist can only be a subset of what the tier still permits.
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+from backend.llamacpp_client import LOCAL_PROVIDER_ID, is_local_provider_id
 
 
 def tier_permits_external(agent_row: Dict[str, Any]) -> bool:
@@ -36,18 +38,18 @@ def tier_permits_external(agent_row: Dict[str, Any]) -> bool:
 
 
 def resolve_provider_candidates(agent_row: Dict[str, Any]) -> List[str]:
-    """Ordered list of provider_bindings ids (never 'ollama') this agent may
+    """Ordered list of provider_bindings ids (never the local model) this agent may
     try, primary (model_provider) first, then allowed_provider_ids, deduped.
     Empty if the agent's tier forbids external providers outright, or if
-    model_provider is 'ollama' and no allowed_provider_ids are set (nothing
+    model_provider is 'local' and no allowed_provider_ids are set (nothing
     to try beyond the free local model / the global router chain)."""
     if not tier_permits_external(agent_row):
         return []
-    primary = agent_row.get("model_provider") or "ollama"
+    primary = agent_row.get("model_provider") or LOCAL_PROVIDER_ID
     allowed_raw = agent_row.get("allowed_provider_ids") or []
     ordered: List[str] = []
     for provider_id in [primary, *allowed_raw]:
-        if provider_id and provider_id != "ollama" and provider_id not in ordered:
+        if not is_local_provider_id(provider_id) and provider_id not in ordered:
             ordered.append(provider_id)
     return ordered
 
@@ -68,7 +70,7 @@ def resolve_best_provider(agent_row: Dict[str, Any]) -> Tuple[Optional[str], Opt
 
 
 def allowed_binding_ids_for_chain(agent_row: Dict[str, Any]) -> Optional[Set[str]]:
-    """For an agent still on the local default (model_provider == 'ollama'):
+    """For an agent still on the local default (model_provider == 'local'):
     which provider_bindings ids the global router_tiers escalation chain
     (backend/local_orchestrator.py) may use for this specific agent.
 
@@ -82,4 +84,4 @@ def allowed_binding_ids_for_chain(agent_row: Dict[str, Any]) -> Optional[Set[str
     allowed_raw = agent_row.get("allowed_provider_ids") or []
     if not allowed_raw:
         return None
-    return {pid for pid in allowed_raw if pid and pid != "ollama"}
+    return {pid for pid in allowed_raw if not is_local_provider_id(pid)}

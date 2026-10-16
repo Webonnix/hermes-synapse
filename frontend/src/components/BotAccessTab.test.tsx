@@ -172,16 +172,21 @@ describe('BotAccessTab', () => {
     render(<BotAccessTab agents={agents} />);
     await waitFor(() => expect(screen.getByText('Выдать токен')).toBeInTheDocument());
 
+    // The list is filtered against the *selected* binding, which an effect fills
+    // in after the bindings fetch — so the plan select legitimately passes
+    // through "placeholder + unscoped plans only". Waiting on the placeholder
+    // alone would read that half-populated state, so wait for the agent-scoped
+    // plan: it can only appear once both fetches AND the effect have landed.
     const planSelect = await waitFor(() => {
       const select = screen.getAllByRole('combobox').find(el =>
-        Array.from((el as HTMLSelectElement).options).some(o => o.text.includes('Без тарифа'))
+        Array.from((el as HTMLSelectElement).options).some(o => o.text === 'Тариф консультанта')
       );
-      if (!select) throw new Error('plan select not rendered yet');
-      return select;
+      if (!select) throw new Error('plan select not populated yet');
+      return select as HTMLSelectElement;
     });
-    const optionTexts = Array.from((planSelect as HTMLSelectElement).options).map(o => o.text);
-    expect(optionTexts).toContain('Тариф консультанта');
-    expect(optionTexts).toContain('Общий тариф');
+    const optionTexts = Array.from(planSelect.options).map(o => o.text);
+    // Known-complete list: placeholder + the two plans this agent may issue.
+    expect(optionTexts).toEqual(['Без тарифа (без лимитов)', 'Тариф консультанта', 'Общий тариф']);
     expect(optionTexts).not.toContain('Тариф другого агента');
   });
 });

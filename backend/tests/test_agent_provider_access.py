@@ -63,8 +63,8 @@ def test_resolve_candidates_primary_first_then_allowlist(access_db):
     assert agent_provider_access.resolve_provider_candidates(row) == ["prov-a", "prov-b", "prov-c"]
 
 
-def test_resolve_candidates_ollama_primary_uses_only_allowlist(access_db):
-    row = {"model_provider": "ollama", "allowed_provider_ids": ["prov-b"]}
+def test_resolve_candidates_local_primary_uses_only_allowlist(access_db):
+    row = {"model_provider": "local", "allowed_provider_ids": ["prov-b"]}
     assert agent_provider_access.resolve_provider_candidates(row) == ["prov-b"]
 
 
@@ -82,7 +82,7 @@ def test_resolve_best_provider_none_when_nothing_resolves(access_db):
 
 
 def test_resolve_best_provider_local_default_returns_none(access_db):
-    assert agent_provider_access.resolve_best_provider({"model_provider": "ollama"}) == (None, None)
+    assert agent_provider_access.resolve_best_provider({"model_provider": "local"}) == (None, None)
 
 
 # ── Tier ceiling ─────────────────────────────────────────────────────────────
@@ -112,10 +112,10 @@ def test_no_tier_permits_external_by_default(access_db):
 # ── Chain-narrowing helper ───────────────────────────────────────────────────
 
 def test_allowed_binding_ids_for_chain_none_when_unrestricted(access_db):
-    row = {"model_provider": "ollama", "allowed_provider_ids": []}
+    row = {"model_provider": "local", "allowed_provider_ids": []}
     assert agent_provider_access.allowed_binding_ids_for_chain(row) is None
 
 
 def test_allowed_binding_ids_for_chain_returns_set(access_db):
-    row = {"model_provider": "ollama", "allowed_provider_ids": ["prov-a", "prov-b"]}
+    row = {"model_provider": "local", "allowed_provider_ids": ["prov-a", "prov-b"]}
     assert agent_provider_access.allowed_binding_ids_for_chain(row) == {"prov-a", "prov-b"}

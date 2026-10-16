@@ -3,7 +3,7 @@
 Two passes, in order:
 1. Regex — deterministic, catches obviously key/token/password-shaped substrings.
 2. Local-model confirmation — the already-regex-redacted text is shown to the LOCAL
-   Ollama model (never the external one) with a tight, focused prompt asking it to
+   llama.cpp model (never the external one) with a tight, focused prompt asking it to
    flag any remaining contextual secrets the regex missed. Only runs on text that's
    about to leave to an external provider, so the extra local call is scoped and cheap.
 
@@ -132,11 +132,16 @@ async def _local_model_confirm(redacted_text: str) -> List[str]:
     the only line of defense for this message, not a hard failure of the send."""
     try:
         from backend.agent import agent_instance
-        from backend.ollama_client import OllamaClient
+        from backend.llamacpp_client import LlamaCppClient
 
-        client = OllamaClient(agent_instance.ollama_base_url, timeout=15)
+        # configured_model, never .model: .model follows the chat's per-turn
+        # model picker, and pointing a 9Router model id at the local llama.cpp
+        # base URL fails ("model 'ag/claude-sonnet-4-6' not found") and
+        # silently drops this whole pass. This check exists precisely so the
+        # text never leaves the box, so the local model is the only valid one.
+        client = LlamaCppClient(agent_instance.local_base_url, timeout=15)
         result = await client.chat(
-            model=agent_instance.model,
+            model=agent_instance.configured_model,
             messages=[
                 {"role": "system", "content": _LOCAL_CONFIRM_SYSTEM_PROMPT},
                 {"role": "user", "content": redacted_text[:4000]},

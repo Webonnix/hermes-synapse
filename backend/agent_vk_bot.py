@@ -203,6 +203,7 @@ class AgentVKBotManager:
             display_name=await self._display_name(client, access_token, from_id),
             overrides=self._overrides.get(binding_id),
             response_mode=self._response_modes.get(binding_id, "draft"),
+            event_id=str(message.get("conversation_message_id") or message.get("id") or ""),
         )
 
     async def start_all_active(self) -> None:

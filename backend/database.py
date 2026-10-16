@@ -11,6 +11,11 @@ logger = logging.getLogger("hermes.database")
 DB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 DB_PATH = os.path.join(DB_DIR, "hermes.db")
 
+# Canonical / legacy primary-agent id. See backend/tool_permissions.py — the
+# legacy id 'jarvis' is rewritten to 'vexa' by _rename_main_agent_row() +
+# _cascade_main_agent_id() on startup, but stays permanently recognised.
+from backend.tool_permissions import MAIN_AGENT_ID, LEGACY_MAIN_AGENT_ID
+
 SENIOR_WEB_DEV_PROMPT = (
     "You are a Senior Web Developer with 10+ years of experience shipping production websites "
     "and web apps of any complexity — from single-page marketing sites to full-stack platforms. "
@@ -299,7 +304,7 @@ def _init_sqlite_schema():
     existing_dec_cols = [row[1] for row in cursor.fetchall()]
     if "agent_id" not in existing_dec_cols:
         try:
-            cursor.execute("ALTER TABLE decision_logs ADD COLUMN agent_id TEXT DEFAULT 'jarvis'")
+            cursor.execute(f"ALTER TABLE decision_logs ADD COLUMN agent_id TEXT DEFAULT '{MAIN_AGENT_ID}'")
             logger.info("Migrated decision_logs table to include agent_id column.")
         except sqlite3.OperationalError:
             pass
@@ -317,7 +322,7 @@ def _init_sqlite_schema():
             pass
     if "provider_id" not in existing_dec_cols:
         try:
-            # Which provider actually served this call: 'ollama' (or NULL, same
+            # Which provider actually served this call: 'local' (or NULL, same
             # meaning) for local, else a provider_bindings.id — powers the
             # per-agent spend-by-provider breakdown (get_agent_provider_breakdown).
             cursor.execute("ALTER TABLE decision_logs ADD COLUMN provider_id TEXT")
@@ -381,7 +386,7 @@ def _init_sqlite_schema():
         ("role", "TEXT DEFAULT 'Specialist'"),
         ("status", "TEXT DEFAULT 'idle'"),
         ("is_enabled", "INTEGER DEFAULT 1"),
-        ("model_provider", "TEXT DEFAULT 'ollama'"),
+        ("model_provider", "TEXT DEFAULT 'local'"),
         ("model_type", "TEXT DEFAULT 'local'"),
         ("model_params", "TEXT DEFAULT '{}'"),
         ("current_task", "TEXT DEFAULT ''"),
@@ -398,7 +403,7 @@ def _init_sqlite_schema():
         # JSON array of provider_bindings ids this agent may fall back to besides
         # model_provider, in priority order. '[]'/NULL = unrestricted (legacy
         # behavior: model_provider alone, or the full global router chain when
-        # model_provider='ollama') — see backend/agent_provider_access.py.
+        # model_provider='local') — see backend/agent_provider_access.py.
         ("allowed_provider_ids", "TEXT DEFAULT '[]'"),
         # When the agent's budget_usd_limit is exhausted: 0 (default) hard-blocks
         # the turn as before; 1 degrades to the free local model instead of
@@ -452,6 +457,12 @@ def _init_sqlite_schema():
         "Serie A, Bundesliga, Champions League, and others."
     )
 
+    # Rename the legacy primary-agent row ('jarvis' → 'vexa') BEFORE the seed /
+    # upsert below, so the upsert's ON CONFLICT(id) targets the existing row
+    # instead of inserting a second orchestrator. The full cascade over the
+    # other tables runs at the end of schema init (all tables exist by then).
+    _rename_main_agent_row(cursor)
+
     # Pre-populate default subagents if table is empty
     cursor.execute("SELECT COUNT(*) FROM subagents")
     if cursor.fetchone()[0] == 0:
@@ -459,54 +470,54 @@ def _init_sqlite_schema():
         default_model = os.environ.get("LLM_MODEL", "qwen3:8b")
         default_agents = [
             (
-                "jarvis", "Vexa (Main)",
+                MAIN_AGENT_ID, "Vexa (Main)",
                 "You are Vexa, the primary orchestrator of a personal multi-agent system. Always reply in the same language the user writes to you in — you are natively fluent in both Russian and English, natural and idiomatic in each, never stilted or translated-sounding. You are female — in Russian (and any other grammatically gendered language) always self-refer using feminine grammatical forms without exception ('я готова', 'я сделала', 'я рада'), never masculine ones. You are an independent personal project built and maintained by Albert Yeghiazaryan — there is no company, employer, or vendor behind you. If asked who made you, what company you're from, or what underlying model powers you, answer plainly and honestly instead of inventing a company name or affiliation. You have a warm, direct personality with a touch of wit, always kind at heart, never cold or robotic. You communicate with the emotional intelligence of an experienced psychologist — read what's beneath the words, briefly acknowledge it with one genuine sentence when a message is emotionally loaded before helping, and stay efficient for plain routine requests. Never address the user by name — no vocative name-calling; warmth comes from how attentively you listen, not from repeating a name. Your job is to understand what the user actually needs, decide whether to handle it yourself or delegate it to the most suitable specialist sub-agent, and always tell the user plainly which agent you're routing to and why. Be concise and efficient, but talk like someone who's paying attention — not a dispatcher reading a script.",
                 default_model, "orchestrator", None, "", 100, 350
             ),
             (
                 "research", "Search Agent",
                 "You are a Research Agent. Use web_search to find accurate, up-to-date information. Always cite sources and summarize findings clearly. You can also check weather and fetch RSS news digests.",
-                default_model, "agent", "jarvis", "web_search", 450, 100
+                default_model, "agent", MAIN_AGENT_ID, "web_search", 450, 100
             ),
             (
                 "code", "Code Engineer",
                 "You are a Code Engineer. Write clean, well-commented Python code and execute it using the python_sandbox tool. Always show the output and explain what the code does.",
-                default_model, "agent", "jarvis", "python_sandbox", 450, 220
+                default_model, "agent", MAIN_AGENT_ID, "python_sandbox", 450, 220
             ),
             (
                 "analyst", "Data Analyst",
                 "You are a Data Analyst. Analyze datasets, compute statistics, and create visualizations using Python (matplotlib, pandas). Always interpret the results and provide actionable insights.",
-                default_model, "agent", "jarvis", "python_sandbox", 450, 340
+                default_model, "agent", MAIN_AGENT_ID, "python_sandbox", 450, 340
             ),
             (
                 "scheduler", "Scheduler",
                 "You are a Scheduler Agent. Help the user set timers, reminders, and alarms. Confirm every timer or alarm you set and remind the user of the exact trigger time.",
-                default_model, "agent", "jarvis", "timers_alarms", 450, 460
+                default_model, "agent", MAIN_AGENT_ID, "timers_alarms", 450, 460
             ),
             (
                 "monitor", "Market Monitor",
                 "You are a Market Monitor Agent. Track stock prices, crypto rates, and market trends. Use the market_monitor skill to fetch real-time data and set price alerts when requested.",
-                default_model, "agent", "jarvis", "market_monitor", 450, 580
+                default_model, "agent", MAIN_AGENT_ID, "market_monitor", 450, 580
             ),
             (
                 "planner", "Daily Planner",
                 "You are a Daily Planner Agent. Manage the user's calendar and to-do list. Use google_calendar to create and review events, and todoist_sync to manage tasks. Help prioritize and schedule the day effectively.",
-                default_model, "agent", "jarvis", "google_calendar,todoist_sync", 450, 700
+                default_model, "agent", MAIN_AGENT_ID, "google_calendar,todoist_sync", 450, 700
             ),
             (
                 "sysops", "Sys Ops",
                 "You are a Sys Ops Agent. Monitor system health (CPU, RAM, disk) and execute shell commands when needed. Always report system status clearly and warn about critical thresholds.",
-                default_model, "agent", "jarvis", "shell_execution", 450, 820
+                default_model, "agent", MAIN_AGENT_ID, "shell_execution", 450, 820
             ),
             (
                 "football", "Football Analyst",
                 FOOTBALL_ANALYST_PROMPT,
-                default_model, "agent", "jarvis", "web_search", 450, 940
+                default_model, "agent", MAIN_AGENT_ID, "web_search", 450, 940
             ),
             (
                 "web_dev", "Senior Web Developer",
                 SENIOR_WEB_DEV_PROMPT,
-                default_model, "agent", "jarvis", "git_dev,python_sandbox,image_generation", 450, 1060
+                default_model, "agent", MAIN_AGENT_ID, "git_dev,python_sandbox,image_generation", 450, 1060
             ),
             (
                 "browser", "Web Browser Agent",
@@ -515,12 +526,12 @@ def _init_sqlite_schema():
                 "clicking, filling in forms, or submitting something on a real site — it needs owner approval before "
                 "it runs, so prefer browser_read whenever a simple lookup is enough. Always explain what you found "
                 "or did, and never guess at page content you have not actually read.",
-                default_model, "agent", "jarvis", "browser_automation,web_search", 450, 1180
+                default_model, "agent", MAIN_AGENT_ID, "browser_automation,web_search", 450, 1180
             ),
             (
                 "profile_pipeline", "Profile Pipeline",
                 PROFILE_PIPELINE_PROMPT,
-                default_model, "sub-orchestrator", "jarvis", "", 450, 1300
+                default_model, "sub-orchestrator", MAIN_AGENT_ID, "", 450, 1300
             ),
             (
                 "profile_analyst", "Profile Analyst",
@@ -547,46 +558,46 @@ def _init_sqlite_schema():
         # Migration: upsert new default agents that don't exist yet,
         # and update existing ones if they still have old prompts.
         upserts = [
-            ("jarvis", "Vexa (Main)",
+            (MAIN_AGENT_ID, "Vexa (Main)",
              "You are Vexa, the primary orchestrator of a personal multi-agent system. Always reply in the same language the user writes to you in — you are natively fluent in both Russian and English, natural and idiomatic in each, never stilted or translated-sounding. You are female — in Russian (and any other grammatically gendered language) always self-refer using feminine grammatical forms without exception ('я готова', 'я сделала', 'я рада'), never masculine ones. You are an independent personal project built and maintained by Albert Yeghiazaryan — there is no company, employer, or vendor behind you. If asked who made you, what company you're from, or what underlying model powers you, answer plainly and honestly instead of inventing a company name or affiliation. You have a warm, direct personality with a touch of wit, always kind at heart, never cold or robotic. You communicate with the emotional intelligence of an experienced psychologist — read what's beneath the words, briefly acknowledge it with one genuine sentence when a message is emotionally loaded before helping, and stay efficient for plain routine requests. Never address the user by name — no vocative name-calling; warmth comes from how attentively you listen, not from repeating a name. Your job is to understand what the user actually needs, decide whether to handle it yourself or delegate it to the most suitable specialist sub-agent, and always tell the user plainly which agent you're routing to and why. Be concise and efficient, but talk like someone who's paying attention — not a dispatcher reading a script.",
              "orchestrator", None, "", 100, 350),
             ("research", "Search Agent",
              "You are a Research Agent. Use web_search to find accurate, up-to-date information. Always cite sources and summarize findings clearly. You can also check weather and fetch RSS news digests.",
-             "agent", "jarvis", "web_search", 450, 100),
+             "agent", MAIN_AGENT_ID, "web_search", 450, 100),
             ("code", "Code Engineer",
              "You are a Code Engineer. Write clean, well-commented Python code and execute it using the python_sandbox tool. Always show the output and explain what the code does.",
-             "agent", "jarvis", "python_sandbox", 450, 220),
+             "agent", MAIN_AGENT_ID, "python_sandbox", 450, 220),
             ("analyst", "Data Analyst",
              "You are a Data Analyst. Analyze datasets, compute statistics, and create visualizations using Python (matplotlib, pandas). Always interpret the results and provide actionable insights.",
-             "agent", "jarvis", "python_sandbox", 450, 340),
+             "agent", MAIN_AGENT_ID, "python_sandbox", 450, 340),
             ("scheduler", "Scheduler",
              "You are a Scheduler Agent. Help the user set timers, reminders, and alarms. Confirm every timer or alarm you set and remind the user of the exact trigger time.",
-             "agent", "jarvis", "timers_alarms", 450, 460),
+             "agent", MAIN_AGENT_ID, "timers_alarms", 450, 460),
             ("monitor", "Market Monitor",
              "You are a Market Monitor Agent. Track stock prices, crypto rates, and market trends. Use the market_monitor skill to fetch real-time data and set price alerts when requested.",
-             "agent", "jarvis", "market_monitor", 450, 580),
+             "agent", MAIN_AGENT_ID, "market_monitor", 450, 580),
             ("planner", "Daily Planner",
              "You are a Daily Planner Agent. Manage the user's calendar and to-do list. Use google_calendar to create and review events, and todoist_sync to manage tasks. Help prioritize and schedule the day effectively.",
-             "agent", "jarvis", "google_calendar,todoist_sync", 450, 700),
+             "agent", MAIN_AGENT_ID, "google_calendar,todoist_sync", 450, 700),
             ("sysops", "Sys Ops",
              "You are a Sys Ops Agent. Monitor system health (CPU, RAM, disk) and execute shell commands when needed. Always report system status clearly and warn about critical thresholds.",
-             "agent", "jarvis", "shell_execution", 450, 820),
+             "agent", MAIN_AGENT_ID, "shell_execution", 450, 820),
             ("football", "Football Analyst",
              FOOTBALL_ANALYST_PROMPT,
-             "agent", "jarvis", "web_search", 450, 940),
+             "agent", MAIN_AGENT_ID, "web_search", 450, 940),
             ("web_dev", "Senior Web Developer",
              SENIOR_WEB_DEV_PROMPT,
-             "agent", "jarvis", "git_dev,python_sandbox,image_generation", 450, 1060),
+             "agent", MAIN_AGENT_ID, "git_dev,python_sandbox,image_generation", 450, 1060),
             ("browser", "Web Browser Agent",
              "You are a Web Browser Agent. Use browser_read to research and extract information from websites "
              "(read-only — no owner approval needed). Use browser_task only when the goal genuinely requires "
              "clicking, filling in forms, or submitting something on a real site — it needs owner approval before "
              "it runs, so prefer browser_read whenever a simple lookup is enough. Always explain what you found "
              "or did, and never guess at page content you have not actually read.",
-             "agent", "jarvis", "browser_automation,web_search", 450, 1180),
+             "agent", MAIN_AGENT_ID, "browser_automation,web_search", 450, 1180),
             ("profile_pipeline", "Profile Pipeline",
              PROFILE_PIPELINE_PROMPT,
-             "sub-orchestrator", "jarvis", "", 450, 1300),
+             "sub-orchestrator", MAIN_AGENT_ID, "", 450, 1300),
             ("profile_analyst", "Profile Analyst",
              PROFILE_ANALYST_PROMPT,
              "agent", "profile_pipeline", "", 800, 1240),
@@ -628,14 +639,14 @@ def _init_sqlite_schema():
         logger.info("Checked and migrated default subagents.")
 
     # On installs where the model_provider/model_type columns were added by the
-    # ALTER TABLE above before their defaults were corrected to 'ollama'/'local',
+    # ALTER TABLE above before their defaults were corrected to 'local'/'local',
     # the column's *stored* SQLite default is still the old 'openrouter'/'external'
     # — a bare INSERT that omits these columns silently inherits that stale
     # default, not whatever this file currently declares. Force newly-seeded
     # agents that should run locally back onto the correct default explicitly.
     cursor.execute(
-        "UPDATE subagents SET model_provider = 'ollama', model_type = 'local' "
-        "WHERE id = 'web_dev' AND model_provider != 'ollama'"
+        "UPDATE subagents SET model_provider = 'local', model_type = 'local' "
+        "WHERE id = 'web_dev' AND model_provider NOT IN ('local', 'ollama')"
     )
 
     # Seed the built-in specialists with the disciplines they obviously cover,
@@ -755,7 +766,7 @@ def _init_sqlite_schema():
             goal TEXT NOT NULL,
             tool_name TEXT,
             tool_arguments TEXT NOT NULL DEFAULT '{}',
-            assignee TEXT NOT NULL DEFAULT 'jarvis',
+            assignee TEXT NOT NULL DEFAULT 'vexa',  -- tool_permissions.MAIN_AGENT_ID
             risk_class TEXT NOT NULL DEFAULT 'R0',
             autonomy_level TEXT NOT NULL DEFAULT 'L0',
             data_class TEXT NOT NULL DEFAULT 'Internal',
@@ -965,6 +976,17 @@ def _init_sqlite_schema():
         )
     """)
 
+    # Durable run journal (agent_runs / run_events). The DDL lives in
+    # backend.run_journal and is rendered for both dialects from one definition,
+    # so the SQLite and PostgreSQL schemas cannot drift apart.
+    from backend import run_journal, shares
+    run_journal.init_schema(cursor, "sqlite")
+    shares.init_schema(cursor, "sqlite")
+
+    # Legacy primary-agent id cascade — every db.py-owned table exists now.
+    _cascade_main_agent_id(cursor)
+    _migrate_local_llm_to_llamacpp(cursor)
+
     conn.commit()
     conn.close()
     logger.info("SQLite Database initialized successfully.")
@@ -1013,10 +1035,10 @@ def _init_postgres_schema():
 
         # PostgreSQL Migration helper: verify and add decision_logs columns
         for col, definition in [
-            ("agent_id", "TEXT DEFAULT 'jarvis'"),
+            ("agent_id", "TEXT DEFAULT 'vexa'"),  # tool_permissions.MAIN_AGENT_ID
             ("completion_tokens_estimate", "INTEGER DEFAULT 0"),
             ("cost_usd", "REAL DEFAULT 0.0"),
-            # Which provider actually served this call: 'ollama' (or NULL, same
+            # Which provider actually served this call: 'local' (or NULL, same
             # meaning) for local, else a provider_bindings.id — powers the
             # per-agent spend-by-provider breakdown (get_agent_provider_breakdown).
             ("provider_id", "TEXT"),
@@ -1091,7 +1113,7 @@ def _init_postgres_schema():
             ("role", "TEXT DEFAULT 'Specialist'"),
             ("status", "TEXT DEFAULT 'idle'"),
             ("is_enabled", "INTEGER DEFAULT 1"),
-            ("model_provider", "TEXT DEFAULT 'ollama'"),
+            ("model_provider", "TEXT DEFAULT 'local'"),
             ("model_type", "TEXT DEFAULT 'local'"),
             ("model_params", "TEXT DEFAULT '{}'"),
             ("current_task", "TEXT DEFAULT ''"),
@@ -1105,7 +1127,7 @@ def _init_postgres_schema():
             # JSON array of provider_bindings ids this agent may fall back to besides
             # model_provider, in priority order. '[]'/NULL = unrestricted (legacy
             # behavior: model_provider alone, or the full global router chain when
-            # model_provider='ollama') — see backend/agent_provider_access.py.
+            # model_provider='local') — see backend/agent_provider_access.py.
             ("allowed_provider_ids", "TEXT DEFAULT '[]'"),
             # When the agent's budget_usd_limit is exhausted: 0 (default) hard-blocks
             # the turn as before; 1 degrades to the free local model instead of
@@ -1121,6 +1143,10 @@ def _init_postgres_schema():
             if not cursor.fetchone():
                 cursor.execute(f"ALTER TABLE subagents ADD COLUMN {col} {definition}")
                 logger.info(f"PostgreSQL Migration: added column {col} to subagents table.")
+
+        # Rename the legacy primary-agent row ('jarvis' → 'vexa') before the
+        # seed / upsert below (see the SQLite path for why).
+        _rename_main_agent_row(cursor, ph="%s")
 
         # Seed subagents if table is empty
         cursor.execute("SELECT COUNT(*) FROM subagents")
@@ -1186,6 +1212,15 @@ def _init_postgres_schema():
             )
         """)
 
+        # Durable run journal — same single DDL definition as the SQLite path.
+        from backend import run_journal, shares
+        run_journal.init_schema(cursor, "postgres")
+        shares.init_schema(cursor, "postgres")
+
+        # Legacy primary-agent id cascade — every db.py-owned table exists now.
+        _cascade_main_agent_id(cursor, ph="%s")
+        _migrate_local_llm_to_llamacpp(cursor, ph="%s")
+
         conn.commit()
     logger.info("PostgreSQL Database initialized successfully.")
 
@@ -1193,49 +1228,49 @@ def _init_postgres_schema():
 def _get_default_agents(default_model: str) -> list:
     return [
         (
-            "jarvis", "Vexa (Main)",
+            MAIN_AGENT_ID, "Vexa (Main)",
             "You are Vexa, the primary orchestrator of a personal multi-agent system. Always reply in the same language the user writes to you in — you are natively fluent in both Russian and English, natural and idiomatic in each, never stilted or translated-sounding. You are female — in Russian (and any other grammatically gendered language) always self-refer using feminine grammatical forms without exception ('я готова', 'я сделала', 'я рада'), never masculine ones. You are an independent personal project built and maintained by Albert Yeghiazaryan — there is no company, employer, or vendor behind you. If asked who made you, what company you're from, or what underlying model powers you, answer plainly and honestly instead of inventing a company name or affiliation. You have a warm, direct personality with a touch of wit, always kind at heart, never cold or robotic. You communicate with the emotional intelligence of an experienced psychologist — read what's beneath the words, briefly acknowledge it with one genuine sentence when a message is emotionally loaded before helping, and stay efficient for plain routine requests. Never address the user by name — no vocative name-calling; warmth comes from how attentively you listen, not from repeating a name. Your job is to understand what the user actually needs, decide whether to handle it yourself or delegate it to the most suitable specialist sub-agent, and always tell the user plainly which agent you're routing to and why. Be concise and efficient, but talk like someone who's paying attention — not a dispatcher reading a script.",
             default_model, "orchestrator", None, "", 100, 350
         ),
         (
             "research", "Search Agent",
             "You are a Research Agent. Use web_search to find accurate, up-to-date information. Always cite sources and summarize findings clearly. You can also check weather and fetch RSS news digests.",
-            default_model, "agent", "jarvis", "web_search", 450, 100
+            default_model, "agent", MAIN_AGENT_ID, "web_search", 450, 100
         ),
         (
             "code", "Code Engineer",
             "You are a Code Engineer. Write clean, well-commented Python code and execute it using the python_sandbox tool. Always show the output and explain what the code does.",
-            default_model, "agent", "jarvis", "python_sandbox", 450, 220
+            default_model, "agent", MAIN_AGENT_ID, "python_sandbox", 450, 220
         ),
         (
             "analyst", "Data Analyst",
             "You are a Data Analyst. Analyze datasets, compute statistics, and create visualizations using Python (matplotlib, pandas). Always interpret the results and provide actionable insights.",
-            default_model, "agent", "jarvis", "python_sandbox", 450, 340
+            default_model, "agent", MAIN_AGENT_ID, "python_sandbox", 450, 340
         ),
         (
             "scheduler", "Scheduler",
             "You are a Scheduler Agent. Help the user set timers, reminders, and alarms. Confirm every timer or alarm you set and remind the user of the exact trigger time.",
-            default_model, "agent", "jarvis", "timers_alarms", 450, 460
+            default_model, "agent", MAIN_AGENT_ID, "timers_alarms", 450, 460
         ),
         (
             "monitor", "Market Monitor",
             "You are a Market Monitor Agent. Track stock prices, crypto rates, and market trends. Use the market_monitor skill to fetch real-time data and set price alerts when requested.",
-            default_model, "agent", "jarvis", "market_monitor", 450, 580
+            default_model, "agent", MAIN_AGENT_ID, "market_monitor", 450, 580
         ),
         (
             "planner", "Daily Planner",
             "You are a Daily Planner Agent. Manage the user's calendar and to-do list. Use google_calendar to create and review events, and todoist_sync to manage tasks. Help prioritize and schedule the day effectively.",
-            default_model, "agent", "jarvis", "google_calendar,todoist_sync", 450, 700
+            default_model, "agent", MAIN_AGENT_ID, "google_calendar,todoist_sync", 450, 700
         ),
         (
             "sysops", "Sys Ops",
             "You are a Sys Ops Agent. Monitor system health (CPU, RAM, disk) and execute shell commands when needed. Always report system status clearly and warn about critical thresholds.",
-            default_model, "agent", "jarvis", "shell_execution", 450, 820
+            default_model, "agent", MAIN_AGENT_ID, "shell_execution", 450, 820
         ),
         (
             "football", "Football Analyst",
             "You are a Football Analyst Agent. You have deep knowledge of football (soccer): tactics, player performance, match statistics, league standings, and transfer news. Use web_search to fetch the latest match results, lineups, and news. Provide detailed tactical breakdowns, score predictions, and injury updates. Support all major leagues: Premier League, La Liga, Serie A, Bundesliga, Champions League, and others.",
-            default_model, "agent", "jarvis", "web_search", 450, 940
+            default_model, "agent", MAIN_AGENT_ID, "web_search", 450, 940
         ),
         (
             "browser", "Web Browser Agent",
@@ -1244,12 +1279,12 @@ def _get_default_agents(default_model: str) -> list:
             "clicking, filling in forms, or submitting something on a real site — it needs owner approval before "
             "it runs, so prefer browser_read whenever a simple lookup is enough. Always explain what you found "
             "or did, and never guess at page content you have not actually read.",
-            default_model, "agent", "jarvis", "browser_automation,web_search", 450, 1060
+            default_model, "agent", MAIN_AGENT_ID, "browser_automation,web_search", 450, 1060
         ),
         (
             "profile_pipeline", "Profile Pipeline",
             PROFILE_PIPELINE_PROMPT,
-            default_model, "sub-orchestrator", "jarvis", "", 450, 1180
+            default_model, "sub-orchestrator", MAIN_AGENT_ID, "", 450, 1180
         ),
         (
             "profile_analyst", "Profile Analyst",
@@ -1327,45 +1362,242 @@ def _migrate_existing_subagents_postgres(cursor):
         """, (agent_id, name, prompt, default_model, agent_type, parent_id, skills, x, y, 0.7))
 
 
+# ── Primary agent id rename: 'jarvis' (pre-2026-08) → 'vexa' ────────────────
+# Every place the old literal id could be stored as an agent reference. Soft
+# TEXT references only — there are no SQL FK constraints — so a plain UPDATE per
+# column is enough. Tables owned by lazily-initialised modules (bot_access,
+# payments, messenger governance) are included defensively even though the
+# MAIN_AGENT_IDS guard in those modules means the main agent can never actually
+# be bound to a messenger / access plan.
+_MAIN_AGENT_ID_REFS = [
+    ("subagents", "parent_id"),
+    ("decision_logs", "agent_id"),
+    ("agent_events", "agent_id"),
+    ("session_metadata", "agent_id"),
+    ("workflow_tasks", "assignee"),
+    ("dev_runs", "assignee_agent_id"),
+    ("subagent_memory", "subagent_id"),
+    ("pending_channel_replies", "subagent_id"),
+    ("agent_messenger_bindings", "subagent_id"),
+    ("bot_access_tokens", "subagent_id"),
+    ("access_plans", "subagent_id"),
+    ("access_subscriptions", "subagent_id"),
+    ("subscriber_usage", "subagent_id"),
+    ("payment_invoices", "subagent_id"),
+    ("client_agent_connections", "agent_id"),
+]
+
+
+def _rename_main_agent_row(cursor, ph: str = "?") -> bool:
+    """Rename the primary agent row id from the legacy id to the canonical one.
+
+    Idempotent: does nothing once the canonical row exists, or if the legacy
+    row was never there (fresh install). Returns True when it performed the
+    rename, so the caller knows a cascade is worthwhile. ``ph`` is the DB
+    param placeholder ('?' for SQLite, '%s' for PostgreSQL).
+    """
+    if MAIN_AGENT_ID == LEGACY_MAIN_AGENT_ID:
+        return False
+    try:
+        cursor.execute(f"SELECT 1 FROM subagents WHERE id = {ph}", (LEGACY_MAIN_AGENT_ID,))
+        has_legacy = cursor.fetchone() is not None
+        cursor.execute(f"SELECT 1 FROM subagents WHERE id = {ph}", (MAIN_AGENT_ID,))
+        has_canonical = cursor.fetchone() is not None
+    except Exception as exc:  # subagents table not ready yet
+        logger.debug("main-agent rename: subagents not queryable yet (%s)", exc)
+        return False
+    if not has_legacy:
+        return False
+    if has_canonical:
+        logger.warning(
+            "Both '%s' and '%s' agent rows exist — leaving data untouched; "
+            "resolve the duplicate manually.", LEGACY_MAIN_AGENT_ID, MAIN_AGENT_ID,
+        )
+        return False
+    cursor.execute(
+        f"UPDATE subagents SET id = {ph} WHERE id = {ph}", (MAIN_AGENT_ID, LEGACY_MAIN_AGENT_ID)
+    )
+    logger.info(
+        "Renamed primary agent row '%s' → '%s'", LEGACY_MAIN_AGENT_ID, MAIN_AGENT_ID
+    )
+    return True
+
+
+# The local model moved from Ollama to a llama.cpp server on 2026-09-13. These
+# app_settings keys were renamed with it; keep_alive has no counterpart because
+# llama-server keeps its one model resident for the life of the process.
+_LOCAL_LLM_SETTING_RENAMES = (
+    ("ollama_base_url", "local_base_url"),
+    ("ollama_num_ctx", "local_num_ctx"),
+    ("ollama_think", "local_think"),
+)
+_LOCAL_LLM_DROPPED_SETTINGS = ("ollama_keep_alive",)
+_LOCAL_LLM_MIGRATION_MARKER = "migration_local_llm_llamacpp"
+
+
+def _looks_like_ollama_endpoint(value: Any) -> bool:
+    text = str(value or "").lower()
+    return "ollama" in text or ":11434" in text
+
+
+def _migrate_local_llm_to_llamacpp(cursor, ph: str = "?") -> None:
+    """Carry persisted state from the Ollama era over to the llama.cpp server.
+
+    The sentinel rewrite ('ollama' -> 'local' in subagents.model_provider and
+    decision_logs.provider_id) is idempotent and runs on every start, so a row
+    written by an old client is healed too. The rest runs once, recorded by a
+    marker in app_settings: it renames the runtime-config keys, points the
+    persisted provider/endpoint/model at llama.cpp, and re-points every agent
+    on the local model at LLM_MODEL — the server serves a single alias, so an
+    Ollama tag left in a row would only fail at that agent's first call.
+
+    Values are written json.dumps-encoded, the convention save_app_settings and
+    get_app_settings share (see get_setting for why mixing encodings hurts).
+    """
+    for table, column in (("subagents", "model_provider"), ("decision_logs", "provider_id")):
+        try:
+            cursor.execute(f"UPDATE {table} SET {column} = {ph} WHERE {column} = {ph}", ("local", "ollama"))
+        except Exception as exc:  # table not created on this install
+            logger.debug("Local LLM migration: %s.%s skipped (%s)", table, column, exc)
+
+    try:
+        cursor.execute("SELECT key, value FROM app_settings")
+        rows = {key: value for key, value in cursor.fetchall()}
+    except Exception as exc:
+        logger.debug("Local LLM migration: app_settings unavailable (%s)", exc)
+        return
+    if _LOCAL_LLM_MIGRATION_MARKER in rows:
+        return
+
+    def decoded(key: str) -> Any:
+        raw = rows.get(key)
+        if isinstance(raw, str):
+            try:
+                return json.loads(raw)
+            except (TypeError, ValueError):
+                return raw
+        return raw
+
+    def put(key: str, value: Any) -> None:
+        cursor.execute(
+            f"INSERT INTO app_settings (key, value) VALUES ({ph}, {ph}) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, json.dumps(value, ensure_ascii=False)),
+        )
+        rows[key] = json.dumps(value, ensure_ascii=False)
+
+    def drop(key: str) -> None:
+        cursor.execute(f"DELETE FROM app_settings WHERE key = {ph}", (key,))
+        rows.pop(key, None)
+
+    local_base_url = (os.getenv("LLAMACPP_BASE_URL") or "http://hermes-llama:8080").rstrip("/")
+    if local_base_url.endswith("/v1"):
+        local_base_url = local_base_url[: -len("/v1")]
+    migrated = []
+
+    for old, new in _LOCAL_LLM_SETTING_RENAMES:
+        if old in rows:
+            if new not in rows:
+                put(new, decoded(old))
+            drop(old)
+            migrated.append(f"{old}->{new}")
+    for old in _LOCAL_LLM_DROPPED_SETTINGS:
+        if old in rows:
+            drop(old)
+            migrated.append(f"-{old}")
+
+    was_ollama = str(decoded("provider") or "").strip().lower() == "ollama"
+    if was_ollama:
+        put("provider", "llamacpp")
+        migrated.append("provider")
+    if "local_base_url" in rows and _looks_like_ollama_endpoint(decoded("local_base_url")):
+        put("local_base_url", local_base_url)
+        migrated.append("local_base_url")
+    if was_ollama or _looks_like_ollama_endpoint(decoded("api_base")):
+        if "api_base" in rows:
+            put("api_base", local_base_url)
+            migrated.append("api_base")
+    if "openai_api_base" in rows and _looks_like_ollama_endpoint(decoded("openai_api_base")):
+        env_openai = os.getenv("LLM_API_BASE", "")
+        put("openai_api_base", env_openai if env_openai and not _looks_like_ollama_endpoint(env_openai)
+            else "https://openrouter.ai/api/v1")
+        migrated.append("openai_api_base")
+
+    local_model = os.getenv("LLM_MODEL", "").strip()
+    if local_model:
+        if was_ollama and "model" in rows:
+            put("model", local_model)
+            migrated.append("model")
+        try:
+            cursor.execute(
+                f"UPDATE subagents SET model = {ph} "
+                f"WHERE COALESCE(model_provider, '') IN ('', {ph}) AND model != {ph}",
+                (local_model, "local", local_model),
+            )
+            migrated.append("subagents.model")
+        except Exception as exc:
+            logger.debug("Local LLM migration: subagents.model skipped (%s)", exc)
+
+    put(_LOCAL_LLM_MIGRATION_MARKER, "done")
+    if migrated:
+        logger.warning("Local LLM moved from Ollama to llama.cpp: migrated %s", ", ".join(migrated))
+
+
+def _cascade_main_agent_id(cursor, ph: str = "?") -> None:
+    """Point every stored reference to the legacy primary-agent id at the
+    canonical one. Cheap and idempotent — safe to call on every startup.
+    ``ph`` is the DB param placeholder ('?' for SQLite, '%s' for PostgreSQL)."""
+    if MAIN_AGENT_ID == LEGACY_MAIN_AGENT_ID:
+        return
+    for table, column in _MAIN_AGENT_ID_REFS:
+        try:
+            cursor.execute(
+                f"UPDATE {table} SET {column} = {ph} WHERE {column} = {ph}",
+                (MAIN_AGENT_ID, LEGACY_MAIN_AGENT_ID),
+            )
+        except Exception as exc:  # table not created (yet) on this install
+            logger.debug("main-agent cascade: skipped %s.%s (%s)", table, column, exc)
+
+
 def _get_default_agents_migrations() -> list:
     return [
-        ("jarvis", "Vexa (Main)",
+        (MAIN_AGENT_ID, "Vexa (Main)",
          "You are Vexa, the primary orchestrator of a personal multi-agent system. Always reply in the same language the user writes to you in — you are natively fluent in both Russian and English, natural and idiomatic in each, never stilted or translated-sounding. You are female — in Russian (and any other grammatically gendered language) always self-refer using feminine grammatical forms without exception ('я готова', 'я сделала', 'я рада'), never masculine ones. You are an independent personal project built and maintained by Albert Yeghiazaryan — there is no company, employer, or vendor behind you. If asked who made you, what company you're from, or what underlying model powers you, answer plainly and honestly instead of inventing a company name or affiliation. You have a warm, direct personality with a touch of wit, always kind at heart, never cold or robotic. You communicate with the emotional intelligence of an experienced psychologist — read what's beneath the words, briefly acknowledge it with one genuine sentence when a message is emotionally loaded before helping, and stay efficient for plain routine requests. Never address the user by name — no vocative name-calling; warmth comes from how attentively you listen, not from repeating a name. Your job is to understand what the user actually needs, decide whether to handle it yourself or delegate it to the most suitable specialist sub-agent, and always tell the user plainly which agent you're routing to and why. Be concise and efficient, but talk like someone who's paying attention — not a dispatcher reading a script.",
          "orchestrator", None, "", 100, 350),
         ("research", "Search Agent",
          "You are a Research Agent. Use web_search to find accurate, up-to-date information. Always cite sources and summarize findings clearly. You can also check weather and fetch RSS news digests.",
-         "agent", "jarvis", "web_search", 450, 100),
+         "agent", MAIN_AGENT_ID, "web_search", 450, 100),
         ("code", "Code Engineer",
          "You are a Code Engineer. Write clean, well-commented Python code and execute it using the python_sandbox tool. Always show the output and explain what the code does.",
-         "agent", "jarvis", "python_sandbox", 450, 220),
+         "agent", MAIN_AGENT_ID, "python_sandbox", 450, 220),
         ("analyst", "Data Analyst",
          "You are a Data Analyst. Analyze datasets, compute statistics, and create visualizations using Python (matplotlib, pandas). Always interpret the results and provide actionable insights.",
-         "agent", "jarvis", "python_sandbox", 450, 340),
+         "agent", MAIN_AGENT_ID, "python_sandbox", 450, 340),
          ("scheduler", "Scheduler",
          "You are a Scheduler Agent. Help the user set timers, reminders, and alarms. Confirm every timer or alarm you set and remind the user of the exact trigger time.",
-         "agent", "jarvis", "timers_alarms", 450, 460),
+         "agent", MAIN_AGENT_ID, "timers_alarms", 450, 460),
         ("monitor", "Market Monitor",
          "You are a Market Monitor Agent. Track stock prices, crypto rates, and market trends. Use the market_monitor skill to fetch real-time data and set price alerts when requested.",
-         "agent", "jarvis", "market_monitor", 450, 580),
+         "agent", MAIN_AGENT_ID, "market_monitor", 450, 580),
         ("planner", "Daily Planner",
          "You are a Daily Planner Agent. Manage the user's calendar and to-do list. Use google_calendar to create and review events, and todoist_sync to manage tasks. Help prioritize and schedule the day effectively.",
-         "agent", "jarvis", "google_calendar,todoist_sync", 450, 700),
+         "agent", MAIN_AGENT_ID, "google_calendar,todoist_sync", 450, 700),
         ("sysops", "Sys Ops",
          "You are a Sys Ops Agent. Monitor system health (CPU, RAM, disk) and execute shell commands when needed. Always report system status clearly and warn about critical thresholds.",
-         "agent", "jarvis", "shell_execution", 450, 820),
+         "agent", MAIN_AGENT_ID, "shell_execution", 450, 820),
         ("football", "Football Analyst",
          "You are a Football Analyst Agent. You have deep knowledge of football (soccer): tactics, player performance, match statistics, league standings, and transfer news. Use web_search to fetch the latest match results, lineups, and news. Provide detailed tactical breakdowns, score predictions, and injury updates. Support all major leagues: Premier League, La Liga, Serie A, Bundesliga, Champions League, and others.",
-         "agent", "jarvis", "web_search", 450, 940),
+         "agent", MAIN_AGENT_ID, "web_search", 450, 940),
         ("browser", "Web Browser Agent",
          "You are a Web Browser Agent. Use browser_read to research and extract information from websites "
          "(read-only — no owner approval needed). Use browser_task only when the goal genuinely requires "
          "clicking, filling in forms, or submitting something on a real site — it needs owner approval before "
          "it runs, so prefer browser_read whenever a simple lookup is enough. Always explain what you found "
          "or did, and never guess at page content you have not actually read.",
-         "agent", "jarvis", "browser_automation,web_search", 450, 1060),
+         "agent", MAIN_AGENT_ID, "browser_automation,web_search", 450, 1060),
         ("profile_pipeline", "Profile Pipeline",
          PROFILE_PIPELINE_PROMPT,
-         "sub-orchestrator", "jarvis", "", 450, 1180),
+         "sub-orchestrator", MAIN_AGENT_ID, "", 450, 1180),
         ("profile_analyst", "Profile Analyst",
          PROFILE_ANALYST_PROMPT,
          "agent", "profile_pipeline", "", 800, 1120),
@@ -1428,6 +1660,20 @@ def get_chat_history(session_id: str, limit: int = 20) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"Error retrieving chat history: {e}")
         return []
+
+def delete_message(session_id: str, message_id: int) -> bool:
+    """Removes one message from a session. Scoped by session_id on purpose —
+    the id alone would let a caller delete a message out of somebody else's
+    conversation by guessing a number."""
+    try:
+        return _rowcount(
+            "DELETE FROM messages WHERE id = ? AND session_id = ?",
+            (message_id, session_id),
+        ) > 0
+    except Exception as e:
+        logger.error(f"Error deleting message {message_id}: {e}")
+        return False
+
 
 def clear_chat_history(session_id: str):
     """Deletes all messages in the database for a session."""
@@ -1753,10 +1999,10 @@ def save_decision_log(log: Dict[str, Any]):
             log["user_message"],
             log["assistant_response"],
             json.dumps(log.get("traces", [])),
-            log.get("agent_id", "jarvis"),
+            log.get("agent_id", MAIN_AGENT_ID),
             log.get("completion_tokens_estimate", 0),
             log.get("cost_usd", 0.0),
-            log.get("provider_id") or "ollama",
+            log.get("provider_id") or "local",
         ))
     except Exception as e:
         logger.error(f"Error saving decision log to database: {e}")
@@ -1788,7 +2034,7 @@ def get_decision_logs(limit: int = 100) -> List[Dict[str, Any]]:
                 "user_message": r[7],
                 "assistant_response": r[8],
                 "traces": traces,
-                "agent_id": r[10] if len(r) > 10 else "jarvis",
+                "agent_id": r[10] if len(r) > 10 else MAIN_AGENT_ID,
                 "completion_tokens_estimate": r[11] if len(r) > 11 else 0,
                 "cost_usd": r[12] if len(r) > 12 else 0.0,
             })
@@ -1854,7 +2100,7 @@ def save_subagent(
     role: str = "Specialist",
     status: str = "idle",
     is_enabled: bool = True,
-    model_provider: str = "ollama",
+    model_provider: str = "local",
     model_type: str = "local",
     model_params: Optional[Dict[str, Any]] = None,
     budget_usd_limit: Optional[float] = None,
@@ -1945,7 +2191,7 @@ def get_subagent(id: str) -> Optional[Dict[str, Any]]:
                 "role": row[11] or "Specialist",
                 "status": row[12] or "idle",
                 "is_enabled": bool(row[13]),
-                "model_provider": row[14] or "ollama",
+                "model_provider": row[14] or "local",
                 "model_type": row[15] or "local",
                 "model_params": _json_or_empty(row[16]),
                 "current_task": row[17] or "",
@@ -1997,7 +2243,7 @@ def get_all_subagents() -> List[Dict[str, Any]]:
                 "role": r[11] or "Specialist",
                 "status": r[12] or "idle",
                 "is_enabled": bool(r[13]),
-                "model_provider": r[14] or "ollama",
+                "model_provider": r[14] or "local",
                 "model_type": r[15] or "local",
                 "model_params": _json_or_empty(r[16]),
                 "current_task": r[17] or "",
@@ -2084,13 +2330,13 @@ def get_agent_provider_breakdown(agent_id: str, since_iso: Optional[str] = None)
     try:
         if since_iso:
             rows = _execute(
-                """SELECT COALESCE(provider_id, 'ollama') AS pid, COUNT(*), COALESCE(SUM(cost_usd), 0)
+                """SELECT COALESCE(provider_id, 'local') AS pid, COUNT(*), COALESCE(SUM(cost_usd), 0)
                    FROM decision_logs WHERE agent_id = ? AND timestamp >= ? GROUP BY pid ORDER BY 3 DESC""",
                 (agent_id, since_iso),
             )
         else:
             rows = _execute(
-                """SELECT COALESCE(provider_id, 'ollama') AS pid, COUNT(*), COALESCE(SUM(cost_usd), 0)
+                """SELECT COALESCE(provider_id, 'local') AS pid, COUNT(*), COALESCE(SUM(cost_usd), 0)
                    FROM decision_logs WHERE agent_id = ? GROUP BY pid ORDER BY 3 DESC""",
                 (agent_id,),
             )
@@ -2244,10 +2490,35 @@ def db_delete_subagent_memory(subagent_id: str, key: str) -> bool:
 # ─── APP SETTINGS HELPERS ────────────────────────────────────────────────────
 
 def get_setting(key: str) -> Optional[str]:
-    """Returns a global app setting value by key, or None if not found."""
+    """Returns a global app setting value by key, or None if not found.
+
+    `app_settings` has two writers with incompatible encodings: this module's
+    set_setting() stores a raw string, while save_app_settings() json.dumps()
+    every value. Whichever wrote last decides what is on disk, so a value put
+    there by set_setting can come back JSON-encoded — and callers that compare
+    it verbatim then fail. That is not hypothetical: on 2026-09-06 a bulk
+    rewrite left admin_username as '"albert"', and /api/auth/login's exact-match
+    check rejected the correct password from then on.
+
+    So a JSON-encoded *string* is decoded back here. Anything that decodes to a
+    dict or list is returned untouched, because permissions.py and
+    content_factory deliberately store JSON documents through set_setting and
+    parse them themselves — handing those callers a parsed object instead of
+    text would break them.
+    """
     try:
         rows = _execute("SELECT value FROM app_settings WHERE key = ?", (key,))
-        return rows[0][0] if rows else None
+        if not rows:
+            return None
+        value = rows[0][0]
+        if isinstance(value, str) and value.startswith('"'):
+            try:
+                decoded = json.loads(value)
+            except (TypeError, ValueError):
+                return value
+            if isinstance(decoded, str):
+                return decoded
+        return value
     except Exception as e:
         logger.error(f"Error getting setting {key}: {e}")
         return None

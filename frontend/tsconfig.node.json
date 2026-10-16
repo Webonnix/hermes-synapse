@@ -20,5 +20,9 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["vite.config.ts"]
+  "include": ["vite.config.ts", "vite.pwa-plugin.ts", "tests"],
+  // tests/smoke is the Playwright suite. @playwright/test is installed only by
+  // the browser-smoke workflow, so type-checking it here would break `npm run
+  // build` for everyone who has not installed a browser driver.
+  "exclude": ["tests/smoke"]
 }

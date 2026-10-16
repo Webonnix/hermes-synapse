@@ -469,3 +469,215 @@ def test_send_text_marks_the_message_before_it_goes_out(monkeypatch):
     # transaction_id from the echo.
     assert manager._is_own_echo("b1", _self_sent_event(event_id="$final:senla.eu")) is True
 
+
+
+# ── Multi-day "отвалы": renewal races and transient errors ────────────────────
+#
+# Routine renewal worked, yet the channel still died every few days. Two causes:
+# concurrent refreshes spent the same single-use MAS refresh token (the loser
+# marked the binding failed), and any network blip / 5xx counted as a revoked
+# credential. These pin the fix.
+
+OAUTH_CREDENTIALS = {
+    "homeserver_url": HOMESERVER, "user_id": "@albert:example.org",
+    "access_token": "mat_first", "refresh_token": "mar_first",
+    "auth_kind": "oauth", "oauth_client_id": "client-123", "token_endpoint": TOKEN_ENDPOINT,
+}
+
+
+def _manager_with_live_client(monkeypatch, persisted=None):
+    from backend import agent_matrix_bot
+
+    class FakeClient:
+        access_token = "mat_first"
+        stopped = False
+
+        def stop_sync_forever(self):
+            self.stopped = True
+
+    persisted = persisted if persisted is not None else {}
+    monkeypatch.setattr(
+        "backend.agent_messenger_governance.update_matrix_binding_credentials",
+        lambda binding_id, credentials: persisted.update({binding_id: credentials}),
+    )
+    monkeypatch.setattr("backend.channel_activity.record", lambda *args, **kwargs: None)
+    manager = agent_matrix_bot.AgentMatrixBotManager()
+    client = FakeClient()
+    manager._clients["b1"] = client  # type: ignore[assignment]
+    manager._credentials["b1"] = dict(OAUTH_CREDENTIALS)
+    return manager, client, persisted
+
+
+@pytest.mark.parametrize("response", [httpx.Response(503), httpx.Response(429), httpx.ConnectError("boom")])
+@respx.mock
+def test_refresh_reports_outages_as_transient_not_as_revoked(response):
+    route = respx.post(TOKEN_ENDPOINT)
+    if isinstance(response, Exception):
+        route.mock(side_effect=response)
+    else:
+        route.mock(return_value=response)
+    with pytest.raises(matrix_oauth.MatrixTransientError):
+        matrix_oauth.refresh_credentials(dict(OAUTH_CREDENTIALS))
+
+
+@respx.mock
+def test_refused_refresh_is_not_transient():
+    respx.post(TOKEN_ENDPOINT).mock(return_value=httpx.Response(400, json={"error": "invalid_grant"}))
+    with pytest.raises(ValueError) as info:
+        matrix_oauth.refresh_credentials(dict(OAUTH_CREDENTIALS))
+    assert not isinstance(info.value, matrix_oauth.MatrixTransientError)
+
+
+@respx.mock
+def test_whoami_outage_is_transient():
+    respx.get(f"{HOMESERVER}/_matrix/client/v3/account/whoami").mock(return_value=httpx.Response(502))
+    with pytest.raises(matrix_oauth.MatrixTransientError):
+        matrix_oauth.whoami(HOMESERVER, "mat_first")
+
+
+@respx.mock
+def test_concurrent_renewals_spend_the_refresh_token_once(monkeypatch):
+    """Renewal loop + SyncError callback + health check firing together used to
+    send the same refresh token twice; MAS refuses the second and the binding
+    was marked failed although the first renewal had succeeded."""
+    from backend import agent_matrix_bot
+
+    route = respx.post(TOKEN_ENDPOINT).mock(side_effect=[
+        httpx.Response(200, json={"access_token": "mat_second", "refresh_token": "mar_second", "expires_in": 300}),
+        httpx.Response(400, json={"error": "invalid_grant"}),
+    ])
+    manager, client, persisted = _manager_with_live_client(monkeypatch)
+
+    async def both():
+        return await asyncio.gather(
+            manager.renew_token("b1", seen_access_token="mat_first"),
+            manager.renew_token("b1", seen_access_token="mat_first"),
+        )
+
+    assert asyncio.run(both()) == [agent_matrix_bot.RENEW_OK, agent_matrix_bot.RENEW_OK]
+    assert route.call_count == 1
+    assert client.access_token == "mat_second"
+    assert persisted["b1"]["refresh_token"] == "mar_second"
+
+
+@respx.mock
+def test_renewal_during_an_outage_is_transient(monkeypatch):
+    from backend import agent_matrix_bot
+
+    respx.post(TOKEN_ENDPOINT).mock(side_effect=httpx.ConnectTimeout("slow"))
+    manager, client, persisted = _manager_with_live_client(monkeypatch)
+    assert asyncio.run(manager.renew_token("b1")) == agent_matrix_bot.RENEW_TRANSIENT
+    assert client.access_token == "mat_first"
+    assert manager._credentials["b1"]["refresh_token"] == "mar_first"
+    assert persisted == {}
+
+
+def _sync_error(status="M_UNKNOWN_TOKEN"):
+    class FakeSyncError:
+        status_code = status
+    return FakeSyncError()
+
+
+@respx.mock
+def test_sync_error_during_outage_keeps_the_binding_active(monkeypatch):
+    from backend import agent_matrix_bot
+
+    respx.post(TOKEN_ENDPOINT).mock(return_value=httpx.Response(502))
+    manager, client, _ = _manager_with_live_client(monkeypatch)
+    failed: list = []
+    monkeypatch.setattr("backend.agent_messenger_governance.mark_binding_failed", lambda *a: failed.append(a))
+    monkeypatch.setattr(agent_matrix_bot, "TRANSIENT_RETRY_SECONDS", 0)
+
+    asyncio.run(manager._make_sync_error_callback("b1")(_sync_error()))
+    assert failed == []
+    assert not client.stopped
+    assert manager.is_running("b1")
+
+
+@respx.mock
+def test_sync_error_with_refused_refresh_still_fails_the_binding(monkeypatch):
+    respx.post(TOKEN_ENDPOINT).mock(return_value=httpx.Response(400, json={"error": "invalid_grant"}))
+    manager, client, _ = _manager_with_live_client(monkeypatch)
+    failed: list = []
+    monkeypatch.setattr("backend.agent_messenger_governance.mark_binding_failed", lambda *a: failed.append(a))
+
+    asyncio.run(manager._make_sync_error_callback("b1")(_sync_error()))
+    assert failed and failed[0][0] == "b1"
+    assert client.stopped
+    assert not manager.is_running("b1")
+
+
+@respx.mock
+def test_sync_error_right_after_a_renewal_does_not_refresh_again(monkeypatch):
+    """A long-poll sent with the old token returns M_UNKNOWN_TOKEN after the
+    renewal already swapped it — that must not burn the new refresh token."""
+    from backend import agent_matrix_bot
+
+    route = respx.post(TOKEN_ENDPOINT).mock(return_value=httpx.Response(400, json={"error": "invalid_grant"}))
+    manager, client, _ = _manager_with_live_client(monkeypatch)
+    manager._last_renewed_at["b1"] = time.time()
+    monkeypatch.setattr(agent_matrix_bot.asyncio, "sleep", _no_sleep)
+    failed: list = []
+    monkeypatch.setattr("backend.agent_messenger_governance.mark_binding_failed", lambda *a: failed.append(a))
+
+    asyncio.run(manager._make_sync_error_callback("b1")(_sync_error()))
+    assert not route.called
+    assert failed == []
+
+
+async def _no_sleep(*_args, **_kwargs):
+    return None
+
+
+@respx.mock
+def test_health_check_whoami_401_after_someone_else_renewed_is_healthy(monkeypatch):
+    from backend import agent_matrix_bot
+
+    respx.get(f"{HOMESERVER}/_matrix/client/v3/account/whoami").mock(return_value=httpx.Response(401, json={}))
+    token_route = respx.post(TOKEN_ENDPOINT).mock(return_value=httpx.Response(400, json={"error": "invalid_grant"}))
+    manager, client, _ = _manager_with_live_client(monkeypatch)
+
+    real_whoami = matrix_oauth.whoami
+
+    def whoami_then_renewal_lands(homeserver_url, access_token):
+        # The renewal loop swaps the token while this whoami is in flight.
+        manager._credentials["b1"] = {**manager._credentials["b1"], "access_token": "mat_second"}
+        return real_whoami(homeserver_url, access_token)
+
+    monkeypatch.setattr(matrix_oauth, "whoami", whoami_then_renewal_lands)
+    assert asyncio.run(manager.check_health("b1")) == agent_matrix_bot.RENEW_OK
+    assert not token_route.called
+
+
+def test_stop_waits_for_an_in_flight_renewal_to_persist(monkeypatch):
+    """Otherwise a reconnect writes fresh credentials to Valkey and the late
+    renewal overwrites them with the old session's rotated tokens."""
+    import threading
+
+    manager, client, persisted = _manager_with_live_client(monkeypatch)
+    release = threading.Event()
+    order: list[str] = []
+
+    def slow_refresh(credentials):
+        release.wait(5)
+        return {**credentials, "access_token": "mat_second", "refresh_token": "mar_second"}
+
+    monkeypatch.setattr(matrix_oauth, "refresh_credentials", slow_refresh)
+    monkeypatch.setattr(
+        "backend.agent_messenger_governance.update_matrix_binding_credentials",
+        lambda binding_id, credentials: order.append("persisted"),
+    )
+
+    async def scenario():
+        renewal = asyncio.ensure_future(manager.renew_token("b1"))
+        await asyncio.sleep(0.05)
+        stopping = asyncio.ensure_future(manager.stop("b1"))
+        await asyncio.sleep(0.05)
+        assert not stopping.done()
+        release.set()
+        await stopping
+        order.append("stopped")
+        await renewal
+
+    asyncio.run(scenario())
+    assert order == ["persisted", "stopped"]

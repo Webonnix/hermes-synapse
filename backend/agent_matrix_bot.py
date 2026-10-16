@@ -43,6 +43,24 @@ logger = logging.getLogger("hermes.agent_matrix_bot")
 
 MATRIX_TEXT_LIMIT = 8000
 
+# Outcomes of a token renewal attempt. Only RENEW_REVOKED/RENEW_UNAVAILABLE mean
+# the binding really is dead; RENEW_TRANSIENT means "ask again later".
+RENEW_OK = "ok"
+RENEW_TRANSIENT = "transient"
+RENEW_REVOKED = "revoked"
+RENEW_UNAVAILABLE = "unavailable"  # bot not running, or nothing to rotate
+
+# A sync request that went out just before a renewal comes back M_UNKNOWN_TOKEN
+# (a 30 s long-poll plus slack). That error is about the *old* token and must not
+# trigger a second refresh with an already-rotated refresh token.
+TOKEN_ERROR_GRACE_SECONDS = 90
+TRANSIENT_RETRY_SECONDS = 30
+# nio retries a failing connection forever; a start that cannot reach the
+# homeserver must give up and let the health check try again instead of hanging.
+FIRST_SYNC_TIMEOUT_SECONDS = 120
+# How long stop() waits for an in-flight renewal to persist its rotated tokens.
+RENEWAL_DRAIN_SECONDS = 40
+
 # Lives under backend/data/, which is the one path already bind-mounted from the
 # host — the olm store MUST survive container rebuilds, or the bot comes back as
 # a brand-new device every deploy and loses access to every room key it was sent.
@@ -99,6 +117,12 @@ class AgentMatrixBotManager:
         self._overrides: Dict[str, dict] = {}
         self._response_modes: Dict[str, str] = {}
         self._credentials: Dict[str, dict] = {}
+        # One renewal at a time per binding. MAS rotates the refresh token on
+        # every use, so two concurrent refreshes (renewal loop, SyncError
+        # callback, health check) spend the same token and the loser used to
+        # mark a perfectly healthy binding failed — the multi-day "отвалы".
+        self._refresh_locks: Dict[str, asyncio.Lock] = {}
+        self._last_renewed_at: Dict[str, float] = {}
         self._pause_minutes: Dict[str, int] = {}
         # {binding_id: {room_id: unix_ts the pause expires at}} — the owner
         # typed in this room personally, so the bot backs off until then.
@@ -198,6 +222,7 @@ class AgentMatrixBotManager:
             decision = await asyncio.to_thread(
                 bot_access_gate.authorize,
                 binding_id, "matrix", room.room_id, event.body, event.sender, event.sender,
+                event_id=event.event_id or "",
             )
             if decision.action == bot_access_gate.IGNORE:
                 return
@@ -205,9 +230,10 @@ class AgentMatrixBotManager:
                 await _say(decision.reply_text)
                 return
 
+            from backend import inbox_routing
             from backend.database import get_subagent
 
-            subagent = get_subagent(subagent_id)
+            subagent = get_subagent(inbox_routing.effective_subagent_id(decision, subagent_id))
             if not subagent or not subagent.get("is_enabled"):
                 await _say(
                     bot_access_gate.AGENT_OFFLINE_MESSAGE
@@ -224,8 +250,8 @@ class AgentMatrixBotManager:
 
             session_id = decision.session_id or f"matrixbot:{binding_id}:{room.room_id}"
             try:
-                response_text = await agent_instance._respond_as_subagent(
-                    event.body, subagent, chat_id=session_id
+                response_text = await inbox_routing.respond_turn(
+                    decision, event.body, subagent, session_id
                 )
             except Exception:
                 logger.exception("Agent matrix bot %s: error handling message", binding_id)
@@ -365,37 +391,91 @@ class AgentMatrixBotManager:
         return callback
 
     async def refresh_binding_token(self, binding_id: str) -> bool:
+        """Back-compat wrapper: True if the live client now holds a working token."""
+        return await self.renew_token(binding_id) == RENEW_OK
+
+    async def renew_token(self, binding_id: str, seen_access_token: Optional[str] = None) -> str:
         """MAS-backed homeservers (matrix.senla.eu and every Element-hosted one)
         issue access tokens that expire within minutes by design. If this binding
         was created with a refreshable credential — the device-code login, or a
         password login that asked for a refresh token — exchange it for a fresh
         pair and hand it to the live client without dropping the sync loop.
-        Returns True if the sync loop can just keep going with the new token."""
-        client = self._clients.get(binding_id)
-        credentials = self._credentials.get(binding_id) or {}
-        if not client or not credentials.get("refresh_token"):
-            return False
 
+        `seen_access_token` is the token the caller found wanting. If another
+        renewal replaced it while this call waited for the lock, the job is
+        already done and the (rotated, now spent) refresh token is not reused.
+
+        Shielded: once the refresh request is out, MAS has rotated the refresh
+        token, so the result must be persisted even if the caller is cancelled
+        by a shutdown or reconnect — otherwise Valkey keeps a spent token and
+        the next start fails for good."""
+        credentials = self._credentials.get(binding_id) or {}
+        if binding_id not in self._clients or not credentials.get("refresh_token"):
+            return RENEW_UNAVAILABLE
+        return await asyncio.shield(self._renew_locked(binding_id, seen_access_token))
+
+    async def _renew_locked(self, binding_id: str, seen_access_token: Optional[str]) -> str:
+        from backend import channel_activity, matrix_oauth
+
+        lock = self._refresh_locks.setdefault(binding_id, asyncio.Lock())
+        async with lock:
+            client = self._clients.get(binding_id)
+            credentials = self._credentials.get(binding_id) or {}
+            if not client or not credentials.get("refresh_token"):
+                return RENEW_UNAVAILABLE
+            if seen_access_token and credentials.get("access_token") != seen_access_token:
+                return RENEW_OK
+
+            try:
+                updated = await asyncio.to_thread(matrix_oauth.refresh_credentials, credentials)
+            except matrix_oauth.MatrixTransientError as exc:
+                logger.warning("Agent matrix bot %s: token refresh postponed: %s", binding_id, exc)
+                return RENEW_TRANSIENT
+            except Exception as exc:
+                logger.error("Agent matrix bot %s: token refresh failed: %s", binding_id, exc)
+                return RENEW_REVOKED
+
+            # Valkey first: it is what the next start() reads, and the refresh
+            # token we just spent is no longer usable anywhere.
+            from backend.agent_messenger_governance import update_matrix_binding_credentials
+
+            try:
+                await asyncio.to_thread(update_matrix_binding_credentials, binding_id, updated)
+            except Exception:
+                logger.exception("Agent matrix bot %s: could not persist renewed Matrix token", binding_id)
+
+            if self._clients.get(binding_id) is client:
+                client.access_token = updated["access_token"]
+                self._credentials[binding_id] = updated
+            self._last_renewed_at[binding_id] = time.time()
+
+            channel_activity.record(binding_id, "matrix", "info", "Access token автоматически обновлён через refresh_token")
+            logger.info("Agent matrix bot %s: refreshed Matrix access token", binding_id)
+            return RENEW_OK
+
+    async def check_health(self, binding_id: str) -> str:
+        """Liveness probe used by the periodic health check. Runs against the
+        running bot's own in-memory token (Valkey can lag a renewal by a few
+        milliseconds) and goes through renew_token()'s lock, so it can never
+        race the renewal loop. Returns one of the RENEW_* outcomes."""
         from backend import matrix_oauth
 
+        credentials = self._credentials.get(binding_id)
+        if binding_id not in self._clients or not credentials:
+            return RENEW_UNAVAILABLE
+        token = credentials.get("access_token", "")
         try:
-            updated = await asyncio.to_thread(matrix_oauth.refresh_credentials, credentials)
-        except Exception as exc:
-            logger.error("Agent matrix bot %s: token refresh failed: %s", binding_id, exc)
-            return False
+            await asyncio.to_thread(matrix_oauth.whoami, credentials["homeserver_url"], token)
+            return RENEW_OK
+        except matrix_oauth.MatrixTransientError as exc:
+            logger.warning("Agent matrix bot %s: health check could not reach Matrix: %s", binding_id, exc)
+            return RENEW_TRANSIENT
+        except Exception:
+            outcome = await self.renew_token(binding_id, seen_access_token=token)
+            return RENEW_REVOKED if outcome == RENEW_UNAVAILABLE else outcome
 
-        client.access_token = updated["access_token"]
-        self._credentials[binding_id] = updated
-
-        from backend.agent_messenger_governance import update_matrix_binding_credentials
-
-        await asyncio.to_thread(update_matrix_binding_credentials, binding_id, updated)
-
-        from backend import channel_activity
-
-        channel_activity.record(binding_id, "matrix", "info", "Access token автоматически обновлён через refresh_token")
-        logger.info("Agent matrix bot %s: refreshed Matrix access token", binding_id)
-        return True
+    def is_running(self, binding_id: str) -> bool:
+        return binding_id in self._clients
 
     def _make_renewal_loop(self, binding_id: str):
         """Renews the access token slightly *before* the homeserver expires it.
@@ -413,22 +493,45 @@ class AgentMatrixBotManager:
                 if delay is None:  # no expiry advertised — nothing to pre-empt
                     return
                 await asyncio.sleep(delay)
-                if binding_id not in self._clients:
+                current = self._credentials.get(binding_id)
+                if binding_id not in self._clients or current is None:
                     return
-                if not await self.refresh_binding_token(binding_id):
+                if current.get("access_token") != credentials.get("access_token"):
+                    continue  # someone else renewed while we slept
+                outcome = await self.renew_token(binding_id, seen_access_token=credentials.get("access_token"))
+                if outcome != RENEW_OK:
                     # Keep trying until the token actually dies; the SyncError
                     # callback is what turns a truly dead session into a visible
                     # failure, and it also clears the state this loop reads.
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(TRANSIENT_RETRY_SECONDS)
 
         return loop
+
+    def _forget_runtime_state(self, binding_id: str) -> None:
+        self._clients.pop(binding_id, None)
+        self._tasks.pop(binding_id, None)
+        renewal = self._renewals.pop(binding_id, None)
+        if renewal:
+            renewal.cancel()
+        self._allowed_room_ids.pop(binding_id, None)
+        self._overrides.pop(binding_id, None)
+        self._response_modes.pop(binding_id, None)
+        self._credentials.pop(binding_id, None)
+        self._pause_minutes.pop(binding_id, None)
+        self._human_active_until.pop(binding_id, None)
+        self._last_renewed_at.pop(binding_id, None)
 
     def _make_sync_error_callback(self, binding_id: str):
         """Matrix access tokens can die mid-flight (e.g. short-lived tokens
         issued by an OIDC/MAS-backed homeserver) without nio ever raising —
         sync_forever just silently retries the same failing request forever.
         This turns that into a loud, visible failure instead — unless a
-        refresh_token lets us quietly renew and keep the sync loop running."""
+        refresh_token lets us quietly renew and keep the sync loop running.
+
+        Only a refresh the homeserver actually *refused* is fatal. A network
+        error or 5xx while renewing just slows the loop down and tries again:
+        nio calls this callback from inside sync(), so sleeping here throttles
+        sync_forever instead of letting it hammer the server."""
         async def callback(response: SyncError) -> None:
             status = getattr(response, "status_code", None)
             if status not in ("M_UNKNOWN_TOKEN", "M_MISSING_TOKEN", "M_FORBIDDEN"):
@@ -437,8 +540,25 @@ class AgentMatrixBotManager:
             if not client:
                 return
 
+            if time.time() - self._last_renewed_at.get(binding_id, 0) < TOKEN_ERROR_GRACE_SECONDS:
+                # This sync most likely went out with the token that was just
+                # replaced; the next one carries the new token.
+                await asyncio.sleep(2)
+                return
+
             credentials = self._credentials.get(binding_id) or {}
-            if await self.refresh_binding_token(binding_id):
+            outcome = await self.renew_token(binding_id, seen_access_token=client.access_token)
+            if outcome == RENEW_OK:
+                return
+
+            from backend import channel_activity
+
+            if outcome == RENEW_TRANSIENT:
+                channel_activity.record(
+                    binding_id, "matrix", "warning",
+                    "Matrix временно недоступен — токен продлить не удалось, повторю через 30 секунд",
+                )
+                await asyncio.sleep(TRANSIENT_RETRY_SECONDS)
                 return
 
             had_refresh_token = bool(credentials.get("refresh_token"))
@@ -455,19 +575,7 @@ class AgentMatrixBotManager:
             # from inside this callback — we're on that same task's call stack).
             # Without this, start()'s "if binding_id in self._clients: return"
             # guard would silently refuse every future retry/reconnect attempt.
-            self._clients.pop(binding_id, None)
-            self._tasks.pop(binding_id, None)
-            renewal = self._renewals.pop(binding_id, None)
-            if renewal:
-                renewal.cancel()
-            self._allowed_room_ids.pop(binding_id, None)
-            self._overrides.pop(binding_id, None)
-            self._response_modes.pop(binding_id, None)
-            self._credentials.pop(binding_id, None)
-            self._pause_minutes.pop(binding_id, None)
-            self._human_active_until.pop(binding_id, None)
-
-            from backend import channel_activity
+            self._forget_runtime_state(binding_id)
 
             channel_activity.record(binding_id, "matrix", "error", reason)
 
@@ -513,21 +621,41 @@ class AgentMatrixBotManager:
 
         # Establish a sync token before subscribing so history predating this binding
         # never gets replayed through the agent.
-        first_sync = await client.sync(timeout=30000, full_state=True)
-        if isinstance(first_sync, SyncError):
+        from backend.matrix_oauth import MatrixTransientError
+
+        async def first_sync_or_give_up():
+            try:
+                return await asyncio.wait_for(
+                    client.sync(timeout=30000, full_state=True), timeout=FIRST_SYNC_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError as exc:
+                await client.close()
+                raise MatrixTransientError("Matrix не ответил на первую синхронизацию") from exc
+
+        first_sync = await first_sync_or_give_up()
+        if isinstance(first_sync, SyncError) and first_sync.status_code in ("M_UNKNOWN_TOKEN", "M_MISSING_TOKEN"):
             # A MAS access token can easily have expired between the approval and
             # this start (they live minutes) — renew once before declaring the
             # whole binding dead.
             self._clients[binding_id] = client
             self._credentials[binding_id] = dict(credentials)
-            renewed = await self.refresh_binding_token(binding_id)
+            outcome = await self.renew_token(binding_id, seen_access_token=credentials.get("access_token"))
             credentials = self._credentials.pop(binding_id, credentials)
             self._clients.pop(binding_id, None)
-            if renewed:
-                first_sync = await client.sync(timeout=30000, full_state=True)
-            if isinstance(first_sync, SyncError):
+            self._last_renewed_at.pop(binding_id, None)
+            if outcome == RENEW_TRANSIENT:
                 await client.close()
+                raise MatrixTransientError("Matrix недоступен — не удалось продлить токен при запуске")
+            if outcome == RENEW_OK:
+                client.access_token = credentials["access_token"]
+                first_sync = await first_sync_or_give_up()
+        if isinstance(first_sync, SyncError):
+            await client.close()
+            if first_sync.status_code in ("M_UNKNOWN_TOKEN", "M_MISSING_TOKEN", "M_FORBIDDEN"):
                 raise RuntimeError(f"Matrix rejected these credentials: {first_sync.status_code} {first_sync.message}")
+            # No errcode: a 5xx/proxy page — the homeserver is having a bad
+            # moment, which says nothing about the credential.
+            raise MatrixTransientError(f"Matrix ответил ошибкой: {first_sync.status_code} {first_sync.message}")
 
         self._clients[binding_id] = client
         self._allowed_room_ids[binding_id] = list(allowed_room_ids or [])
@@ -552,6 +680,16 @@ class AgentMatrixBotManager:
         self._response_modes[binding_id] = response_mode
 
     async def stop(self, binding_id: str) -> None:
+        # Let an in-flight renewal finish persisting the rotated tokens first. A
+        # reconnect writes new credentials to Valkey right after stop(); a late
+        # renewal landing after that would overwrite them with a stale session.
+        lock = self._refresh_locks.get(binding_id)
+        if lock is not None and lock.locked():
+            try:
+                await asyncio.wait_for(lock.acquire(), timeout=RENEWAL_DRAIN_SECONDS)
+                lock.release()
+            except asyncio.TimeoutError:
+                logger.warning("Agent matrix bot %s: stopping while a token renewal is still running", binding_id)
         task = self._tasks.pop(binding_id, None)
         renewal = self._renewals.pop(binding_id, None)
         client = self._clients.pop(binding_id, None)
@@ -561,6 +699,7 @@ class AgentMatrixBotManager:
         self._credentials.pop(binding_id, None)
         self._pause_minutes.pop(binding_id, None)
         self._human_active_until.pop(binding_id, None)
+        self._last_renewed_at.pop(binding_id, None)
         if renewal:
             renewal.cancel()
         if task:
@@ -600,6 +739,17 @@ class AgentMatrixBotManager:
                     binding["id"], _clean_pause_minutes(binding.get("human_takeover_pause_minutes"))
                 )
             except Exception as exc:
+                from backend.matrix_oauth import MatrixTransientError
+
+                if isinstance(exc, MatrixTransientError):
+                    # Homeserver unreachable right now (often exactly while we
+                    # redeploy). Leave the binding active — the periodic health
+                    # check starts it once Matrix answers again.
+                    logger.warning("Agent matrix bot %s: start postponed: %s", binding["id"], exc)
+                    from backend import channel_activity
+
+                    channel_activity.record(binding["id"], "matrix", "warning", f"Запуск отложен: {exc}")
+                    continue
                 logger.exception("Failed to start agent matrix bot %s at startup", binding["id"])
                 # Without this the binding stays 'active' in the DB/UI while its
                 # bot never actually started — indistinguishable from "working

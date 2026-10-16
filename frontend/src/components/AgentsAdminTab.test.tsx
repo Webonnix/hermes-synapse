@@ -533,3 +533,71 @@ describe('AgentsAdminTab — AI Router section', () => {
     });
   });
 });
+
+describe('AgentsAdminTab — the new-agent form', () => {
+  const localModels = [
+    { id: 'unsloth-mtp-q4km:latest', name: 'unsloth-mtp-q4km:latest' },
+    { id: 'qwen-mtp:latest', name: 'qwen-mtp:latest' },
+  ];
+
+  it('names the required fields that are still empty', async () => {
+    stubFetch({});
+    render(<AgentsAdminTab agents={[]} models={localModels} fetchAgents={() => {}} t={t} />);
+
+    // The whole complaint: the button did nothing and nothing said why. The
+    // system prompt sits three screens below the ID and Name it is grouped
+    // with, so "what is missing" has to be readable next to the button.
+    expect(await screen.findByText(/Не заполнено:/)).toHaveTextContent('ID');
+    expect(screen.getByText(/Не заполнено:/)).toHaveTextContent('Name');
+  });
+
+  it('leaves the button clickable so the browser can point at the empty field', async () => {
+    stubFetch({});
+    render(<AgentsAdminTab agents={[]} models={localModels} fetchAgents={() => {}} t={t} />);
+
+    // A disabled submit button also suppresses `required` validation, so the
+    // native "fill this in" bubble never appeared either.
+    expect(await screen.findByRole('button', { name: new RegExp(t('saveAgent'), 'i') })).toBeEnabled();
+  });
+
+  it('stops warning once every required field is filled', async () => {
+    stubFetch({});
+    render(<AgentsAdminTab agents={[]} models={localModels} fetchAgents={() => {}} t={t} />);
+
+    fireEvent.change(await screen.findByLabelText(/^ID/), { target: { value: 'my-agent' } });
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'My Agent' } });
+    fireEvent.change(screen.getByLabelText(new RegExp(`^${t('instructions')}`)),
+      { target: { value: 'Ты помощник.' } });
+
+    await waitFor(() => expect(screen.queryByText(/Не заполнено:/)).not.toBeInTheDocument());
+  });
+
+  it('defaults a new agent to a model the box actually serves', async () => {
+    stubFetch({});
+    render(<AgentsAdminTab agents={[]} models={localModels} fetchAgents={() => {}} t={t} />);
+
+    // It used to default to a hardcoded 'qwen3:8b' that this deployment
+    // stopped serving long ago, so a new agent was born pointing at a model
+    // the local server does not serve and only failed at its first real call.
+    await waitFor(() => {
+      const selects = Array.from(document.querySelectorAll('select')) as HTMLSelectElement[];
+      expect(selects.some(s => s.value === 'unsloth-mtp-q4km:latest')).toBe(true);
+    });
+    expect(screen.queryByRole('option', { name: 'qwen3:8b' })).not.toBeInTheDocument();
+  });
+
+  it('labels a configured model the local server no longer serves instead of hiding it', async () => {
+    stubFetch({});
+    const stale = { id: 'stale', name: 'Stale', system_prompt: 'x', model: 'qwen3:8b',
+      agent_type: 'agent', role: 'Specialist', status: 'idle', is_enabled: true,
+      model_provider: 'local', model_type: 'local', skills: '', temperature: 0.7,
+      model_params: {}, allowed_provider_ids: [], budget_fallback_to_local: false };
+    render(<AgentsAdminTab agents={[stale as never]} models={localModels} fetchAgents={() => {}} t={t} />);
+
+    fireEvent.click(await screen.findByTitle(t('editAgent')));
+    // Kept selectable — snapping the agent onto a different model on save would
+    // be worse — but named for what it is.
+    expect(await screen.findByRole('option', { name: 'qwen3:8b' })).toBeInTheDocument();
+    expect(document.querySelector('optgroup[label="настроено сейчас (нет на локальном сервере)"]')).toBeTruthy();
+  });
+});

@@ -57,14 +57,53 @@ def test_provider_pricing_override_partial_falls_back_to_guess(monkeypatch):
     assert get_rates("google/gemini-2.5-pro", provider_id="prov-x") == (0.075, 0.30)
 
 
-def test_ollama_provider_id_never_overridden(monkeypatch):
+def test_local_provider_id_never_overridden(monkeypatch):
     monkeypatch.setattr(
         "backend.provider_governance.get_binding",
-        lambda binding_id: pytest.fail("get_binding should never be queried for 'ollama'"),
+        lambda binding_id: pytest.fail("get_binding should never be queried for the local model"),
     )
-    assert get_rates("qwen3:8b", provider_id="ollama") == (0.075, 0.30)
+    assert get_rates("qwen3:8b", provider_id="local") == (0.075, 0.30)
 
 
 def test_missing_binding_falls_back_to_guess(monkeypatch):
     monkeypatch.setattr("backend.provider_governance.get_binding", lambda binding_id: None)
     assert get_rates("google/gemini-2.5-pro", provider_id="prov-ghost") == (0.075, 0.30)
+
+
+# ── Router-namespaced model ids ──────────────────────────────────────────────
+# A router serves everything as `<provider>/<model>`; before _match_key existed
+# the substring table never saw the model half and every routed call silently
+# fell through to _DEFAULT_RATES.
+
+def test_router_namespaced_model_prices_like_the_bare_one():
+    assert get_rates("ds/deepseek-chat") == get_rates("deepseek-chat")
+    assert get_rates("ds/deepseek-reasoner") == (0.55, 2.19)
+
+
+def test_router_namespace_is_stripped_not_matched():
+    # "ag/" must not be able to influence the match; only the model half counts.
+    assert get_rates("ag/claude-opus-4-6-thinking") == (15.00, 75.00)
+    assert get_rates("ag/claude-sonnet-4-6") == (3.00, 15.00)
+
+
+def test_minor_version_families_are_priced():
+    # The vendor ships a new minor version every few weeks and the router adds
+    # an effort suffix; both must land on the family price rather than default.
+    assert get_rates("ag/gemini-3.7-flash-low") == (0.30, 2.50)
+    assert get_rates("ag/gemini-3.5-flash-extra-low") == (0.30, 2.50)
+    assert get_rates("ag/gemini-3.1-pro-low") == (1.25, 10.00)
+    assert get_rates("ag/gemini-pro-agent") == (1.25, 10.00)
+
+
+def test_flash_lite_is_cheaper_than_flash():
+    # Ordering in _PRICING_PATTERNS matters: "flash-lite" also contains "flash".
+    assert get_rates("gemini-3.1-flash-lite-preview") == (0.10, 0.40)
+
+
+def test_dot_and_dash_spellings_agree():
+    assert get_rates("gemini-3-1-pro") == get_rates("gemini-3.1-pro")
+
+
+def test_family_matches_count_as_priced():
+    assert is_model_priced("ag/gemini-3.7-flash-low") is True
+    assert is_model_priced("ag/some-model-nobody-listed") is False

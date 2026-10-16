@@ -46,7 +46,7 @@ export const parseInline = (text: string): React.ReactNode[] => {
           style={{ 
             color: 'var(--accent-cyan)', 
             textDecoration: 'none', 
-            borderBottom: '1px dashed rgba(0, 240, 255, 0.4)',
+            borderBottom: '1px dashed rgba(157, 166, 181, 0.28)',
             paddingBottom: '1px',
             cursor: 'pointer',
             transition: 'all 0.2s',
@@ -58,7 +58,7 @@ export const parseInline = (text: string): React.ReactNode[] => {
           }}
           onMouseOut={(e) => {
             e.currentTarget.style.color = 'var(--accent-cyan)';
-            e.currentTarget.style.borderBottomColor = 'rgba(0, 240, 255, 0.4)';
+            e.currentTarget.style.borderBottomColor = 'rgba(157, 166, 181, 0.28)';
             e.currentTarget.style.textShadow = 'none';
           }}
         >
@@ -165,14 +165,14 @@ export const renderMarkdown = (text: string) => {
             key={`code-${i}`} 
             style={{
               backgroundColor: 'rgba(0, 0, 0, 0.4)',
-              border: '1px solid rgba(0, 240, 255, 0.15)',
+              border: '1px solid rgba(157, 166, 181, 0.105)',
               borderRadius: '8px',
               padding: '12px',
               margin: '12px 0',
               overflowX: 'auto',
               fontFamily: 'var(--font-mono)',
               fontSize: '0.85rem',
-              color: '#d4d4d4',
+              color: '#cfd4dd',
               position: 'relative'
             }}
           >
@@ -237,10 +237,10 @@ export const renderMarkdown = (text: string) => {
         const rows = dataRows.map(r => parseRowCells(r));
         
         elements.push(
-          <div key={`table-wrapper-${i}`} style={{ overflowX: 'auto', margin: '12px 0', border: '1px solid rgba(0, 240, 255, 0.15)', borderRadius: '8px' }}>
+          <div key={`table-wrapper-${i}`} style={{ overflowX: 'auto', margin: '12px 0', border: '1px solid rgba(157, 166, 181, 0.105)', borderRadius: '8px' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem', fontFamily: 'var(--font-mono)' }}>
               <thead>
-                <tr style={{ backgroundColor: 'rgba(0, 240, 255, 0.08)', borderBottom: '1px solid rgba(0, 240, 255, 0.2)' }}>
+                <tr style={{ backgroundColor: 'rgba(94, 225, 255, 0.08)', borderBottom: '1px solid rgba(157, 166, 181, 0.14)' }}>
                   {headers.map((h, idx) => (
                     <th key={idx} style={{ padding: '8px 12px', textAlign: 'left', fontWeight: 600, color: 'var(--accent-cyan)' }}>
                       {parseInline(h)}
@@ -253,12 +253,12 @@ export const renderMarkdown = (text: string) => {
                   <tr 
                     key={rIdx} 
                     style={{ 
-                      backgroundColor: rIdx % 2 === 0 ? 'rgba(255, 255, 255, 0.01)' : 'rgba(0, 240, 255, 0.02)',
+                      backgroundColor: rIdx % 2 === 0 ? 'rgba(255, 255, 255, 0.01)' : 'rgba(94, 225, 255, 0.02)',
                       borderBottom: rIdx === rows.length - 1 ? 'none' : '1px solid rgba(255, 255, 255, 0.03)' 
                     }}
                   >
                     {row.map((cell, cIdx) => (
-                      <td key={cIdx} style={{ padding: '8px 12px', color: '#e2e8f0' }}>
+                      <td key={cIdx} style={{ padding: '8px 12px', color: '#e4e8ed' }}>
                         {parseInline(cell)}
                       </td>
                     ))}
@@ -320,7 +320,7 @@ export const renderMarkdown = (text: string) => {
                 fontWeight: 600, 
                 color: '#ffffff', 
                 margin,
-                borderBottom: level === 1 ? '1px solid rgba(0, 240, 255, 0.2)' : 'none',
+                borderBottom: level === 1 ? '1px solid rgba(157, 166, 181, 0.14)' : 'none',
                 paddingBottom: level === 1 ? '4px' : '0'
               }}
             >
@@ -446,22 +446,24 @@ export const stopAlarmSound = () => {
 // Global Fetch Interceptor to automatically add Auth headers and capture 401s
 export const initFetchInterceptor = () => {
   const originalFetch = window.fetch;
+  if ((originalFetch as any).__hermesAuth) return;
   (window as any).fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-    const token = localStorage.getItem('jarvis_auth_token');
     const urlStr = typeof input === 'string' ? input : (input instanceof URL ? input.toString() : (input as Request).url);
-    
-    if (token && !urlStr.includes('/api/auth/')) {
-      init = init || {};
-      const headers = init.headers ? { ...init.headers } : {};
-      (headers as any)['Authorization'] = `Bearer ${token}`;
-      init.headers = headers;
+    const url = new URL(urlStr, window.location.href);
+    const protectedApi = url.origin === window.location.origin && url.pathname.startsWith('/api/') && !url.pathname.startsWith('/api/auth/');
+    const token = protectedApi ? localStorage.getItem('vexa_auth_token') : null;
+    if (token) {
+      const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+      headers.set('Authorization', `Bearer ${token}`);
+      init = { ...init, headers };
     }
     
     const res = await originalFetch(input, init);
-    if (res.status === 401 && !urlStr.includes('/api/auth/')) {
-      localStorage.removeItem('jarvis_auth_token');
-      window.dispatchEvent(new Event('jarvis-unauthorized'));
+    if (res.status === 401 && protectedApi) {
+      localStorage.removeItem('vexa_auth_token');
+      window.dispatchEvent(new Event('vexa-unauthorized'));
     }
     return res;
   };
+  (window.fetch as any).__hermesAuth = true;
 };

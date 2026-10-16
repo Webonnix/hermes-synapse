@@ -3,7 +3,7 @@
 Three principals, each strictly narrower than the one above it:
 
 ``owner``
-    Vexa (the main ``jarvis`` agent) driven by the owner through the
+    Vexa (the main agent, id ``vexa``) driven by the owner through the
     authenticated dashboard or the owner-gated Telegram bot (backend/bot.py's
     ``_is_allowed_chat``/``admin_only``). Keeps the full tool set, but the
     host-shell guard below still applies — "разрешения, но ограниченные".
@@ -44,7 +44,17 @@ PRINCIPALS = (OWNER, SUBAGENT, PUBLIC_CHANNEL)
 # The main agent. Only the owner talks to it (dashboard session auth, or the
 # admin-gated Telegram bot) — messenger bindings and access tokens refuse to
 # target these ids, see backend/bot_access.py and agent_messenger_governance.py.
-MAIN_AGENT_IDS = frozenset({"jarvis", "vexa"})
+#
+# ``MAIN_AGENT_ID`` is the canonical primary-key id: new installs seed it, and
+# every new write (runtime state, event logs, budgets, task assignees) uses it.
+# ``LEGACY_MAIN_AGENT_ID`` is the pre-2026-08 id — existing production rows are
+# rewritten to the canonical id by database._rename_main_agent_row() +
+# _cascade_main_agent_id() on startup, but the legacy id stays permanently
+# recognised here so any lingering reference or un-migrated row still resolves
+# to "the main agent".
+MAIN_AGENT_ID = "vexa"
+LEGACY_MAIN_AGENT_ID = "jarvis"
+MAIN_AGENT_IDS = frozenset({MAIN_AGENT_ID, LEGACY_MAIN_AGENT_ID})
 
 # ── Tools that act on the server / the owner's infrastructure ────────────────
 # Denied to every principal except the owner. These either execute code on the
@@ -67,12 +77,23 @@ SERVER_ACTION_TOOLS: Set[str] = {
     "git_commit",
     "git_push",
     "create_subagent",
+    # Autonomous development. start_dev_run spends hours of the owner's GPU and
+    # publishes to the owner's public /demo/ path; list_dev_runs exposes every
+    # brief on the board. Both sit here rather than in OWNER_PRIVATE_TOOLS,
+    # which only fences off public channels — a sub-agent must not be able to
+    # spawn dev-runs recursively either. (The executor's own DEV_RUN_TOOLS
+    # deliberately omits start_dev_run for the same reason.)
+    "start_dev_run",
+    "list_dev_runs",
     "request_capability",
     "request_mcp_connection",
     "sync_obsidian_vault",
     # Drives a real browser against arbitrary third-party sites with the
     # owner's egress — an action on infrastructure, not a lookup.
     "browser_task",
+    # Places a paid phone call in the business's name. Only the owner's own agent
+    # may start one; a caller's agent could otherwise dial out on the owner's bill.
+    "phone_call",
 }
 
 # ── Tools that read or write the owner's personal data ───────────────────────
@@ -108,6 +129,15 @@ PUBLIC_CHANNEL_TOOLS: Set[str] = {
     "get_weather",
     "get_market_prices",
     "get_rss_digest",
+    # The one write a stranger's agent may make: a callback request into *this*
+    # conversation's own inbox record. It cannot read anything back out.
+    "take_message",
+    # Scoped to the caller's own live call (backend/phone_context.py): end it,
+    # transfer it, see free/busy windows (never event contents), request a meeting.
+    "phone_end_call",
+    "phone_transfer_to_owner",
+    "calendar_free_slots",
+    "propose_meeting",
 }
 
 # Costs real money per call. A plan must name these explicitly in its

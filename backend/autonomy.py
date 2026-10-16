@@ -767,9 +767,8 @@ async def build_plan_llm(goal: str, root: Optional[str] = None) -> dict[str, Any
                 temperature=0.1,
                 provider_options={
                     "provider": agent_instance.provider,
-                    "num_ctx": agent_instance.ollama_num_ctx,
-                    "keep_alive": agent_instance.ollama_keep_alive,
-                    "think": agent_instance.ollama_think,
+                    "num_ctx": agent_instance.local_num_ctx,
+                    "think": agent_instance.local_think,
                 },
             )
             raw = (response.content or "").strip()

@@ -907,12 +907,21 @@ async def update_binding_settings(
     human_takeover_pause_minutes: Optional[int] = None,
     escalation_enabled: Optional[bool] = None,
     handling_menu_enabled: Optional[bool] = None,
+    model_override: Optional[str] = None,
+    model_provider_override: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Edits an existing binding's per-channel prompt and/or response mode in
-    place. Doesn't touch the bot token/credential or require a new owner
+    """Edits an existing binding's per-channel prompt, response mode and model
+    in place. Doesn't touch the bot token/credential or require a new owner
     approval — that gate is for granting the capability in the first place,
     not for tuning tone or flipping between draft/auto-labeled afterwards.
-    Applies immediately to the live bot if it's currently running."""
+    Applies immediately to the live bot if it's currently running.
+
+    The model pair was writable only at creation until now, and the connect
+    form never sent it — so a channel was pinned to whatever its agent used, for
+    life, and moving one channel to an external model meant editing the table by
+    hand. It is not a new capability: every runtime here has always read these
+    two columns (see the `overrides` dict below), and the provider itself is
+    still an already-approved `provider_bindings` row."""
     with _connect() as connection:
         row = connection.execute("SELECT * FROM agent_messenger_bindings WHERE id = ?", (binding_id,)).fetchone()
     if not row:
@@ -945,6 +954,23 @@ async def update_binding_settings(
         updates["escalation_enabled"] = 1 if escalation_enabled else 0
     if handling_menu_enabled is not None:
         updates["handling_menu_enabled"] = 1 if handling_menu_enabled else 0
+    if model_override is not None:
+        updates["model_override"] = model_override.strip()[:200] or None
+    if model_provider_override is not None:
+        clean_provider = model_provider_override.strip()
+        # '' clears the override (the channel goes back to its agent's own
+        # provider); 'local' pins it to the free local model; anything else
+        # must name a binding that is approved *and* still active, so a revoked
+        # provider cannot be smuggled back in through a channel edit.
+        from backend.llamacpp_client import is_local_provider_id
+
+        if clean_provider and not is_local_provider_id(clean_provider):
+            from backend.provider_governance import get_binding
+
+            provider_binding = get_binding(clean_provider)
+            if not provider_binding or provider_binding["status"] != "active":
+                raise ValueError(f"Unknown or inactive provider binding: {clean_provider}")
+        updates["model_provider_override"] = clean_provider or None
     if default_plan_id is not None:
         clean_plan_id = default_plan_id.strip() or None
         if clean_plan_id:
@@ -2295,6 +2321,65 @@ async def reconnect_social_binding(binding_id: str, credentials: dict[str, Any])
     return await _reconnect_binding(binding_id, platform, clean, identity, json.dumps(clean))
 
 
+async def _health_check_matrix_binding(binding: dict[str, Any]) -> None:
+    """Matrix gets its own sweep, because on a MAS homeserver the stored token
+    is *expected* to be dead minutes after it was written, and because the old
+    generic path used to kill healthy channels in two ways:
+
+    * it verified the Valkey copy of the token and then refreshed on its own,
+      racing the bot's renewal loop for the same single-use refresh token;
+    * a network blip or a 5xx from the homeserver counted as a dead credential.
+
+    Now the running bot checks itself under its renewal lock, only a refresh the
+    server actually refused fails the binding, and a binding that is active but
+    not running (its start was postponed by an outage) gets started again."""
+    from backend import agent_matrix_bot, channel_activity
+    from backend.matrix_oauth import MatrixTransientError
+
+    manager = agent_matrix_bot.manager
+    binding_id = binding["id"]
+
+    if manager.is_running(binding_id):
+        outcome = await manager.check_health(binding_id)
+        if outcome in (agent_matrix_bot.RENEW_OK, agent_matrix_bot.RENEW_TRANSIENT):
+            if outcome == agent_matrix_bot.RENEW_TRANSIENT:
+                channel_activity.record(
+                    binding_id, "matrix", "warning", "Плановая проверка: Matrix временно недоступен, канал не трогаю",
+                )
+            return
+        reason = "Плановая проверка связи не прошла: Matrix отклонил токен, продлить его не удалось. Переподключите канал."
+        mark_binding_failed(binding_id, reason)
+        channel_activity.record(binding_id, "matrix", "error", reason)
+        await manager.stop(binding_id)
+        return
+
+    credentials = resolve_matrix_binding_credentials(binding_id)
+    if not credentials:
+        return
+    overrides = {
+        "system_prompt": binding.get("system_prompt_override"),
+        "model": binding.get("model_override"),
+        "model_provider": binding.get("model_provider_override"),
+    }
+    allowed = binding.get("allowed_chat_ids")
+    if isinstance(allowed, str):
+        allowed = json.loads(allowed or "[]")
+    try:
+        await manager.start(
+            binding_id, binding["subagent_id"], credentials, allowed, overrides,
+            _clean_response_mode(binding.get("response_mode")),
+        )
+        manager.set_human_takeover_pause(binding_id, _clean_pause_minutes(binding.get("human_takeover_pause_minutes")))
+        channel_activity.record(binding_id, "matrix", "info", "Канал снова запущен после недоступности Matrix")
+    except MatrixTransientError as exc:
+        channel_activity.record(binding_id, "matrix", "warning", f"Запуск снова отложен: {exc}")
+    except Exception as exc:
+        logger.exception("Health check could not restart matrix bot %s", binding_id)
+        reason = f"Плановая проверка связи не прошла: {exc}"
+        mark_binding_failed(binding_id, reason)
+        channel_activity.record(binding_id, "matrix", "error", reason)
+
+
 async def health_check_all_active() -> None:
     """Periodic liveness probe for every active binding across all 5 platforms
     — catches a dead credential (an expired Matrix token, a revoked bot token)
@@ -2333,20 +2418,15 @@ async def health_check_all_active() -> None:
         for binding in list_fn():
             if binding.get("status") != "active":
                 continue
+            if platform == "matrix":
+                await _health_check_matrix_binding(binding)
+                continue
             credential = resolve_fn(binding["id"])
             if not credential:
                 continue
             try:
                 await asyncio.to_thread(verify_fn, credential)
             except Exception as exc:
-                # A MAS-issued Matrix token expires every few minutes by design,
-                # so "the stored token is dead" is normal here and only means
-                # trouble if renewing it also fails.
-                if platform == "matrix":
-                    from backend import agent_matrix_bot
-
-                    if await agent_matrix_bot.manager.refresh_binding_token(binding["id"]):
-                        continue
                 reason = f"Плановая проверка связи не прошла: {exc}"
                 mark_binding_failed(binding["id"], reason)
                 channel_activity.record(binding["id"], platform, "error", reason)

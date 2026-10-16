@@ -52,7 +52,7 @@ def test_plaintext_is_returned_once_and_never_stored(access_db, plan):
 
 def test_tokens_cannot_target_the_main_agent(access_db):
     with pytest.raises(ValueError, match="main agent"):
-        bot_access.issue_token(binding_id="bind-1", subagent_id="jarvis")
+        bot_access.issue_token(binding_id="bind-1", subagent_id="vexa")
 
 
 def test_bulk_issue_produces_distinct_tokens(access_db, plan):
@@ -347,9 +347,9 @@ def test_a_plan_cannot_be_assigned_to_an_unknown_agent(access_db):
 
 
 def test_a_plan_cannot_be_assigned_to_the_main_agent(access_db):
-    database.save_subagent(id="jarvis", name="Vexa", system_prompt="", model="llama3")
+    database.save_subagent(id="vexa", name="Vexa", system_prompt="", model="llama3")
     with pytest.raises(ValueError, match="main agent"):
-        bot_access.create_plan(name="Для векса", subagent_id="jarvis")
+        bot_access.create_plan(name="Для векса", subagent_id="vexa")
 
 
 def test_updating_a_plan_can_assign_and_then_clear_the_agent(access_db, plan):

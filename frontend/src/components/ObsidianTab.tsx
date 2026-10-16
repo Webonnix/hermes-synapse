@@ -134,9 +134,9 @@ export function ObsidianTab({ authToken }: ObsidianTabProps) {
   const panelBtnStyle = (active: boolean): React.CSSProperties => ({
     padding: '8px 16px', borderRadius: '8px', border: 'none', cursor: 'pointer', fontSize: '0.82rem',
     fontWeight: 600, transition: 'all 0.2s',
-    background: active ? 'rgba(0,240,255,0.15)' : 'rgba(255,255,255,0.05)',
+    background: active ? 'rgba(94,225,255,0.15)' : 'rgba(255,255,255,0.05)',
     color: active ? 'var(--accent-cyan)' : 'var(--text-secondary)',
-    boxShadow: active ? '0 0 10px rgba(0,240,255,0.1)' : 'none',
+    boxShadow: active ? '0 0 10px rgba(94,225,255,0.05)' : 'none',
   });
 
   return (
@@ -159,11 +159,11 @@ export function ObsidianTab({ authToken }: ObsidianTabProps) {
           gap: '8px',
           padding: '8px 16px',
           borderRadius: '20px',
-          background: status?.reachable ? 'rgba(0,255,160,0.08)' : 'rgba(255,60,60,0.08)',
-          border: `1px solid ${status?.reachable ? 'rgba(0,255,160,0.25)' : 'rgba(255,60,60,0.25)'}`,
+          background: status?.reachable ? 'rgba(53,212,154,0.08)' : 'rgba(240,93,117,0.08)',
+          border: `1px solid ${status?.reachable ? 'rgba(53,212,154,0.25)' : 'rgba(240,93,117,0.25)'}`,
         }}>
-          {status?.reachable ? <Wifi size={14} style={{ color: '#00ffa0' }} /> : <WifiOff size={14} style={{ color: '#ff4040' }} />}
-          <span style={{ fontSize: '0.78rem', color: status?.reachable ? '#00ffa0' : '#ff6060' }}>
+          {status?.reachable ? <Wifi size={14} style={{ color: '#35d49a' }} /> : <WifiOff size={14} style={{ color: '#f05d75' }} />}
+          <span style={{ fontSize: '0.78rem', color: status?.reachable ? '#35d49a' : '#f05d75' }}>
             {status ? status.message : 'Checking...'}
           </span>
           <button type="button" onClick={fetchStatus} aria-label="Refresh status" title="Refresh status" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-dim)', padding: 0 }}>
@@ -176,8 +176,8 @@ export function ObsidianTab({ authToken }: ObsidianTabProps) {
       <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
         {[
           { label: 'Notes in Vault', value: notes.length, color: 'var(--accent-cyan)' },
-          { label: 'Indexed', value: indexedCount, color: '#00ffa0' },
-          { label: 'Tools', value: 4, color: '#a78bfa' },
+          { label: 'Indexed', value: indexedCount, color: '#35d49a' },
+          { label: 'Tools', value: 4, color: '#b197ff' },
         ].map(({ label, value, color }) => (
           <div key={label} style={{
             flex: 1, minWidth: '140px', padding: '14px 18px', borderRadius: '12px',
@@ -192,8 +192,8 @@ export function ObsidianTab({ authToken }: ObsidianTabProps) {
           disabled={syncing}
           style={{
             display: 'flex', alignItems: 'center', gap: '8px',
-            padding: '14px 22px', borderRadius: '12px', border: '1px solid rgba(0,240,255,0.25)',
-            background: 'rgba(0,240,255,0.05)', color: 'var(--accent-cyan)',
+            padding: '14px 22px', borderRadius: '12px', border: '1px solid rgba(157,166,181,0.175)',
+            background: 'rgba(94,225,255,0.05)', color: 'var(--accent-cyan)',
             cursor: syncing ? 'not-allowed' : 'pointer', fontSize: '0.85rem', fontWeight: 600,
             opacity: syncing ? 0.6 : 1, transition: 'all 0.2s',
           }}
@@ -203,8 +203,8 @@ export function ObsidianTab({ authToken }: ObsidianTabProps) {
         </button>
       </div>
       {syncResult && (
-        <div style={{ padding: '10px 16px', borderRadius: '8px', background: 'rgba(0,255,160,0.06)',
-          border: '1px solid rgba(0,255,160,0.2)', color: '#00ffa0', fontSize: '0.82rem' }}>
+        <div style={{ padding: '10px 16px', borderRadius: '8px', background: 'rgba(53,212,154,0.06)',
+          border: '1px solid rgba(53,212,154,0.2)', color: '#35d49a', fontSize: '0.82rem' }}>
           ✅ {syncResult}
         </div>
       )}
@@ -253,8 +253,8 @@ export function ObsidianTab({ authToken }: ObsidianTabProps) {
                     gap: '10px', 
                     padding: '10px 14px', 
                     borderRadius: '8px',
-                    background: isActive ? 'rgba(0,240,255,0.08)' : 'rgba(255,255,255,0.02)', 
-                    border: `1px solid ${isActive ? 'rgba(0,240,255,0.3)' : 'rgba(255,255,255,0.06)'}`,
+                    background: isActive ? 'rgba(94,225,255,0.08)' : 'rgba(255,255,255,0.02)', 
+                    border: `1px solid ${isActive ? 'rgba(94,225,255,0.3)' : 'rgba(255,255,255,0.06)'}`,
                     fontSize: '0.82rem', 
                     color: isActive ? 'var(--accent-cyan)' : 'var(--text-secondary)',
                     cursor: 'pointer',
@@ -307,7 +307,7 @@ export function ObsidianTab({ authToken }: ObsidianTabProps) {
                     </button>
                     <button
                       onClick={() => handleDeleteNote(selectedNotePath)}
-                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ef4444', padding: '4px', display: 'flex', alignItems: 'center' }}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#f05d75', padding: '4px', display: 'flex', alignItems: 'center' }}
                       title="Delete note"
                     >
                       <Trash2 size={13} />
@@ -370,7 +370,7 @@ export function ObsidianTab({ authToken }: ObsidianTabProps) {
           {searchResults.map((r, i) => (
             <div key={i} style={{
               padding: '14px 18px', borderRadius: '10px',
-              background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(0,240,255,0.1)',
+              background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(157,166,181,0.07)',
             }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
                 <span style={{ fontWeight: 600, fontSize: '0.88rem', color: 'var(--accent-cyan)' }}>
@@ -420,9 +420,9 @@ export function ObsidianTab({ authToken }: ObsidianTabProps) {
           {createResult && (
             <div style={{
               padding: '10px 16px', borderRadius: '8px', fontSize: '0.82rem',
-              background: createResult.toLowerCase().includes('created') ? 'rgba(0,255,160,0.06)' : 'rgba(255,60,60,0.06)',
-              border: createResult.toLowerCase().includes('created') ? '1px solid rgba(0,255,160,0.2)' : '1px solid rgba(255,60,60,0.2)',
-              color: createResult.toLowerCase().includes('created') ? '#00ffa0' : '#ff6060',
+              background: createResult.toLowerCase().includes('created') ? 'rgba(53,212,154,0.06)' : 'rgba(240,93,117,0.06)',
+              border: createResult.toLowerCase().includes('created') ? '1px solid rgba(53,212,154,0.2)' : '1px solid rgba(240,93,117,0.2)',
+              color: createResult.toLowerCase().includes('created') ? '#35d49a' : '#f05d75',
             }}>
               {createResult}
             </div>

@@ -57,11 +57,11 @@ async def test_no_tiers_configured_passthrough_to_local(orchestrator_db, monkeyp
 
     route_state = {}
     result = await local_orchestrator.route_llm_call(
-        route_state=route_state, local_api_base="http://ollama:11434", local_api_key="", local_model="qwen3:8b",
-        local_provider="ollama", messages=[{"role": "user", "content": "hi"}],
+        route_state=route_state, local_api_base="http://hermes-llama:8080", local_api_key="", local_model="qwen3:8b",
+        local_provider="llamacpp", messages=[{"role": "user", "content": "hi"}],
     )
-    assert calls == ["http://ollama:11434"]
-    assert result.content == "ok from http://ollama:11434"
+    assert calls == ["http://hermes-llama:8080"]
+    assert result.content == "ok from http://hermes-llama:8080"
     assert route_state["tier"]["rank"] == 0
 
 
@@ -78,8 +78,8 @@ async def test_delegates_to_first_tier_on_success(orchestrator_db, monkeypatch):
 
     route_state = {}
     result = await local_orchestrator.route_llm_call(
-        route_state=route_state, local_api_base="http://ollama:11434", local_api_key="", local_model="qwen3:8b",
-        local_provider="ollama", messages=[{"role": "user", "content": "напиши код"}],
+        route_state=route_state, local_api_base="http://hermes-llama:8080", local_api_key="", local_model="qwen3:8b",
+        local_provider="llamacpp", messages=[{"role": "user", "content": "напиши код"}],
     )
     assert calls == ["https://premium.example/v1"]
     assert route_state["tier"]["label"] == "premium"
@@ -100,8 +100,8 @@ async def test_escalates_past_failing_tier(orchestrator_db, monkeypatch):
 
     route_state = {}
     result = await local_orchestrator.route_llm_call(
-        route_state=route_state, local_api_base="http://ollama:11434", local_api_key="", local_model="qwen3:8b",
-        local_provider="ollama", messages=[{"role": "user", "content": "напиши код"}],
+        route_state=route_state, local_api_base="http://hermes-llama:8080", local_api_key="", local_model="qwen3:8b",
+        local_provider="llamacpp", messages=[{"role": "user", "content": "напиши код"}],
     )
     assert route_state["tier"]["label"] == "backup"
     assert result.content == "ok from https://backup.example/v1"
@@ -113,7 +113,7 @@ async def test_falls_back_to_local_when_every_tier_fails(orchestrator_db, monkey
     _binding_tier("b", 2, "https://b.example/v1")
 
     async def fake_call_llm_normalized(*, api_base, **kw):
-        if api_base == "http://ollama:11434":
+        if api_base == "http://hermes-llama:8080":
             return _ok(api_base)
         return _fail(api_base)
 
@@ -121,12 +121,12 @@ async def test_falls_back_to_local_when_every_tier_fails(orchestrator_db, monkey
 
     route_state = {}
     result = await local_orchestrator.route_llm_call(
-        route_state=route_state, local_api_base="http://ollama:11434", local_api_key="", local_model="qwen3:8b",
-        local_provider="ollama", messages=[{"role": "user", "content": "напиши код"}],
+        route_state=route_state, local_api_base="http://hermes-llama:8080", local_api_key="", local_model="qwen3:8b",
+        local_provider="llamacpp", messages=[{"role": "user", "content": "напиши код"}],
     )
     assert route_state["tier"]["rank"] == 0
     assert result.status == STATUS_SUCCESS
-    assert result.content == "ok from http://ollama:11434"
+    assert result.content == "ok from http://hermes-llama:8080"
 
 
 @pytest.mark.asyncio
@@ -144,8 +144,8 @@ async def test_exhausted_quota_tier_is_skipped(orchestrator_db, monkeypatch):
 
     route_state = {}
     result = await local_orchestrator.route_llm_call(
-        route_state=route_state, local_api_base="http://ollama:11434", local_api_key="", local_model="qwen3:8b",
-        local_provider="ollama", messages=[{"role": "user", "content": "напиши код"}],
+        route_state=route_state, local_api_base="http://hermes-llama:8080", local_api_key="", local_model="qwen3:8b",
+        local_provider="llamacpp", messages=[{"role": "user", "content": "напиши код"}],
     )
     assert route_state["tier"]["label"] == "open"
 
@@ -163,14 +163,14 @@ async def test_route_state_pins_tier_across_calls_in_one_turn(orchestrator_db, m
 
     route_state = {}
     await local_orchestrator.route_llm_call(
-        route_state=route_state, local_api_base="http://ollama:11434", local_api_key="", local_model="qwen3:8b",
-        local_provider="ollama", messages=[{"role": "user", "content": "напиши код"}],
+        route_state=route_state, local_api_base="http://hermes-llama:8080", local_api_key="", local_model="qwen3:8b",
+        local_provider="llamacpp", messages=[{"role": "user", "content": "напиши код"}],
     )
     # A second call in the same turn (route_state already decided) must not
     # re-run classification — it goes straight back to the pinned tier.
     await local_orchestrator.route_llm_call(
-        route_state=route_state, local_api_base="http://ollama:11434", local_api_key="", local_model="qwen3:8b",
-        local_provider="ollama", messages=[{"role": "user", "content": "продолжай"}],
+        route_state=route_state, local_api_base="http://hermes-llama:8080", local_api_key="", local_model="qwen3:8b",
+        local_provider="llamacpp", messages=[{"role": "user", "content": "продолжай"}],
     )
     assert calls == ["https://premium.example/v1", "https://premium.example/v1"]
 
@@ -191,14 +191,14 @@ async def test_pinned_tier_degrading_mid_turn_escalates_onward(orchestrator_db, 
 
     route_state = {}
     first = await local_orchestrator.route_llm_call(
-        route_state=route_state, local_api_base="http://ollama:11434", local_api_key="", local_model="qwen3:8b",
-        local_provider="ollama", messages=[{"role": "user", "content": "напиши код"}],
+        route_state=route_state, local_api_base="http://hermes-llama:8080", local_api_key="", local_model="qwen3:8b",
+        local_provider="llamacpp", messages=[{"role": "user", "content": "напиши код"}],
     )
     assert route_state["tier"]["label"] == "premium"
 
     second = await local_orchestrator.route_llm_call(
-        route_state=route_state, local_api_base="http://ollama:11434", local_api_key="", local_model="qwen3:8b",
-        local_provider="ollama", messages=[{"role": "user", "content": "продолжай"}],
+        route_state=route_state, local_api_base="http://hermes-llama:8080", local_api_key="", local_model="qwen3:8b",
+        local_provider="llamacpp", messages=[{"role": "user", "content": "продолжай"}],
     )
     assert route_state["tier"]["label"] == "backup"
     assert second.content == "ok from https://backup.example/v1"
@@ -219,8 +219,8 @@ async def test_allowed_binding_ids_skips_non_allowed_tier(orchestrator_db, monke
 
     route_state = {}
     result = await local_orchestrator.route_llm_call(
-        route_state=route_state, local_api_base="http://ollama:11434", local_api_key="", local_model="qwen3:8b",
-        local_provider="ollama", messages=[{"role": "user", "content": "напиши код"}],
+        route_state=route_state, local_api_base="http://hermes-llama:8080", local_api_key="", local_model="qwen3:8b",
+        local_provider="llamacpp", messages=[{"role": "user", "content": "напиши код"}],
         allowed_binding_ids={tier_b["provider_binding_id"]},
     )
     assert route_state["tier"]["label"] == "b"
@@ -243,13 +243,13 @@ async def test_allowed_binding_ids_empty_set_forces_local(orchestrator_db, monke
 
     route_state = {}
     result = await local_orchestrator.route_llm_call(
-        route_state=route_state, local_api_base="http://ollama:11434", local_api_key="", local_model="qwen3:8b",
-        local_provider="ollama", messages=[{"role": "user", "content": "напиши код"}],
+        route_state=route_state, local_api_base="http://hermes-llama:8080", local_api_key="", local_model="qwen3:8b",
+        local_provider="llamacpp", messages=[{"role": "user", "content": "напиши код"}],
         allowed_binding_ids=set(),
     )
-    assert calls == ["http://ollama:11434"]
+    assert calls == ["http://hermes-llama:8080"]
     assert route_state["tier"]["rank"] == 0
-    assert result.content == "ok from http://ollama:11434"
+    assert result.content == "ok from http://hermes-llama:8080"
 
 
 @pytest.mark.asyncio
@@ -265,8 +265,8 @@ async def test_allowed_binding_ids_none_is_unrestricted(orchestrator_db, monkeyp
 
     route_state = {}
     result = await local_orchestrator.route_llm_call(
-        route_state=route_state, local_api_base="http://ollama:11434", local_api_key="", local_model="qwen3:8b",
-        local_provider="ollama", messages=[{"role": "user", "content": "напиши код"}],
+        route_state=route_state, local_api_base="http://hermes-llama:8080", local_api_key="", local_model="qwen3:8b",
+        local_provider="llamacpp", messages=[{"role": "user", "content": "напиши код"}],
     )
     assert route_state["tier"]["label"] == "premium"
     assert result.content == "ok from https://premium.example/v1"
@@ -290,8 +290,8 @@ async def test_router_usage_log_records_cost_for_binding_tier(orchestrator_db, m
 
     route_state = {}
     await local_orchestrator.route_llm_call(
-        route_state=route_state, local_api_base="http://ollama:11434", local_api_key="", local_model="qwen3:8b",
-        local_provider="ollama", messages=[{"role": "user", "content": "напиши код"}],
+        route_state=route_state, local_api_base="http://hermes-llama:8080", local_api_key="", local_model="qwen3:8b",
+        local_provider="llamacpp", messages=[{"role": "user", "content": "напиши код"}],
     )
     with router_usage._connect() as conn:
         rows = conn.execute("SELECT kind, cost_usd FROM router_usage_log ORDER BY id").fetchall()
@@ -307,16 +307,16 @@ async def test_classifier_says_no_stays_local(orchestrator_db, monkeypatch):
 
     async def fake_call_llm_normalized(*, api_base, messages, **kw):
         calls.append(api_base)
-        if api_base == "http://ollama:11434" and any("routing gate" in (m.get("content") or "") for m in messages):
-            return NormalizedLLMResponse(status=STATUS_SUCCESS, provider="ollama", model="m", content="no")
+        if api_base == "http://hermes-llama:8080" and any("routing gate" in (m.get("content") or "") for m in messages):
+            return NormalizedLLMResponse(status=STATUS_SUCCESS, provider="llamacpp", model="m", content="no")
         return _ok(api_base)
 
     monkeypatch.setattr("backend.llm_client.call_llm_normalized", fake_call_llm_normalized)
 
     route_state = {}
     result = await local_orchestrator.route_llm_call(
-        route_state=route_state, local_api_base="http://ollama:11434", local_api_key="", local_model="qwen3:8b",
-        local_provider="ollama", messages=[{"role": "user", "content": "привет"}],
+        route_state=route_state, local_api_base="http://hermes-llama:8080", local_api_key="", local_model="qwen3:8b",
+        local_provider="llamacpp", messages=[{"role": "user", "content": "привет"}],
     )
     assert route_state["tier"]["rank"] == 0
-    assert result.content == "ok from http://ollama:11434"
+    assert result.content == "ok from http://hermes-llama:8080"

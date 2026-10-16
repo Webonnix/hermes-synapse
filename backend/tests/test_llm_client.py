@@ -160,35 +160,42 @@ async def test_call_success():
 
 
 @pytest.mark.asyncio
-async def test_call_ollama_uses_native_provider_and_stream_callback():
-    from backend.ollama_client import OllamaChatResult
+async def test_call_local_llamacpp_uses_native_client_and_stream_callback():
+    from backend.llamacpp_client import LlamaCppChatResult
 
     callback = AsyncMock()
-    result = OllamaChatResult(
-        model="qwen3:8b",
+    result = LlamaCppChatResult(
+        model="qwen3.8-27b",
         content="Native answer",
         thinking="plan",
         done_reason="stop",
         prompt_tokens=7,
         completion_tokens=3,
+        eval_ms=40.0,
+        prompt_ms=12.0,
     )
-    with patch("backend.ollama_client.OllamaClient.chat", new=AsyncMock(return_value=result)) as chat:
+    with patch("backend.llamacpp_client.LlamaCppClient.chat", new=AsyncMock(return_value=result)) as chat:
         response = await call_llm_normalized(
-            api_base="http://ollama:11434",
+            api_base="http://hermes-llama:8080",
             api_key="",
-            model="qwen3:8b",
+            model="qwen3.8-27b",
             messages=[{"role": "user", "content": "hello"}],
             tools=[{"type": "function", "function": {"name": "clock", "parameters": {"type": "object"}}}],
             stream_callback=callback,
-            provider_options={"num_ctx": 16384, "keep_alive": "10m", "think": True},
+            provider_options={"provider": "llamacpp", "num_ctx": 16384, "think": True},
+            extra_payload={"top_p": 0.9, "model": "must-not-override"},
             max_retries=0,
         )
     assert response.status == lc.STATUS_SUCCESS
-    assert response.provider == "ollama"
+    assert response.provider == "llamacpp"
     assert response.usage.input_tokens == 7
+    # Decode/prompt time comes from the server's timings, not the wall clock.
+    assert response.eval_ms == 40 and response.prompt_ms == 12
     assert chat.await_args.kwargs["tools"]
-    assert chat.await_args.kwargs["num_ctx"] == 16384
+    assert chat.await_args.kwargs["think"] is True
     assert chat.await_args.kwargs["stream_callback"] is callback
+    # Per-agent params reach the server, but never override the request itself.
+    assert chat.await_args.kwargs["extra_payload"] == {"top_p": 0.9}
 
 
 @pytest.mark.asyncio
@@ -318,16 +325,17 @@ async def test_call_redacts_secret_before_send_and_restores_in_response():
 @pytest.mark.asyncio
 async def test_call_does_not_redact_for_local_provider():
     """The local model is the trust boundary — nothing gets rewritten on the
-    way to Ollama, and no local-model confirmation call is made for it."""
-    from backend.ollama_client import OllamaChatResult
+    way to the local llama.cpp server, and no local-model confirmation call is
+    made for it."""
+    from backend.llamacpp_client import LlamaCppChatResult
 
     secret = "sk-" + "b" * 20
-    result = OllamaChatResult(model="qwen3:8b", content="ok", thinking=None,
-                              done_reason="stop", prompt_tokens=1, completion_tokens=1)
-    with patch("backend.ollama_client.OllamaClient.chat", new=AsyncMock(return_value=result)) as chat, \
+    result = LlamaCppChatResult(model="qwen3.8-27b", content="ok", done_reason="stop",
+                                prompt_tokens=1, completion_tokens=1)
+    with patch("backend.llamacpp_client.LlamaCppClient.chat", new=AsyncMock(return_value=result)) as chat, \
          patch("backend.redaction.detect_and_redact") as spy:
         await call_llm_normalized(
-            api_base="http://ollama:11434", api_key="", model="qwen3:8b",
+            api_base="http://hermes-llama:8080", api_key="", model="qwen3.8-27b",
             messages=[{"role": "user", "content": secret}], max_retries=0,
         )
     assert chat.await_args.kwargs["messages"][0]["content"] == secret

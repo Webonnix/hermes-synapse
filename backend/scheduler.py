@@ -69,7 +69,7 @@ async def _trigger_agent_task(agent_id: str, prompt: str, chat_id: str):
         from backend.websocket_manager import manager
         
         # 1. Broadcast user message
-        await manager.broadcast({
+        await manager.send_chat_event(agent_id, {
             "type": "chat_message",
             "role": "user",
             "content": f"[Scheduled Task] {prompt}",
@@ -85,7 +85,7 @@ async def _trigger_agent_task(agent_id: str, prompt: str, chat_id: str):
         assistant_msg_id = saved_ids.get("assistant")
         
         # 3. Broadcast assistant response
-        await manager.broadcast({
+        await manager.send_chat_event(agent_id, {
             "type": "chat_message",
             "role": "assistant",
             "content": response_text,
@@ -97,7 +97,7 @@ async def _trigger_agent_task(agent_id: str, prompt: str, chat_id: str):
         
         # Update user message ID
         if user_msg_id:
-            await manager.broadcast({
+            await manager.send_chat_event(agent_id, {
                 "type": "user_message_id_update",
                 "chat_id": agent_id,
                 "content": prompt,

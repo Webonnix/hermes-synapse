@@ -130,11 +130,11 @@ describe('AgentCircuitCard', () => {
       <AgentCircuitCard
         copy={copy}
         agents={[
-          { id: 'jarvis', name: 'Vexa (Main)', system_prompt: '', model: 'q', status: 'idle' },
+          { id: 'vexa', name: 'Vexa (Main)', system_prompt: '', model: 'q', status: 'idle' },
           { id: 'research', name: 'Data Analyst', system_prompt: '', model: 'q', status: 'working' },
         ]}
         activeCount={1}
-        selectedAgentId="jarvis"
+        selectedAgentId="vexa"
         onOpenAgent={onOpenAgent}
         onOpenAll={vi.fn()}
       />,

@@ -25,6 +25,8 @@ modules do not create an import cycle.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -33,7 +35,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional, Set
 
 import httpx
 
@@ -95,13 +97,13 @@ class NormalizedLLMResponse:
     request_id: Optional[str] = None
     usage: LLMUsage = field(default_factory=LLMUsage)
     latency_ms: Optional[int] = None
-    # Pure decode time reported by the provider (Ollama's eval_duration), with
+    # Pure decode time reported by the provider (llama.cpp's timings.predicted_ms), with
     # prompt processing and model load excluded. latency_ms is the wall time of
     # the whole HTTP request, so tokens ÷ latency understates the rate the model
     # actually sustained — on a 3k-token prompt by more than half.
     eval_ms: Optional[int] = None
-    # Time the provider spent ingesting the prompt (Ollama's
-    # prompt_eval_duration) — the other half of "why did that take 9 seconds".
+    # Time the provider spent ingesting the prompt (llama.cpp's
+    # timings.prompt_ms) — the other half of "why did that take 9 seconds".
     prompt_ms: Optional[int] = None
     retry_count: int = 0
     raw_response_available: bool = False
@@ -237,7 +239,7 @@ def _provider_name(api_base: str, is_openmodel: bool) -> str:
     base = (api_base or "").lower()
     if is_openmodel:
         return "openmodel"
-    if any(m in base for m in ("localhost", "127.0.0.1", "0.0.0.0", "ollama",
+    if any(m in base for m in ("localhost", "127.0.0.1", "0.0.0.0", "hermes-llama",
                                "lmstudio", "lm-studio", "localai", "vllm",
                                "host.docker.internal")):
         return "local"
@@ -247,11 +249,13 @@ def _provider_name(api_base: str, is_openmodel: bool) -> str:
 
 
 def _is_local_provider(api_base: str) -> bool:
-    """Detect local/Ollama-style providers that may lack native function calling."""
+    """Detect generic local endpoints (LM Studio, LocalAI, vLLM...) that may lack
+    native function calling. The bundled llama.cpp server is not one of them: it
+    is recognised by provider and handled before this check is ever reached."""
     base = (api_base or "").lower()
     return any(m in base for m in (
         "localhost", "127.0.0.1", "0.0.0.0", "host.docker.internal",
-        "ollama", "lmstudio", "lm-studio", "localai", "vllm",
+        "lmstudio", "lm-studio", "localai", "vllm",
     ))
 
 
@@ -513,7 +517,81 @@ def normalize_stream_chunks(
 
 # ── Public async entry point ──────────────────────────────────────────────────
 
-async def call_llm_normalized(
+@dataclass
+class TurnUsage:
+    """Everything the model did inside one chat turn, whichever path ran it.
+
+    Only the single-agent tool loop in agent._respond sums tokens and decode
+    time itself. A turn routed through run_orchestration (planner + synth) or a
+    sub-agent returned with no numbers at all — and Vexa in the simple chat is
+    an orchestrator-type agent, so from 09-09 on every reply there rendered
+    without its speed read-out. Recording at the one call site every path
+    shares makes the stats independent of routing."""
+
+    calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    decode_ms: int = 0
+    prompt_ms: int = 0
+    generation_ms: int = 0
+    model: Optional[str] = None
+
+    def record(self, result: NormalizedLLMResponse, wall_ms: int) -> None:
+        self.calls += 1
+        self.input_tokens += result.usage.input_tokens or 0
+        self.output_tokens += result.usage.output_tokens or 0
+        self.decode_ms += result.eval_ms or 0
+        self.prompt_ms += result.prompt_ms or 0
+        self.generation_ms += wall_ms
+        # The last call is the one that wrote the visible answer (the synth step).
+        self.model = result.model or self.model
+
+    def as_meta(self) -> Dict[str, Any]:
+        meta = {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "decode_ms": self.decode_ms,
+            "prompt_ms": self.prompt_ms,
+            "generation_ms": self.generation_ms,
+            "model": self.model,
+        }
+        return {key: value for key, value in meta.items() if value}
+
+
+_TURN_USAGE: contextvars.ContextVar[Optional[TurnUsage]] = contextvars.ContextVar(
+    "hermes_turn_usage", default=None
+)
+
+
+@contextlib.contextmanager
+def track_turn_usage() -> Iterator[TurnUsage]:
+    """Collect every call_llm_normalized made in this context into one TurnUsage.
+
+    A ContextVar, so asyncio.to_thread tool workers (which copy the context)
+    still report into the turn that started them, and a nested turn — a
+    delegation calling agent.respond again — gets its own tracker instead of
+    folding its tokens into the parent's reply."""
+    usage = TurnUsage()
+    token = _TURN_USAGE.set(usage)
+    try:
+        yield usage
+    finally:
+        _TURN_USAGE.reset(token)
+
+
+async def call_llm_normalized(**kwargs: Any) -> NormalizedLLMResponse:
+    """See _call_llm_normalized; this wrapper only reports into the active TurnUsage."""
+    started = time.perf_counter()
+    result = await _call_llm_normalized(**kwargs)
+    usage = _TURN_USAGE.get()
+    # The refused-parameter retry re-enters through here with _drop_params set;
+    # the outer call returns that same result, so counting both would double it.
+    if usage is not None and not kwargs.get("_drop_params"):
+        usage.record(result, int((time.perf_counter() - started) * 1000))
+    return result
+
+
+async def _call_llm_normalized(
     *,
     api_base: str,
     api_key: str,
@@ -548,26 +626,33 @@ async def call_llm_normalized(
         translate_to_openai_response,
     )
 
-    from backend.ollama_client import OllamaClient, OllamaError, is_ollama_provider
+    from backend.llamacpp_client import LlamaCppClient, LlamaCppError, is_llamacpp_provider
 
-    if is_ollama_provider(api_base, str((provider_options or {}).get("provider") or "")):
+    if is_llamacpp_provider(api_base, str((provider_options or {}).get("provider") or "")):
+        # The local llama.cpp server. Handled here rather than by the generic
+        # path below because that path does not stream, drops images and has no
+        # way to switch reasoning — and because the text never leaves the box,
+        # so it skips the redaction gateway entirely.
         timeout = timeout if timeout is not None else get_request_timeout()
         max_retries = max_retries if max_retries is not None else get_max_retries()
+        local_extra = {
+            key: value for key, value in (extra_payload or {}).items()
+            if key not in _PROTECTED_PAYLOAD_KEYS and value is not None and key not in (_drop_params or set())
+        }
         last: Optional[NormalizedLLMResponse] = None
         for attempt in range(max_retries + 1):
             start = time.time()
             try:
-                ollama = OllamaClient(api_base, timeout=timeout, client=client)
-                result = await ollama.chat(
+                local = LlamaCppClient(api_base, timeout=timeout, client=client)
+                result = await local.chat(
                     model=model,
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     tools=tools,
                     stream_callback=stream_callback,
-                    num_ctx=(provider_options or {}).get("num_ctx"),
-                    keep_alive=(provider_options or {}).get("keep_alive"),
                     think=(provider_options or {}).get("think"),
+                    extra_payload=local_extra or None,
                 )
                 latency = int((time.time() - start) * 1000)
                 body = {
@@ -592,31 +677,33 @@ async def call_llm_normalized(
                 }
                 normalized = normalize_openai_response(
                     body,
-                    provider="ollama",
+                    provider="llamacpp",
                     model=result.model or model,
                     latency_ms=latency,
                     retry_count=attempt,
                 )
-                if result.eval_duration:
-                    normalized.eval_ms = int(result.eval_duration / 1_000_000)
-                if result.prompt_eval_duration:
-                    normalized.prompt_ms = int(result.prompt_eval_duration / 1_000_000)
+                if result.eval_ms:
+                    normalized.eval_ms = int(result.eval_ms)
+                if result.prompt_ms:
+                    normalized.prompt_ms = int(result.prompt_ms)
                 normalized.raw_response = None
                 normalized.raw_response_available = True
                 return normalized
-            except OllamaError as exc:
+            except LlamaCppError as exc:
                 latency = int((time.time() - start) * 1000)
                 status = STATUS_TIMEOUT if exc.code == "timeout" else STATUS_PROVIDER_ERROR
                 last = NormalizedLLMResponse(
                     status=status,
-                    provider="ollama",
+                    provider="llamacpp",
                     model=model,
                     latency_ms=latency,
                     retry_count=attempt,
                     finish_reason=f"http_{exc.status_code}",
                     error_message=str(exc),
                 )
-                if exc.status_code not in _RETRYABLE_HTTP and exc.code not in ("connection_error", "interrupted_stream"):
+                if exc.status_code not in _RETRYABLE_HTTP and exc.code not in (
+                    "connection_error", "interrupted_stream", "loading",
+                ):
                     return last
                 if attempt < max_retries:
                     await asyncio.sleep(_backoff_delay(attempt))
@@ -624,9 +711,9 @@ async def call_llm_normalized(
                 return last
         return last or NormalizedLLMResponse(
             status=STATUS_PROVIDER_ERROR,
-            provider="ollama",
+            provider="llamacpp",
             model=model,
-            error_message="No response from Ollama.",
+            error_message="No response from the llama.cpp server.",
         )
 
     is_openmodel = "openmodel.ai" in (api_base or "")
@@ -637,7 +724,7 @@ async def call_llm_normalized(
     max_retries = max_retries if max_retries is not None else get_max_retries()
 
     # ── Mandatory redaction gateway ─────────────────────────────────────────
-    # The local Ollama model is the trust boundary: nothing leaves the box for
+    # The local model is the trust boundary: nothing leaves the box for
     # a non-local api_base without a pass through detect_and_redact first. This
     # runs on every single call (not once per turn), so tool outputs appended
     # to `messages` in a later tool-loop iteration get scrubbed too, not just
@@ -710,7 +797,7 @@ async def call_llm_normalized(
         payload["max_tokens"] = max_tokens
 
     # ── Tool handling for local providers ──────────────────────────────────
-    # Local models (Ollama, LM Studio, etc.) often lack reliable native
+    # Generic local endpoints (LM Studio, LocalAI, etc.) often lack reliable native
     # function-calling.  Sending `tools` to them can produce malformed JSON
     # or silent failures.  For local providers, tools are handled via
     # keyword-based routing in agent.py; we strip them from the payload.

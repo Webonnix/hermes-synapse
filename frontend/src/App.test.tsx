@@ -25,6 +25,8 @@ describe('App Component', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     localStorage.clear();
+    localStorage.setItem("hermes_language", "en");
+    window.history.replaceState(null, "", "/");
   });
 
   it('renders login screen when unauthenticated', async () => {
@@ -35,7 +37,7 @@ describe('App Component', () => {
   });
 
   it('does not poll protected tools APIs before authentication', async () => {
-    localStorage.setItem('jarvis_active_tab', 'tools');
+    localStorage.setItem('vexa_active_tab', 'tools');
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
 
@@ -69,7 +71,7 @@ describe('App Component', () => {
   });
 
   it('renders main application when authenticated', async () => {
-    localStorage.setItem('jarvis_auth_token', 'mock_token');
+    localStorage.setItem('vexa_auth_token', 'mock_token');
     localStorage.setItem('hermes_language', 'en');
     
     const fetchMock = vi.fn().mockImplementation((url) => {
@@ -110,5 +112,36 @@ describe('App Component', () => {
     await waitFor(() => {
       expect(screen.getByText('Model & Prompt')).toBeInTheDocument();
     });
+  });
+});
+
+describe('OTP recovery', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem('hermes_language', 'en');
+    history.replaceState(null, '', '/');
+  });
+  it('does not claim that a code was sent after a failed request', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, json: async () => ({ message: 'Unavailable' }) }));
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: /request code in telegram/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Unavailable');
+    expect(screen.queryByText(/authorization code sent/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /request code in telegram/i })).toBeEnabled();
+  });
+  it('submits an invalid code once and retries only when the code changes', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => Promise.resolve({
+      ok: url.includes('request-code'), json: async () => url.includes('request-code') ? { status: 'success' } : { detail: 'Invalid access code.' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: /request code in telegram/i }));
+    const input = await screen.findByRole('textbox', { name: /telegram code/i });
+    fireEvent.change(input, { target: { value: '123456' } });
+    await screen.findByText(/invalid access code/i);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(fetchMock.mock.calls.filter(([url]) => url.includes('verify-code'))).toHaveLength(1);
+    fireEvent.change(input, { target: { value: '654321' } });
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url.includes('verify-code'))).toHaveLength(2));
   });
 });

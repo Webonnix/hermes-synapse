@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from backend.database import DB_PATH
+from backend.tool_permissions import MAIN_AGENT_ID
 
 logger = logging.getLogger("hermes.control_plane")
 
@@ -21,6 +22,19 @@ OPEN_STATUSES = ("queued", "running", "awaiting_approval", "approved", "blocked"
 TOOL_RISKS = {
     # Pure metadata lookup over the tool registry — no side effects, no data.
     "list_tools": "R0",
+    # Appends a note to the current inbox conversation (plus a CRM task and an
+    # owner ping). Local, reversible, scoped to this one conversation.
+    "take_message": "R1",
+    # Phone tools act only on the live call the turn belongs to (end it, hand it
+    # to the owner, read free/busy, record a meeting request). No approval: a
+    # caller cannot be put on hold while the owner approves a hang-up.
+    "phone_end_call": "R1",
+    "phone_transfer_to_owner": "R1",
+    "calendar_free_slots": "R0",
+    "propose_meeting": "R1",
+    # A real call to a real person in the business's name, billed per minute:
+    # one owner approval, like creating an agent.
+    "phone_call": "R3",
     "get_system_stats": "R0",
     "diagnose_capabilities": "R0",
     "get_current_time_israel": "R0",
@@ -52,6 +66,13 @@ TOOL_RISKS = {
     "delete_calendar_event": "R4",
     "add_todoist_task": "R3",
     "create_subagent": "R3",
+    # Spawns an agent that writes code, publishes a publicly reachable /demo/
+    # URL and can run for hours of GPU time without anyone watching. Reversible
+    # (cancel the run, delete the card) and so not R4, but far too consequential
+    # to fire unattended — R3 alongside create_subagent, one owner approval.
+    "start_dev_run": "R3",
+    # Reads the board. No side effects at all.
+    "list_dev_runs": "R0",
     "save_subagent_memory": "R3",
     "create_obsidian_note": "R3",
     "sync_obsidian_vault": "R3",
@@ -232,9 +253,9 @@ def create_tool_task(tool_name: str, arguments: Dict[str, Any], chat_id: str) ->
                (id, origin, requester, goal, tool_name, tool_arguments, assignee, risk_class,
                 autonomy_level, status, approvals_required, acceptance, rollback,
                 idempotency_key, created_at, updated_at)
-               VALUES (?, 'agent', ?, ?, ?, ?, 'jarvis', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, 'agent', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                task_id, chat_id, f"Execute {tool_name}", tool_name, _safe_json(arguments), risk_class,
+                task_id, chat_id, f"Execute {tool_name}", tool_name, _safe_json(arguments), MAIN_AGENT_ID, risk_class,
                 _autonomy_for_risk(risk_class), status, approvals_required,
                 json.dumps(["Tool returns a valid result", "No policy or budget violation"], ensure_ascii=False),
                 rollback, idempotency_key, now, now,
@@ -281,12 +302,13 @@ def create_review_task(
                (id, origin, requester, goal, tool_name, tool_arguments, assignee, risk_class,
                 autonomy_level, status, approvals_required, acceptance, rollback,
                 idempotency_key, created_at, updated_at)
-               VALUES (?, 'autonomy', ?, ?, NULL, ?, 'jarvis', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, 'autonomy', ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task_id,
                 requester[:120],
                 goal[:500],
                 _safe_json(safe_arguments),
+                MAIN_AGENT_ID,
                 risk_class,
                 _autonomy_for_risk(risk_class),
                 status,

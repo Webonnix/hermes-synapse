@@ -105,8 +105,23 @@ def create_pending_reply(
         )
         row = connection.execute("SELECT * FROM pending_channel_replies WHERE id = ?", (reply_id,)).fetchone()
     result = _row_to_dict(row)
+    try:
+        from backend import inbox
+
+        inbox.record_draft(binding_id, platform, chat_id, drafted_reply, reply_id)
+    except Exception:
+        logger.exception("Could not archive draft %s in the inbox", reply_id)
     _notify_owner_new_draft(result)
     return result
+
+
+def _archive_delivery(reply_id: str, delivery: str, final_text: Optional[str] = None) -> None:
+    try:
+        from backend import inbox
+
+        inbox.mark_draft(reply_id, delivery, final_text)
+    except Exception:
+        logger.exception("Could not update the archived draft %s", reply_id)
 
 
 def list_pending_replies(status: str = "pending") -> list[dict[str, Any]]:
@@ -151,11 +166,18 @@ async def send_pending_reply(reply_id: str, edited_text: Optional[str] = None) -
         known_image_urls = json.loads(reply.get("image_urls") or "[]")
     except (TypeError, ValueError):
         known_image_urls = []
-    await send_to_channel(
-        reply["binding_id"], reply["platform"], reply["chat_id"], final_text,
-        known_image_urls=known_image_urls,
-    )
+    try:
+        await send_to_channel(
+            reply["binding_id"], reply["platform"], reply["chat_id"], final_text,
+            known_image_urls=known_image_urls,
+        )
+    except Exception:
+        # The draft itself stays pending so the owner can retry; the archive
+        # records that this attempt did not reach the person.
+        _archive_delivery(reply_id, "failed", final_text)
+        raise
     _set_status(reply_id, "sent", sent_at=_now())
+    _archive_delivery(reply_id, "sent", final_text)
     return get_pending_reply(reply_id)
 
 
@@ -281,6 +303,7 @@ def discard_pending_reply(reply_id: str) -> None:
     if reply["status"] != "pending":
         raise ValueError(f"Reply {reply_id} is already {reply['status']}")
     _set_status(reply_id, "discarded")
+    _archive_delivery(reply_id, "discarded")
 
 
 def _notify_owner_new_draft(reply: dict[str, Any]) -> None:
@@ -299,7 +322,7 @@ def _notify_owner_new_draft(reply: dict[str, Any]) -> None:
             text = (
                 f"✉️ Новый черновик ответа ждёт подтверждения ({reply['platform']}, от {reply.get('incoming_from') or 'неизвестно'}):\n\n"
                 f"{preview}\n\n"
-                f"Проверьте и отправьте в разделе «SMM Factory» дашборда."
+                f"Проверьте и отправьте в разделе «Входящие» (или «SMM Factory») дашборда."
             )
             await bot.telegram_app.bot.send_message(chat_id=int(chat_id), text=text)
         except Exception as exc:

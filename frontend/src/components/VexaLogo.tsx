@@ -12,17 +12,17 @@ export function VexaLogo({ className = 'vx-brand-mark' }: VexaLogoProps) {
       <svg width="100%" height="100%" viewBox="0 0 32 32" fill="none">
         <defs>
           <linearGradient id="vx-logo-gradient" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stopColor="#4be8ff" />
-            <stop offset="48%" stopColor="#2684ff" />
-            <stop offset="100%" stopColor="#9b5dff" />
+            <stop offset="0%" stopColor="#B197FF" />
+            <stop offset="50%" stopColor="#7C5CFC" />
+            <stop offset="100%" stopColor="#36CFFB" />
           </linearGradient>
           <linearGradient id="vx-logo-gradient-inner" x1="1" y1="1" x2="0" y2="0">
-            <stop offset="0%" stopColor="#9b5dff" />
-            <stop offset="55%" stopColor="#2684ff" />
-            <stop offset="100%" stopColor="#7af4ff" />
+            <stop offset="0%" stopColor="#36CFFB" />
+            <stop offset="55%" stopColor="#7C5CFC" />
+            <stop offset="100%" stopColor="#B197FF" />
           </linearGradient>
           <filter id="vx-logo-glow" x="-60%" y="-60%" width="220%" height="220%">
-            <feDropShadow dx="0" dy="0" stdDeviation="1.4" floodColor="#2ec8ff" floodOpacity=".55" />
+            <feDropShadow dx="0" dy="0" stdDeviation="1.3" floodColor="#7C5CFC" floodOpacity=".5" />
           </filter>
         </defs>
         <g filter="url(#vx-logo-glow)">
@@ -30,7 +30,7 @@ export function VexaLogo({ className = 'vx-brand-mark' }: VexaLogoProps) {
             d="M16 3 L27 11.5 L16 29 L5 11.5 Z"
             stroke="url(#vx-logo-gradient)"
             strokeWidth="1.7"
-            fill="rgba(38,132,255,.1)"
+            fill="rgba(124,92,252,.12)"
             strokeLinejoin="round"
           />
           <path d="M9.4 12.1 L22.6 12.1" stroke="url(#vx-logo-gradient)" strokeWidth=".9" opacity=".55" />

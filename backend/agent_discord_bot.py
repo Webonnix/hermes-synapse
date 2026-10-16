@@ -73,12 +73,16 @@ class AgentDiscordBotManager:
                 bot_access_gate.authorize,
                 binding_id, "discord", channel_id, message.content,
                 str(message.author.id), str(message.author),
+                event_id=str(message.id),
             )
             if is_dm and decision.action == bot_access_gate.IGNORE:
                 decision = await asyncio.to_thread(
                     bot_access_gate.authorize,
                     binding_id, "discord", str(message.author.id), message.content,
                     str(message.author.id), str(message.author),
+                    # Matched by author id, but a reply can only be posted into
+                    # the DM channel — the inbox needs to know where that is.
+                    event_id=str(message.id), channel_meta={"reply_chat_id": channel_id},
                 )
             if decision.action == bot_access_gate.IGNORE:
                 return
@@ -87,9 +91,10 @@ class AgentDiscordBotManager:
                     await message.channel.send(chunk)
                 return
 
+            from backend import inbox_routing
             from backend.database import get_subagent
 
-            subagent = get_subagent(subagent_id)
+            subagent = get_subagent(inbox_routing.effective_subagent_id(decision, subagent_id))
             if not subagent or not subagent.get("is_enabled"):
                 await message.channel.send(
                     bot_access_gate.AGENT_OFFLINE_MESSAGE
@@ -107,8 +112,8 @@ class AgentDiscordBotManager:
 
                 session_id = decision.session_id or f"discordbot:{binding_id}:{channel_id}"
                 try:
-                    response_text = await agent_instance._respond_as_subagent(
-                        message.content, subagent, chat_id=session_id
+                    response_text = await inbox_routing.respond_turn(
+                        decision, message.content, subagent, session_id
                     )
                 except Exception:
                     logger.exception("Agent Discord bot %s: error handling message", binding_id)

@@ -340,6 +340,19 @@ class GateDecision:
     token: Optional[dict[str, Any]] = None
     plan: Optional[dict[str, Any]] = None
     limits: dict[str, Any] = field(default_factory=dict)
+    # Where the message came from and where it is archived (backend/inbox.py).
+    # Filled in by authorize() so record_turn and the routing layer never have to
+    # re-derive the conversation from a session id.
+    binding_id: str = ""
+    platform: str = ""
+    chat_id: str = ""
+    conversation_id: str = ""
+    rule_action: str = ""
+    # backend/inbox_routing.RouteResolution as a dict — who executes this turn.
+    route: Optional[dict[str, Any]] = None
+    # Media produced during the turn (e.g. a TTS rendering by an external voice
+    # target) that record_turn attaches to the archived reply.
+    pending_attachments: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _owner_decision(binding_id: str, platform: str, chat_id: str) -> GateDecision:
@@ -448,6 +461,105 @@ def _apply_escalation(
     )
 
 
+def _evaluate_inbox_rule(
+    binding_id: str, platform: str, chat_id: str, external_user_id: str, display_name: str,
+):
+    """The owner's routing rule for this sender (backend/inbox_rules.py), or None.
+
+    Runs before the token/subscriber checks on purpose: a rule is the owner's
+    explicit statement about a *person*, and a token buys access to the AI, not
+    a way past a block. A failure to read the rules falls through to the normal
+    gate rather than muting every customer — the gate below still enforces
+    access on its own, so the worst case of an outage is "rules not applied",
+    never "stranger let in"."""
+    try:
+        from backend.agent_messenger_governance import get_binding
+
+        binding = get_binding(binding_id)
+        if not binding or binding.get("status") != "active":
+            return None
+        from backend import inbox, inbox_rules
+
+        identities = inbox.sender_identities(platform, str(chat_id), external_user_id, display_name)
+        return inbox_rules.evaluate(binding_id, identities)
+    except Exception:
+        logger.exception("Inbox routing rules could not be evaluated for binding %s — gate continues without them", binding_id)
+        return None
+
+
+def _pass_to_human(
+    binding_id: str, platform: str, chat_id: str, text: str, external_user_id: str, display_name: str,
+) -> "GateDecision":
+    """A ``pass`` rule inside business hours: a person answers, the agent stays
+    silent, and the owner learns someone is waiting. Same silence as a manual
+    takeover (the session id rides along so what they write still lands in the
+    stored conversation), minus the state change — the rule is re-evaluated on
+    every message, so removing it hands the person straight back to the AI."""
+    try:
+        from backend import inbox
+        from backend.agent_messenger_governance import get_binding
+
+        binding = get_binding(binding_id) or {"id": binding_id}
+        inbox.notify_owner_once(
+            f"pass|{binding_id}|{chat_id}", binding, platform, str(chat_id),
+            display_name or external_user_id, text,
+            reason="написал в рабочие часы — по правилу «передать человеку» агент не отвечает",
+        )
+    except Exception:
+        logger.exception("Could not notify the owner about a passed conversation on %s", binding_id)
+    return GateDecision(action=IGNORE, session_id=bot_access.session_id_for(platform, binding_id, str(chat_id)))
+
+
+def _notify_taken_over(
+    binding_id: str, platform: str, chat_id: str, text: str, external_user_id: str, display_name: str,
+) -> None:
+    """The agent is silent on a taken-over conversation, so the owner is the only
+    one who can answer — he has to learn that the person wrote. Rate limited in
+    inbox.notify_owner_once so a burst of messages is one ping."""
+    try:
+        from backend import inbox
+        from backend.agent_messenger_governance import get_binding
+
+        binding = get_binding(binding_id) or {"id": binding_id}
+        inbox.notify_owner_once(
+            f"takeover|{binding_id}|{chat_id}", binding, platform, str(chat_id),
+            display_name or external_user_id, text,
+            reason="пишет в диалог, который вы забрали себе — агент молчит, ответьте во «Входящих»",
+        )
+    except Exception:
+        logger.exception("Could not notify the owner about a message in a taken-over conversation")
+
+
+def _archive_inbound(
+    decision: "GateDecision", text: str, external_user_id: str, display_name: str,
+    event_id: str, channel_meta: Optional[dict[str, Any]], rule,
+) -> bool:
+    """Writes the arriving message into backend/inbox.py. Returns False when the
+    archive recognised the event id as already processed — the caller then turns
+    the decision into IGNORE, which is what stops a redelivered event from running
+    the agent a second time.
+
+    A bare IGNORE with no session (a stranger on a whitelisted binding, a muted
+    token guesser, an inactive binding) is not archived: nobody decided to talk to
+    that sender, and archiving it would turn a whitelist into a spam folder."""
+    blocked = bool(rule and rule.action == "block")
+    if decision.action == IGNORE and not decision.session_id and not blocked:
+        return True
+    from backend import inbox
+
+    result = inbox.record_inbound(
+        binding_id=decision.binding_id, platform=decision.platform, chat_id=decision.chat_id,
+        text=text, session_id=decision.session_id, external_user_id=external_user_id,
+        display_name=display_name, event_id=event_id, channel_meta=channel_meta,
+        rule_action=(rule.action if rule else None), rule_pattern=(rule.pattern if rule else None),
+        gate_reply=decision.reply_text if decision.action == REPLY else "",
+    )
+    if not result:
+        return True
+    decision.conversation_id = result["conversation_id"]
+    return not result.get("duplicate")
+
+
 def authorize(
     binding_id: str,
     platform: str,
@@ -455,11 +567,30 @@ def authorize(
     text: str,
     external_user_id: str = "",
     display_name: str = "",
+    event_id: str = "",
+    channel_meta: Optional[dict[str, Any]] = None,
 ) -> GateDecision:
     """Decides what to do with one incoming message, and records the outcome in
     backend/channel_activity.py so the admin can see whether messages are
-    reaching a bound bot at all — see MessengerChannelsTab's activity log."""
-    decision = _check_owner_takeover(binding_id, platform, chat_id)
+    reaching a bound bot at all — see MessengerChannelsTab's activity log.
+
+    ``event_id`` is the channel's own id for this delivery (Telegram message id,
+    Matrix event id, Message-ID…). When given, a redelivery of the same event is
+    ignored instead of being answered twice. ``channel_meta`` carries what a human
+    reply later needs to reach this person (an email thread, a DM channel)."""
+    if event_id and _is_duplicate_event(binding_id, platform, chat_id, event_id):
+        return GateDecision(action=IGNORE)
+
+    rule = _evaluate_inbox_rule(binding_id, platform, chat_id, external_user_id, display_name)
+    decision: Optional[GateDecision] = None
+    if rule and rule.action == "block":
+        decision = GateDecision(action=IGNORE)
+    if decision is None:
+        decision = _check_owner_takeover(binding_id, platform, chat_id)
+        if decision is not None:
+            _notify_taken_over(binding_id, platform, chat_id, text, external_user_id, display_name)
+    if decision is None and rule and rule.action == "pass":
+        decision = _pass_to_human(binding_id, platform, chat_id, text, external_user_id, display_name)
     if decision is None:
         decision = _authorize(binding_id, platform, chat_id, text, external_user_id, display_name)
         if decision.action == PROCEED:
@@ -481,7 +612,27 @@ def authorize(
                             decision = escalated
             except Exception:
                 logger.exception("Handling-mode/escalation check failed for binding %s — proceeding normally", binding_id)
+
+    decision.binding_id, decision.platform, decision.chat_id = binding_id, platform, str(chat_id)
+    decision.rule_action = rule.action if rule else ""
+    try:
+        fresh = _archive_inbound(decision, text, external_user_id, display_name, event_id, channel_meta, rule)
+    except Exception:
+        logger.exception("Could not archive the inbound message for binding %s", binding_id)
+        fresh = True
+    if not fresh:
+        logger.info("Binding %s: event %s already processed — ignoring the redelivery", binding_id, event_id)
+        return GateDecision(action=IGNORE)
+
     _persist_gate_turn(decision, text)
+    if decision.action == PROCEED and decision.conversation_id:
+        try:
+            from backend import inbox_routing
+
+            decision.route = inbox_routing.resolve(decision, event_id=event_id)
+        except Exception:
+            logger.exception("Conversation routing failed for binding %s — the binding's own agent answers", binding_id)
+            decision.route = None
     try:
         from backend import channel_activity
 
@@ -492,6 +643,16 @@ def authorize(
     except Exception:
         logger.exception("Could not record channel activity for binding %s", binding_id)
     return decision
+
+
+def _is_duplicate_event(binding_id: str, platform: str, chat_id: str, event_id: str) -> bool:
+    try:
+        from backend import inbox
+
+        return inbox.is_duplicate_event(binding_id, platform, str(chat_id), event_id)
+    except Exception:
+        logger.exception("Duplicate-event check failed for binding %s", binding_id)
+        return False
 
 
 def _authorize(
@@ -838,7 +999,12 @@ def record_turn(
     carries the provider's *real* prompt/completion token counts — more accurate
     than the character-length estimate that goes into ``decision_logs``. Falls
     back to that estimate only when the provider returned no usage block.
+
+    Also archives the turn in backend/inbox.py, for every scope: a reply that goes
+    out directly is recorded as sent here; a draft-mode reply is recorded by
+    channel_replies.create_pending_reply, which is the moment it becomes a draft.
     """
+    _archive_turn(decision, metadata, response_text)
     if decision.scope != "public" or not decision.subscriber:
         return
     try:
@@ -868,6 +1034,51 @@ def record_turn(
         )
     except Exception:
         logger.exception("Could not record usage for subscriber %s", (decision.subscriber or {}).get("id"))
+
+
+def _archive_turn(decision: GateDecision, metadata: Optional[dict[str, Any]], response_text: str) -> None:
+    if not decision.conversation_id:
+        return
+    try:
+        from backend import inbox
+
+        meta = metadata or {}
+        cost_usd = 0.0
+        try:
+            from backend.cost import calculate_cost
+
+            cost_usd = float(calculate_cost(
+                str(meta.get("model") or ""), int(meta.get("input_tokens") or 0), int(meta.get("output_tokens") or 0),
+            ) or 0.0)
+        except Exception:
+            cost_usd = 0.0
+        route = decision.route or {}
+        line_meta = {
+            key: value for key, value in {
+                "model": meta.get("model"), "provider": meta.get("provider"),
+                "latency_ms": meta.get("latency_ms"), "target_type": route.get("target_type"),
+                "target_id": route.get("target_id"), "route_source": route.get("source"),
+            }.items() if value not in (None, "")
+        }
+        if not (response_text or "").strip():
+            inbox.record_agent_reply(
+                decision.conversation_id, "Агент не смог сформировать ответ.", speaker="system",
+                delivery="failed", cost_usd=cost_usd, meta={**line_meta, "error": str(meta.get("error") or "")[:300]},
+            )
+            return
+        from backend.agent_messenger_governance import get_binding
+
+        configured = (get_binding(decision.binding_id) or {}).get("response_mode") or "draft"
+        if effective_response_mode(decision, configured) != "auto_labeled":
+            inbox.add_cost(decision.conversation_id, cost_usd)
+            return
+        message_id = inbox.record_agent_reply(
+            decision.conversation_id, response_text, cost_usd=cost_usd, meta=line_meta,
+        )
+        for attachment in decision.pending_attachments or []:
+            inbox.store_attachment(message_id, **attachment)
+    except Exception:
+        logger.exception("Could not archive the agent turn for conversation %s", decision.conversation_id)
 
 
 def effective_response_mode(decision: GateDecision, configured_mode: str) -> str:

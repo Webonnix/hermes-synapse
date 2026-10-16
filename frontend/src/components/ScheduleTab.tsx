@@ -33,14 +33,14 @@ export function ScheduleTab({
 }: ScheduleTabProps) {
   const [taskType, setTaskType] = useState<'one-shot' | 'alarm' | 'recurring'>('one-shot');
   const [taskLabel, setTaskLabel] = useState('');
-  const [targetAgent, setTargetAgent] = useState('jarvis');
+  const [targetAgent, setTargetAgent] = useState('vexa');
   const [taskPrompt, setTaskPrompt] = useState('');
   const [taskDuration, setTaskDuration] = useState(60);
   const [taskTimeStr, setTaskTimeStr] = useState('');
   const [taskInterval, setTaskInterval] = useState(1);
 
   const availableAgents = [
-    { id: 'jarvis', name: 'Vexa Main' },
+    { id: 'vexa', name: 'Vexa Main' },
     ...subagents.map(a => ({ id: a.id, name: a.name }))
   ];
 
@@ -63,7 +63,7 @@ export function ScheduleTab({
       payload.interval_hours = taskInterval;
     }
 
-    fetch('http://localhost:8000/api/timers', {
+    fetch('/api/timers', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
@@ -105,7 +105,7 @@ export function ScheduleTab({
                   value={taskType}
                   onChange={(e) => setTaskType(e.target.value as any)}
                   className="form-input"
-                  style={{ width: '100%', padding: '6px 10px', fontSize: '0.8rem', height: '34px', background: 'rgba(6, 9, 19, 0.8)', border: '1px solid rgba(0, 240, 255, 0.15)', color: '#fff' }}
+                  style={{ width: '100%', padding: '6px 10px', fontSize: '0.8rem', height: '34px', background: 'rgba(8, 9, 14, 0.8)', border: '1px solid rgba(157, 166, 181, 0.105)', color: '#fff' }}
                 >
                   <option value="one-shot">One-Shot (Timer)</option>
                   <option value="alarm">Alarm (Specific Time)</option>
@@ -119,7 +119,7 @@ export function ScheduleTab({
                   value={targetAgent}
                   onChange={(e) => setTargetAgent(e.target.value)}
                   className="form-input"
-                  style={{ width: '100%', padding: '6px 10px', fontSize: '0.8rem', height: '34px', background: 'rgba(6, 9, 19, 0.8)', border: '1px solid rgba(0, 240, 255, 0.15)', color: '#fff' }}
+                  style={{ width: '100%', padding: '6px 10px', fontSize: '0.8rem', height: '34px', background: 'rgba(8, 9, 14, 0.8)', border: '1px solid rgba(157, 166, 181, 0.105)', color: '#fff' }}
                 >
                   {availableAgents.map(agent => (
                     <option key={agent.id} value={agent.id}>{agent.name}</option>
@@ -137,7 +137,7 @@ export function ScheduleTab({
                   value={taskLabel}
                   onChange={(e) => setTaskLabel(e.target.value)}
                   className="form-input"
-                  style={{ width: '100%', padding: '6px 10px', fontSize: '0.8rem', height: '34px', background: 'rgba(6, 9, 19, 0.8)', border: '1px solid rgba(0, 240, 255, 0.15)', color: '#fff' }}
+                  style={{ width: '100%', padding: '6px 10px', fontSize: '0.8rem', height: '34px', background: 'rgba(8, 9, 14, 0.8)', border: '1px solid rgba(157, 166, 181, 0.105)', color: '#fff' }}
                 />
               </div>
 
@@ -151,7 +151,7 @@ export function ScheduleTab({
                     value={taskDuration}
                     onChange={(e) => setTaskDuration(parseInt(e.target.value) || 0)}
                     className="form-input"
-                    style={{ width: '100%', padding: '6px 10px', fontSize: '0.8rem', height: '34px', background: 'rgba(6, 9, 19, 0.8)', border: '1px solid rgba(0, 240, 255, 0.15)', color: '#fff' }}
+                    style={{ width: '100%', padding: '6px 10px', fontSize: '0.8rem', height: '34px', background: 'rgba(8, 9, 14, 0.8)', border: '1px solid rgba(157, 166, 181, 0.105)', color: '#fff' }}
                   />
                 )}
                 {taskType === 'alarm' && (
@@ -161,7 +161,7 @@ export function ScheduleTab({
                     value={taskTimeStr}
                     onChange={(e) => setTaskTimeStr(e.target.value)}
                     className="form-input"
-                    style={{ width: '100%', padding: '6px 10px', fontSize: '0.8rem', height: '34px', background: 'rgba(6, 9, 19, 0.8)', border: '1px solid rgba(0, 240, 255, 0.15)', color: '#fff' }}
+                    style={{ width: '100%', padding: '6px 10px', fontSize: '0.8rem', height: '34px', background: 'rgba(8, 9, 14, 0.8)', border: '1px solid rgba(157, 166, 181, 0.105)', color: '#fff' }}
                   />
                 )}
                 {taskType === 'recurring' && (
@@ -171,7 +171,7 @@ export function ScheduleTab({
                     value={taskInterval}
                     onChange={(e) => setTaskInterval(parseFloat(e.target.value) || 0)}
                     className="form-input"
-                    style={{ width: '100%', padding: '6px 10px', fontSize: '0.8rem', height: '34px', background: 'rgba(6, 9, 19, 0.8)', border: '1px solid rgba(0, 240, 255, 0.15)', color: '#fff' }}
+                    style={{ width: '100%', padding: '6px 10px', fontSize: '0.8rem', height: '34px', background: 'rgba(8, 9, 14, 0.8)', border: '1px solid rgba(157, 166, 181, 0.105)', color: '#fff' }}
                   />
                 )}
               </div>
@@ -184,7 +184,7 @@ export function ScheduleTab({
                 value={taskPrompt}
                 onChange={(e) => setTaskPrompt(e.target.value)}
                 className="form-input"
-                style={{ width: '100%', padding: '8px 10px', fontSize: '0.8rem', height: '80px', background: 'rgba(6, 9, 19, 0.8)', border: '1px solid rgba(0, 240, 255, 0.15)', color: '#fff', resize: 'vertical' }}
+                style={{ width: '100%', padding: '8px 10px', fontSize: '0.8rem', height: '80px', background: 'rgba(8, 9, 14, 0.8)', border: '1px solid rgba(157, 166, 181, 0.105)', color: '#fff', resize: 'vertical' }}
               />
             </div>
 
@@ -217,10 +217,10 @@ export function ScheduleTab({
                   style={{
                     ...styles.timerCard,
                     borderColor: timer.status === 'running' 
-                      ? (timer.type === 'alarm' ? 'rgba(249, 115, 22, 0.2)' : (timer.type === 'recurring' ? 'rgba(16, 185, 129, 0.2)' : 'rgba(0, 240, 255, 0.2)')) 
+                      ? (timer.type === 'alarm' ? 'rgba(246, 184, 74, 0.2)' : (timer.type === 'recurring' ? 'rgba(53, 212, 154, 0.2)' : 'rgba(94, 225, 255, 0.2)')) 
                       : 'rgba(255, 255, 255, 0.05)',
                     backgroundColor: timer.status === 'running' 
-                      ? (timer.type === 'alarm' ? 'rgba(249, 115, 22, 0.02)' : (timer.type === 'recurring' ? 'rgba(16, 185, 129, 0.02)' : 'rgba(0, 240, 255, 0.02)')) 
+                      ? (timer.type === 'alarm' ? 'rgba(246, 184, 74, 0.02)' : (timer.type === 'recurring' ? 'rgba(53, 212, 154, 0.02)' : 'rgba(94, 225, 255, 0.02)')) 
                       : 'rgba(255, 255, 255, 0.01)',
                     display: 'flex',
                     flexDirection: 'column',
@@ -235,7 +235,7 @@ export function ScheduleTab({
                         style={{
                           background: 'none',
                           border: 'none',
-                          color: 'rgba(239, 68, 68, 0.65)',
+                          color: 'rgba(240, 93, 117, 0.65)',
                           cursor: 'pointer',
                           padding: '4px',
                           display: 'flex',
@@ -246,11 +246,11 @@ export function ScheduleTab({
                           marginLeft: '8px',
                         }}
                         onMouseEnter={(e) => {
-                          e.currentTarget.style.color = '#ef4444';
-                          e.currentTarget.style.backgroundColor = 'rgba(239, 68, 68, 0.1)';
+                          e.currentTarget.style.color = '#f05d75';
+                          e.currentTarget.style.backgroundColor = 'rgba(240, 93, 117, 0.1)';
                         }}
                         onMouseLeave={(e) => {
-                          e.currentTarget.style.color = 'rgba(239, 68, 68, 0.65)';
+                          e.currentTarget.style.color = 'rgba(240, 93, 117, 0.65)';
                           e.currentTarget.style.backgroundColor = 'transparent';
                         }}
                         title={timer.status === 'running' ? 'Cancel' : 'Dismiss'}
@@ -261,11 +261,11 @@ export function ScheduleTab({
                     <span style={{
                       ...styles.timerStatusBadge,
                       color: timer.status === 'running' 
-                          ? (timer.type === 'alarm' ? '#f97316' : (timer.type === 'recurring' ? '#10b981' : 'var(--accent-cyan)')) 
+                          ? (timer.type === 'alarm' ? '#f6b84a' : (timer.type === 'recurring' ? '#35d49a' : 'var(--accent-cyan)')) 
                           : 'var(--success)',
                       borderColor: timer.status === 'running' 
-                          ? (timer.type === 'alarm' ? 'rgba(249, 115, 22, 0.3)' : (timer.type === 'recurring' ? 'rgba(16, 185, 129, 0.3)' : 'rgba(0, 240, 255, 0.3)')) 
-                          : 'rgba(16, 185, 129, 0.3)'
+                          ? (timer.type === 'alarm' ? 'rgba(246, 184, 74, 0.3)' : (timer.type === 'recurring' ? 'rgba(53, 212, 154, 0.3)' : 'rgba(94, 225, 255, 0.3)')) 
+                          : 'rgba(53, 212, 154, 0.3)'
                     }}>
                       {timer.status === 'running' 
                         ? (timer.type === 'alarm' ? 'WAITING' : (timer.type === 'recurring' ? 'RECURRING' : 'COUNTDOWN')) 

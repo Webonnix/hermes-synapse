@@ -28,9 +28,10 @@ import {
 import type { ChatMessage, SystemConfig, ChatSession, Project } from '../types';
 import { styles } from '../styles';
 import { renderMarkdown } from '../utils';
+import { ShareConversation } from './ShareConversation';
 
 function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem('jarvis_auth_token');
+  const token = localStorage.getItem('vexa_auth_token');
   return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
 }
 
@@ -305,7 +306,7 @@ export function ChatTab({
         }}
         onBlur={submitNewProject}
         placeholder="Folder name…"
-        style={{ fontSize: '0.78rem', background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(155, 136, 255, 0.5)', borderRadius: '4px', color: '#fff', padding: '3px 6px', width: '100%', outline: 'none' }}
+        style={{ fontSize: '0.78rem', background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(146, 119, 255, 0.5)', borderRadius: '4px', color: '#fff', padding: '3px 6px', width: '100%', outline: 'none' }}
       />
     </div>
   );
@@ -332,15 +333,15 @@ export function ChatTab({
                     paddingLeft: `${depth * 16 + (isDashboard ? 12 : 12)}px`,
                     borderRadius: '8px',
                     border: isDashboard
-                      ? (isActive ? '1px solid rgba(0, 240, 255, 0.7)' : '1px solid rgba(0, 240, 255, 0.25)')
-                      : (isActive ? '1px solid rgba(0, 240, 255, 0.4)' : '1px solid rgba(255, 255, 255, 0.03)'),
+                      ? (isActive ? '1px solid rgba(157, 166, 181, 0.49)' : '1px solid rgba(94, 225, 255, 0.25)')
+                      : (isActive ? '1px solid rgba(94, 225, 255, 0.4)' : '1px solid rgba(255, 255, 255, 0.03)'),
                     backgroundColor: isDashboard
-                      ? (isActive ? 'rgba(0, 240, 255, 0.08)' : 'rgba(0, 240, 255, 0.02)')
-                      : (isActive ? 'rgba(0, 240, 255, 0.04)' : 'rgba(255, 255, 255, 0.01)'),
+                      ? (isActive ? 'rgba(94, 225, 255, 0.08)' : 'rgba(94, 225, 255, 0.02)')
+                      : (isActive ? 'rgba(94, 225, 255, 0.04)' : 'rgba(255, 255, 255, 0.01)'),
                     cursor: 'pointer',
                     transition: 'all 0.2s',
                     position: 'relative',
-                    boxShadow: isDashboard ? '0 0 10px rgba(0, 240, 255, 0.04)' : 'none'
+                    boxShadow: isDashboard ? '0 0 10px rgba(94, 225, 255, 0.02)' : 'none'
                   }}
                   onClick={() => {
                     if (editingSessionId !== s) {
@@ -377,7 +378,7 @@ export function ChatTab({
                             style={{
                               fontSize: '0.8rem',
                               background: 'rgba(0, 0, 0, 0.4)',
-                              border: '1px solid rgba(0, 240, 255, 0.5)',
+                              border: '1px solid rgba(157, 166, 181, 0.35)',
                               borderRadius: '4px',
                               color: '#fff',
                               padding: '2px 6px',
@@ -392,12 +393,12 @@ export function ChatTab({
                         )}
                         {isDashboard && (
                           <span title="Protected core session" style={{ display: 'flex', alignItems: 'center' }}>
-                            <Lock size={10} style={{ color: 'rgba(0, 240, 255, 0.4)', flexShrink: 0 }} />
+                            <Lock size={10} style={{ color: 'rgba(94, 225, 255, 0.4)', flexShrink: 0 }} />
                           </span>
                         )}
                       </div>
                       {isDashboard && (
-                        <span style={{ fontSize: '0.6rem', color: 'rgba(0, 240, 255, 0.65)', fontWeight: 500, letterSpacing: '0.5px' }}>MAIN ORCHESTRATOR</span>
+                        <span style={{ fontSize: '0.6rem', color: 'rgba(94, 225, 255, 0.65)', fontWeight: 500, letterSpacing: '0.5px' }}>MAIN ORCHESTRATOR</span>
                       )}
                     </div>
                   </div>
@@ -428,8 +429,8 @@ export function ChatTab({
                         right: '0',
                         top: '100%',
                         marginTop: '4px',
-                        background: 'rgba(15, 20, 25, 0.95)',
-                        border: '1px solid rgba(0, 240, 255, 0.2)',
+                        background: 'rgba(16, 19, 26, 0.95)',
+                        border: '1px solid rgba(157, 166, 181, 0.14)',
                         borderRadius: '8px',
                         padding: '4px',
                         zIndex: 100,
@@ -459,9 +460,9 @@ export function ChatTab({
                               onChange={(e) => { handleSetSessionProject(s, e.target.value); setActiveMenu(null); }}
                               style={{ width: '100%', fontSize: '0.72rem', background: 'rgba(0,0,0,0.35)', color: '#fff', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '4px', padding: '3px 4px' }}
                             >
-                              <option value="" style={{ background: '#0b0f19' }}>— No folder —</option>
+                              <option value="" style={{ background: '#0d0f15' }}>— No folder —</option>
                               {projects.map(p => (
-                                <option key={p.id} value={p.id} style={{ background: '#0b0f19' }}>
+                                <option key={p.id} value={p.id} style={{ background: '#0d0f15' }}>
                                   {'  '.repeat(projectDepth.get(p.id) || 0)}{p.name}
                                 </option>
                               ))}
@@ -500,9 +501,9 @@ export function ChatTab({
                                 } catch(err) { console.error(err); }
                               }
                             }}
-                            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(239,68,68,0.1)'}
+                            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(240,93,117,0.1)'}
                             onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                            style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', color: 'rgba(239,68,68,0.9)', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderRadius: '4px', fontSize: '0.75rem', transition: 'background-color 0.2s' }}
+                            style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', color: 'rgba(240,93,117,0.9)', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderRadius: '4px', fontSize: '0.75rem', transition: 'background-color 0.2s' }}
                           ><Trash2 size={12}/> Purge</button>
                         ) : (
                           <>
@@ -539,9 +540,9 @@ export function ChatTab({
                                   } catch (err) { console.error(err); }
                                 }
                               }}
-                              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(239,68,68,0.1)'}
+                              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(240,93,117,0.1)'}
                               onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                              style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', color: 'rgba(239,68,68,0.9)', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderRadius: '4px', fontSize: '0.75rem', transition: 'background-color 0.2s' }}
+                              style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', color: 'rgba(240,93,117,0.9)', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderRadius: '4px', fontSize: '0.75rem', transition: 'background-color 0.2s' }}
                             ><Trash2 size={12}/> Delete</button>
                           </>
                         )}
@@ -583,7 +584,7 @@ export function ChatTab({
                   else if (e.key === 'Escape') setRenamingProjectId(null);
                 }}
                 onBlur={() => submitRenameProject(node.id)}
-                style={{ fontSize: '0.8rem', background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(155, 136, 255, 0.5)', borderRadius: '4px', color: '#fff', padding: '2px 6px', width: '100%', outline: 'none' }}
+                style={{ fontSize: '0.8rem', background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(146, 119, 255, 0.5)', borderRadius: '4px', color: '#fff', padding: '2px 6px', width: '100%', outline: 'none' }}
               />
             ) : (
               <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-dim)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{node.name}</span>
@@ -600,7 +601,7 @@ export function ChatTab({
             {projectMenuOpenId === node.id && (
               <div style={{
                 position: 'absolute', right: 0, top: '100%', marginTop: '4px',
-                background: 'rgba(15, 20, 25, 0.95)', border: '1px solid rgba(155, 136, 255, 0.25)',
+                background: 'rgba(16, 19, 26, 0.95)', border: '1px solid rgba(146, 119, 255, 0.25)',
                 borderRadius: '8px', padding: '4px', zIndex: 100, display: 'flex',
                 flexDirection: 'column', minWidth: '150px', boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
               }}>
@@ -622,9 +623,9 @@ export function ChatTab({
                 ><Edit2 size={12}/> Rename</button>
                 <button
                   onClick={(e) => { e.stopPropagation(); setProjectMenuOpenId(null); deleteProjectFolder(node.id, node.name); }}
-                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(239,68,68,0.1)'}
+                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(240,93,117,0.1)'}
                   onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                  style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', color: 'rgba(239,68,68,0.9)', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderRadius: '4px', fontSize: '0.75rem' }}
+                  style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', color: 'rgba(240,93,117,0.9)', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderRadius: '4px', fontSize: '0.75rem' }}
                 ><Trash2 size={12}/> Delete folder</button>
               </div>
             )}
@@ -676,13 +677,21 @@ export function ChatTab({
             </span>
           </div>
 
+          {/* Public read-only snapshot of this conversation. */}
+          <ShareConversation chatId={currentChatId} />
+
           {/* Active Session Project + Orchestrator Selectors */}
           {currentChatId !== 'dashboard' && !subagents.some(a => a.id === currentChatId) && (() => {
             const activeProjectId = chatSessions.find(s => s.id === currentChatId)?.project_id || '';
             // A project narrows which agents make sense here — once one is
-            // picked, only agents assigned to it (plus Vexa, always
-            // available) show up in the orchestrator dropdown below.
-            const scopedSubagents = activeProjectId ? subagents.filter(a => a.project_id === activeProjectId) : subagents;
+            // picked, agents assigned to it (plus Vexa, always available)
+            // show up in the orchestrator dropdown below. Agents nobody has
+            // scoped to any project yet stay available everywhere, so an
+            // unconfigured project never collapses this list down to Vexa
+            // alone.
+            const scopedSubagents = activeProjectId
+              ? subagents.filter(a => a.project_id === activeProjectId || !a.project_id)
+              : subagents;
             return (
               <>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginLeft: '8px', background: 'rgba(255, 255, 255, 0.02)', padding: '6px 12px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.06)' }}>
@@ -700,16 +709,16 @@ export function ChatTab({
                       cursor: 'pointer'
                     }}
                   >
-                    <option value="" style={{ background: '#0b0f19', color: '#fff' }}>— No project —</option>
+                    <option value="" style={{ background: '#0d0f15', color: '#fff' }}>— No project —</option>
                     {projects.map(p => (
-                      <option key={p.id} value={p.id} style={{ background: '#0b0f19', color: '#fff' }}>{'  '.repeat(projectDepth.get(p.id) || 0)}{p.name}</option>
+                      <option key={p.id} value={p.id} style={{ background: '#0d0f15', color: '#fff' }}>{'  '.repeat(projectDepth.get(p.id) || 0)}{p.name}</option>
                     ))}
                   </select>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginLeft: '8px', background: 'rgba(255, 255, 255, 0.02)', padding: '6px 12px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.06)' }}>
                   <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>ORCHESTRATOR:</span>
                   <select
-                    value={chatSessions.find(s => s.id === currentChatId)?.agent_id || 'jarvis'}
+                    value={chatSessions.find(s => s.id === currentChatId)?.agent_id || 'vexa'}
                     onChange={(e) => handleSetSessionAgent(currentChatId, e.target.value)}
                     style={{
                       background: 'transparent',
@@ -721,9 +730,9 @@ export function ChatTab({
                       cursor: 'pointer'
                     }}
                   >
-                    <option value="jarvis" style={{ background: '#0b0f19', color: '#fff' }}>Vexa (Main)</option>
+                    <option value="vexa" style={{ background: '#0d0f15', color: '#fff' }}>Vexa (Main)</option>
                     {scopedSubagents.map(a => (
-                      <option key={a.id} value={a.id} style={{ background: '#0b0f19', color: '#fff' }}>
+                      <option key={a.id} value={a.id} style={{ background: '#0d0f15', color: '#fff' }}>
                         {a.name} ({a.agent_type === 'orchestrator' || a.agent_type === 'sub-orchestrator' ? 'Orchestrator' : 'Agent'})
                       </option>
                     ))}
@@ -743,26 +752,26 @@ export function ChatTab({
           {/* Mic state indicator */}
           {micState === 'listening' && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span className="pulse-dot" style={{ width: 10, height: 10, background: 'var(--accent-cyan)', boxShadow: '0 0 8px rgba(115, 217, 255, 0.55)' }} />
+              <span className="pulse-dot" style={{ width: 10, height: 10, background: 'var(--accent-cyan)', boxShadow: '0 0 8px rgba(94, 225, 255, 0.275)' }} />
               <span style={{ fontSize: '0.75rem', color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)' }}>MIC</span>
             </div>
           )}
           {micState === 'capturing' && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span className="pulse-dot" style={{ width: 10, height: 10, background: 'var(--accent-orange)', boxShadow: '0 0 8px rgba(255, 195, 72, 0.65)' }} />
+              <span className="pulse-dot" style={{ width: 10, height: 10, background: 'var(--accent-orange)', boxShadow: '0 0 8px rgba(246, 184, 74, 0.325)' }} />
               <span style={{ fontSize: '0.75rem', color: 'var(--accent-orange)', fontFamily: 'var(--font-mono)' }}>REC</span>
             </div>
           )}
           {micState === 'transcribing' && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span className="pulse-dot" style={{ width: 10, height: 10, background: 'var(--accent-violet)', boxShadow: '0 0 8px rgba(155, 136, 255, 0.65)' }} />
+              <span className="pulse-dot" style={{ width: 10, height: 10, background: 'var(--accent-violet)', boxShadow: '0 0 8px rgba(146, 119, 255, 0.325)' }} />
               <span style={{ fontSize: '0.75rem', color: 'var(--accent-violet)', fontFamily: 'var(--font-mono)' }}>STT</span>
             </div>
           )}
           {micState === 'error' && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }} title={micErrorMessage}>
-              <span style={{ width: 10, height: 10, borderRadius: '50%', background: 'var(--danger, #ff5d8f)', boxShadow: '0 0 8px rgba(255, 93, 143, 0.55)' }} />
-              <span style={{ fontSize: '0.75rem', color: 'var(--danger, #ff5d8f)', fontFamily: 'var(--font-mono)', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <span style={{ width: 10, height: 10, borderRadius: '50%', background: 'var(--danger, #f05d75)', boxShadow: '0 0 8px rgba(240, 93, 117, 0.275)' }} />
+              <span style={{ fontSize: '0.75rem', color: 'var(--danger, #f05d75)', fontFamily: 'var(--font-mono)', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {micErrorMessage || 'Не расслышала'}
               </span>
             </div>
@@ -779,17 +788,17 @@ export function ChatTab({
             style={{
               padding: '6px 12px',
               border: micState === 'capturing'
-                ? '1px solid rgba(255, 195, 72, 0.62)'
+                ? '1px solid rgba(246, 184, 74, 0.62)'
                 : micState === 'transcribing'
-                  ? '1px solid rgba(155, 136, 255, 0.5)'
+                  ? '1px solid rgba(146, 119, 255, 0.5)'
                 : micEnabled
-                  ? '1px solid rgba(115, 217, 255, 0.42)'
+                  ? '1px solid rgba(94, 225, 255, 0.42)'
                   : '1px solid rgba(255,255,255,0.15)',
               color: micState === 'capturing' ? 'var(--accent-orange)' : micState === 'transcribing' ? 'var(--accent-violet)' : micEnabled ? 'var(--accent-cyan)' : 'var(--text-dim)',
               boxShadow: micState === 'capturing'
-                ? '0 0 10px rgba(255, 195, 72, 0.28)'
-                : micState === 'transcribing' ? '0 0 10px rgba(155, 136, 255, 0.24)'
-                : micEnabled ? '0 0 8px rgba(115, 217, 255, 0.22)' : 'none',
+                ? '0 0 10px rgba(246, 184, 74, 0.14)'
+                : micState === 'transcribing' ? '0 0 10px rgba(146, 119, 255, 0.24)'
+                : micEnabled ? '0 0 8px rgba(94, 225, 255, 0.22)' : 'none',
               transition: 'all 0.2s',
             }}
           >
@@ -808,17 +817,17 @@ export function ChatTab({
             style={{
               padding: '6px 12px',
               border: isTTSEnabled
-                ? '1px solid rgba(155, 136, 255, 0.45)'
+                ? '1px solid rgba(146, 119, 255, 0.45)'
                 : '1px solid rgba(255,255,255,0.15)',
               color: isTTSEnabled ? 'var(--accent-violet)' : 'var(--text-dim)',
-              boxShadow: isTTSEnabled ? '0 0 8px rgba(155, 136, 255, 0.24)' : 'none',
+              boxShadow: isTTSEnabled ? '0 0 8px rgba(146, 119, 255, 0.12)' : 'none',
               transition: 'all 0.2s',
             }}
           >
             {isTTSEnabled ? <Volume2 size={14} /> : <VolumeX size={14} />}
             <span>{isTTSEnabled ? 'Voice on' : 'Voice off'}</span>
           </button>
-          <button onClick={handleClearChat} className="btn-primary" style={{ padding: '6px 12px', border: '1px solid rgba(255, 93, 143, 0.4)', color: 'var(--danger)' }}>
+          <button onClick={handleClearChat} className="btn-primary" style={{ padding: '6px 12px', border: '1px solid rgba(240, 93, 117, 0.4)', color: 'var(--danger)' }}>
             <Trash2 size={14} />
             <span>Clear Chat</span>
           </button>
@@ -848,15 +857,15 @@ export function ChatTab({
               gap: '8px',
               padding: '10px 14px',
               borderRadius: '8px',
-              border: '1px solid rgba(155, 136, 255, 0.34)',
-              background: 'linear-gradient(135deg, rgba(155, 136, 255, 0.18) 0%, rgba(115, 217, 255, 0.06) 100%)',
+              border: '1px solid rgba(146, 119, 255, 0.34)',
+              background: 'linear-gradient(135deg, rgba(146, 119, 255, 0.18) 0%, rgba(94, 225, 255, 0.06) 100%)',
               color: '#fff',
               fontWeight: 600,
               fontSize: '0.85rem',
               cursor: 'pointer',
               transition: 'all 0.2s',
               width: '100%',
-              boxShadow: '0 0 12px rgba(155, 136, 255, 0.12)'
+              boxShadow: '0 0 12px rgba(146, 119, 255, 0.06)'
             }}
           >
             <Plus size={16} style={{ color: 'var(--accent-cyan)' }} />
@@ -908,8 +917,8 @@ export function ChatTab({
         <div style={{ ...styles.chatArea, flex: 1, height: '100%' }} className="glass-panel">
           {!isConnected && (
             <div role="status" style={{
-              background: 'rgba(255, 93, 143, 0.1)',
-              border: '1px solid rgba(255, 93, 143, 0.3)',
+              background: 'rgba(240, 93, 117, 0.1)',
+              border: '1px solid rgba(240, 93, 117, 0.3)',
               color: 'var(--danger)',
               padding: '6px 12px',
               borderRadius: 8,
@@ -938,8 +947,8 @@ export function ChatTab({
                   <div 
                     style={{
                       ...styles.msgBubble,
-                      backgroundColor: msg.role === 'user' ? 'rgba(255, 195, 72, 0.12)' : 'rgba(155, 136, 255, 0.08)',
-                      borderColor: msg.role === 'user' ? 'rgba(255, 195, 72, 0.3)' : 'rgba(155, 136, 255, 0.22)',
+                      backgroundColor: msg.role === 'user' ? 'rgba(246, 184, 74, 0.12)' : 'rgba(146, 119, 255, 0.08)',
+                      borderColor: msg.role === 'user' ? 'rgba(246, 184, 74, 0.3)' : 'rgba(146, 119, 255, 0.22)',
                       alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start'
                     }}
                   >
@@ -952,8 +961,8 @@ export function ChatTab({
                           <span style={{
                             fontSize: '0.7rem',
                             color: 'var(--success)',
-                            backgroundColor: 'rgba(95, 240, 191, 0.1)',
-                            border: '1px solid rgba(95, 240, 191, 0.2)',
+                            backgroundColor: 'rgba(53, 212, 154, 0.1)',
+                            border: '1px solid rgba(53, 212, 154, 0.2)',
                             padding: '1px 5px',
                             borderRadius: '4px',
                             fontFamily: 'var(--font-mono)',
@@ -976,14 +985,14 @@ export function ChatTab({
                               cursor: 'pointer',
                               padding: '2px 4px',
                               borderRadius: '4px',
-                              color: playingMsgIndex === index ? 'var(--accent-orange)' : 'rgba(115, 217, 255, 0.58)',
+                              color: playingMsgIndex === index ? 'var(--accent-orange)' : 'rgba(94, 225, 255, 0.58)',
                               display: 'flex',
                               alignItems: 'center',
                               transition: 'color 0.2s, transform 0.15s',
                               transform: playingMsgIndex === index ? 'scale(1.15)' : 'scale(1)',
                             }}
                             onMouseEnter={e => (e.currentTarget.style.color = playingMsgIndex === index ? 'var(--accent-orange)' : 'var(--accent-cyan)')}
-                            onMouseLeave={e => (e.currentTarget.style.color = playingMsgIndex === index ? 'var(--accent-orange)' : 'rgba(115, 217, 255, 0.58)')}
+                            onMouseLeave={e => (e.currentTarget.style.color = playingMsgIndex === index ? 'var(--accent-orange)' : 'rgba(94, 225, 255, 0.58)')}
                           >
                             {playingMsgIndex === index
                               ? <Square size={12} fill="currentColor" />
@@ -1166,9 +1175,9 @@ export function ChatTab({
                 aria-label={tr('chatStop', 'Stop')}
                 title={tr('chatStop', 'Stop generation')}
                 style={{
-                  border: '1px solid rgba(255, 195, 72, 0.5)',
+                  border: '1px solid rgba(246, 184, 74, 0.5)',
                   color: 'var(--accent-orange)',
-                  backgroundColor: 'rgba(255, 195, 72, 0.06)'
+                  backgroundColor: 'rgba(246, 184, 74, 0.06)'
                 }}
               >
                 <Square size={14} fill="currentColor" />
@@ -1185,9 +1194,9 @@ export function ChatTab({
                 }}
                 className="btn-primary"
                 style={{
-                  border: '1px solid rgba(255, 93, 143, 0.4)',
+                  border: '1px solid rgba(240, 93, 117, 0.4)',
                   color: 'var(--danger)',
-                  backgroundColor: 'rgba(255, 93, 143, 0.06)'
+                  backgroundColor: 'rgba(240, 93, 117, 0.06)'
                 }}
                 title="Interrupt current assistant speech"
               >

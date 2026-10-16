@@ -1,9 +1,10 @@
 import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
+import { pwaPlugin } from './vite.pwa-plugin.ts'
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), pwaPlugin()],
   server: {
     proxy: {
       '/api': {
@@ -17,5 +18,12 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: './src/setupTests.ts',
+    // `tests/` holds checks that read the source tree itself, so they need node
+    // types the app build does not have — they live outside `src` for that
+    // reason and are typed by tsconfig.node.json.
+    include: ['src/**/*.{test,spec}.{ts,tsx}', 'tests/**/*.{test,spec}.{ts,tsx}'],
+    // tests/smoke/ is the Playwright suite: it drives a real browser against a
+    // running container and is run by the browser-smoke workflow, not vitest.
+    exclude: ['**/node_modules/**', '**/dist/**', 'tests/smoke/**'],
   },
 })

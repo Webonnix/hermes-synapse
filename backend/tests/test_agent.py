@@ -1,8 +1,25 @@
+import os
 import pytest
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 from backend.agent import VexaAgent, DEFAULT_SYSTEM_PROMPT
 from backend import database
+
+@pytest.fixture(autouse=True)
+def pin_pre_flight_routers():
+    """Keep the two pre-flight routers out of the mocked call sequence.
+
+    Both the complexity router and the delegation classifier make their own
+    cheap LLM call before the turn proper. Whenever the ambient environment
+    left either of them enabled, that call swallowed the first response in a
+    test's `side_effect` list and every assertion downstream shifted by one —
+    tests that pass or fail depending on the box they run on. Pin them here so
+    a mocked sequence means exactly what it says.
+    """
+    with patch.dict(os.environ, {"COMPLEXITY_ROUTING": "keyword",
+                                 "ROUTER_DELEGATION_MODE": "always_local"}):
+        yield
+
 
 @pytest.fixture(autouse=True)
 def setup_test_db(tmp_path):
@@ -34,7 +51,7 @@ def agent():
 def test_agent_initial_state(agent):
     import os
     assert agent.system_prompt == DEFAULT_SYSTEM_PROMPT
-    assert agent.model == os.getenv("LLM_MODEL", "qwen3:8b")
+    assert agent.model == os.getenv("LLM_MODEL", "qwen3.8-27b")
 
 def test_update_system_prompt(agent):
     new_prompt = "New prompt content"
@@ -46,30 +63,30 @@ def test_provider_switch_restores_provider_specific_endpoint(agent):
     agent.provider = "openrouter"
     agent.api_base = "https://openrouter.example/v1"
     agent.openai_api_base = "https://openrouter.example/v1"
-    agent.ollama_base_url = "http://ollama:11434"
+    agent.local_base_url = "http://hermes-llama:8080"
 
-    agent.update_runtime_config(provider="ollama")
-    assert agent.api_base == "http://ollama:11434"
+    agent.update_runtime_config(provider="llamacpp")
+    assert agent.api_base == "http://hermes-llama:8080"
 
     agent.update_runtime_config(provider="openrouter")
     assert agent.api_base == "https://openrouter.example/v1"
 
 
 def test_locked_provider_endpoint_ignores_persisted_dashboard_url(monkeypatch):
-    monkeypatch.setenv("LLM_PROVIDER", "ollama")
-    monkeypatch.setenv("OLLAMA_BASE_URL", "http://hermes-ollama:11434")
+    monkeypatch.setenv("LLM_PROVIDER", "llamacpp")
+    monkeypatch.setenv("LLAMACPP_BASE_URL", "http://hermes-llama:8080")
     monkeypatch.setenv("LLM_LOCK_PROVIDER_ENDPOINT", "true")
     database.save_app_settings({
-        "provider": "ollama",
-        "api_base": "http://127.0.0.1:11434",
-        "ollama_base_url": "http://127.0.0.1:11434",
+        "provider": "llamacpp",
+        "api_base": "http://127.0.0.1:8080",
+        "local_base_url": "http://127.0.0.1:8080",
     })
 
     locked_agent = VexaAgent()
 
-    assert locked_agent.provider == "ollama"
-    assert locked_agent.api_base == "http://hermes-ollama:11434"
-    assert locked_agent.ollama_base_url == "http://hermes-ollama:11434"
+    assert locked_agent.provider == "llamacpp"
+    assert locked_agent.api_base == "http://hermes-llama:8080"
+    assert locked_agent.local_base_url == "http://hermes-llama:8080"
     assert locked_agent.get_runtime_config()["provider_endpoint_locked"] is True
 
 @pytest.mark.asyncio
@@ -273,28 +290,33 @@ def test_local_provider_message_sanitization_and_qwen_reasoning_cleanup():
 def test_visible_answer_retry_disables_thinking_and_has_safe_budget():
     from backend.agent import _visible_answer_retry_budget, _visible_answer_retry_options
 
-    options = _visible_answer_retry_options({"provider": "ollama", "think": "true", "num_ctx": 131072})
+    options = _visible_answer_retry_options({"provider": "llamacpp", "think": "true", "num_ctx": 131072})
 
     assert options["think"] is False
     assert options["num_ctx"] == 131072
     assert _visible_answer_retry_budget(256) == 512
     assert _visible_answer_retry_budget(2048) == 2048
     assert _visible_answer_retry_budget(9000) == 4096
+    # A call that already died on `length` must not be recovered under the same
+    # ceiling — that just reproduces the truncation.
+    assert _visible_answer_retry_budget(2048, "length") == 4096
+    assert _visible_answer_retry_budget(256, "length") == 2048
+    assert _visible_answer_retry_budget(9000, "length") == 8192
 
 
 @pytest.mark.asyncio
-async def test_ollama_reasoning_only_retry_forces_visible_answer(agent):
+async def test_local_reasoning_only_retry_forces_visible_answer(agent):
     from backend.llm_client import LLMUsage, NormalizedLLMResponse, STATUS_EMPTY, STATUS_SUCCESS
 
-    agent.provider = "ollama"
-    agent.api_base = "http://ollama:11434"
-    agent.ollama_base_url = agent.api_base
-    agent.ollama_think = "true"
+    agent.provider = "llamacpp"
+    agent.api_base = "http://hermes-llama:8080"
+    agent.local_base_url = agent.api_base
+    agent.local_think = "true"
     agent.max_tokens = 256
     agent.auto_rag = False
     first = NormalizedLLMResponse(
         status=STATUS_EMPTY,
-        provider="ollama",
+        provider="llamacpp",
         model=agent.model,
         reasoning="internal trace",
         finish_reason="length",
@@ -303,7 +325,7 @@ async def test_ollama_reasoning_only_retry_forces_visible_answer(agent):
     )
     recovered = NormalizedLLMResponse(
         status=STATUS_SUCCESS,
-        provider="ollama",
+        provider="llamacpp",
         model=agent.model,
         content="Привет. Я Vexa.",
         finish_reason="stop",
@@ -311,13 +333,229 @@ async def test_ollama_reasoning_only_retry_forces_visible_answer(agent):
     )
 
     with patch("backend.llm_client.call_llm_normalized", new=AsyncMock(side_effect=[first, recovered])) as call:
-        response = await agent.respond("Привет", session_id="ollama_reasoning_recovery")
+        response = await agent.respond("Привет", session_id="local_reasoning_recovery")
 
     assert response == "Привет. Я Vexa."
     assert call.await_count == 2
     assert call.await_args_list[0].kwargs["provider_options"]["think"] == "true"
     assert call.await_args_list[1].kwargs["provider_options"]["think"] is False
-    assert call.await_args_list[1].kwargs["max_tokens"] == 512
+    assert call.await_args_list[1].kwargs["max_tokens"] == 2048
+
+
+@pytest.mark.asyncio
+@patch("backend.agent.asyncio.to_thread", new_callable=AsyncMock)
+async def test_empty_response_after_tool_execution_still_recovers(mock_to_thread, agent):
+    """The regression this whole change exists for.
+
+    The model runs a tool, then spends its entire budget writing the *next* tool
+    call; the provider drops the truncated call, so the turn returns neither
+    content nor tool calls. The recovery used to be skipped outright whenever a
+    tool had run, and the user got a fallback claiming a retry had been made.
+    """
+    from backend.llm_client import LLMUsage, NormalizedLLMResponse, STATUS_EMPTY, STATUS_SUCCESS, STATUS_TOOL_CALL
+
+    agent.provider = "llamacpp"
+    agent.api_base = "http://hermes-llama:8080"
+    agent.local_base_url = agent.api_base
+    agent.local_think = False
+    agent.tool_max_tokens = 2048
+    agent.auto_rag = False
+
+    tool_turn = NormalizedLLMResponse(
+        status=STATUS_TOOL_CALL, provider="llamacpp", model=agent.model, finish_reason="stop",
+        tool_calls=[{"id": "c1", "type": "function",
+                     "function": {"name": "get_system_stats", "arguments": "{}"}}],
+        usage=LLMUsage(input_tokens=10, output_tokens=12),
+    )
+    def truncated():
+        return NormalizedLLMResponse(
+            status=STATUS_EMPTY, provider="llamacpp", model=agent.model, finish_reason="length",
+            usage=LLMUsage(input_tokens=40, output_tokens=2048),
+            error_message="Response truncated (max_tokens reached) before any text.",
+        )
+    recovered = NormalizedLLMResponse(
+        status=STATUS_SUCCESS, provider="llamacpp", model=agent.model, finish_reason="stop",
+        content="Сервер загружен на 12%.", usage=LLMUsage(input_tokens=45, output_tokens=9),
+    )
+
+    # Tool turn, a truncated turn, the doubled-budget retry of it (also
+    # truncated), and only then the tool-free prose recovery.
+    with patch("backend.tools.execute_tool", return_value={"cpu": 12}), \
+         patch("backend.llm_client.call_llm_normalized",
+               new=AsyncMock(side_effect=[tool_turn, truncated(), truncated(), recovered])) as call:
+        response = await agent.respond("Как сервер?", session_id="empty_after_tools")
+
+    assert response == "Сервер загружен на 12%."
+    assert call.await_count == 4
+    recovery = call.await_args_list[-1].kwargs
+    # No tools on the recovery call: it cannot re-trigger a side effect, which is
+    # exactly what makes it safe to run after a tool has already executed.
+    assert not recovery.get("tools")
+    assert recovery["max_tokens"] == 4096
+    assert "Инструменты уже выполнены" in recovery["messages"][-1]["content"]
+
+
+@pytest.mark.asyncio
+@patch("backend.agent.asyncio.to_thread", new_callable=AsyncMock)
+async def test_truncated_tool_turn_is_retried_once_with_a_bigger_budget(mock_to_thread, agent):
+    """A tool call that outgrew num_predict is retried, not abandoned.
+
+    The provider drops the half-written call, so the turn comes back with
+    neither content nor tool calls. Nothing ran, so repeating the same move
+    with more room is safe — and it is what actually gets the work done.
+    """
+    from backend.llm_client import LLMUsage, NormalizedLLMResponse, STATUS_EMPTY, STATUS_SUCCESS, STATUS_TOOL_CALL
+
+    agent.provider = "llamacpp"
+    agent.api_base = "http://hermes-llama:8080"
+    agent.local_base_url = agent.api_base
+    agent.local_think = False
+    agent.tool_max_tokens = 2048
+    agent.auto_rag = False
+
+    truncated = NormalizedLLMResponse(
+        status=STATUS_EMPTY, provider="llamacpp", model=agent.model, finish_reason="length",
+        usage=LLMUsage(input_tokens=40, output_tokens=2048),
+    )
+    tool_turn = NormalizedLLMResponse(
+        status=STATUS_TOOL_CALL, provider="llamacpp", model=agent.model, finish_reason="stop",
+        tool_calls=[{"id": "c1", "type": "function",
+                     "function": {"name": "get_system_stats", "arguments": "{}"}}],
+        usage=LLMUsage(input_tokens=45, output_tokens=900),
+    )
+    done = NormalizedLLMResponse(
+        status=STATUS_SUCCESS, provider="llamacpp", model=agent.model, finish_reason="stop",
+        content="Готово.", usage=LLMUsage(input_tokens=60, output_tokens=5),
+    )
+
+    with patch("backend.tools.execute_tool", return_value={"cpu": 12}), \
+         patch("backend.llm_client.call_llm_normalized",
+               new=AsyncMock(side_effect=[truncated, tool_turn, done])) as call:
+        response = await agent.respond("Как сервер?", session_id="truncated_tool_turn")
+
+    assert response == "Готово."
+    budgets = [c.kwargs["max_tokens"] for c in call.await_args_list]
+    # First attempt at the configured ceiling, the retry at double, and the
+    # escalation is not applied a second time within the turn.
+    assert budgets[0] == 2048
+    assert budgets[1] == 4096
+    assert all(c.kwargs.get("tools") for c in call.await_args_list[:2])
+
+
+def test_tool_call_signature_ignores_ids_but_not_arguments():
+    from backend.agent import _tool_call_signature
+
+    def call(cid, name, args):
+        return {"id": cid, "type": "function", "function": {"name": name, "arguments": args}}
+
+    # Same move, different call id each turn — must read as a repeat.
+    assert _tool_call_signature([call("a", "dev_exec", '{"cmd": "ls"}')]) == \
+           _tool_call_signature([call("b", "dev_exec", '{"cmd": "ls"}')])
+    # Different arguments are a different move, not a repeat.
+    assert _tool_call_signature([call("a", "dev_exec", '{"cmd": "ls"}')]) != \
+           _tool_call_signature([call("a", "dev_exec", '{"cmd": "pwd"}')])
+    # Order within one iteration is not significant.
+    assert _tool_call_signature([call("a", "x", "{}"), call("b", "y", "{}")]) == \
+           _tool_call_signature([call("c", "y", "{}"), call("d", "x", "{}")])
+
+
+async def _run_until_loop_stops(agent, *, responses, question="Собери отчёт"):
+    from unittest.mock import ANY  # noqa: F401  (kept local, mirrors other helpers)
+
+    with patch("backend.tools.execute_tool", return_value={"ok": True}), \
+         patch("backend.llm_client.call_llm_normalized",
+               new=AsyncMock(side_effect=responses)) as call:
+        text = await agent.respond(question, session_id="loop_guard")
+    return text, call
+
+
+@pytest.mark.asyncio
+@patch("backend.agent.asyncio.to_thread", new_callable=AsyncMock)
+async def test_loop_stops_on_repeated_identical_tool_calls(mock_to_thread, agent):
+    """A model reissuing the same call gets cut off well before the step cap."""
+    from backend.llm_client import LLMUsage, NormalizedLLMResponse, STATUS_SUCCESS, STATUS_TOOL_CALL
+    from backend.agent import _REPEATED_TOOL_CALL_LIMIT
+
+    agent.provider = "llamacpp"
+    agent.api_base = "http://hermes-llama:8080"
+    agent.local_base_url = agent.api_base
+    agent.auto_rag = False
+    agent.max_tool_iterations = 50
+
+    def same_call():
+        return NormalizedLLMResponse(
+            status=STATUS_TOOL_CALL, provider="llamacpp", model=agent.model, finish_reason="stop",
+            tool_calls=[{"id": "c", "type": "function",
+                         "function": {"name": "get_system_stats", "arguments": "{}"}}],
+            usage=LLMUsage(input_tokens=100, output_tokens=10),
+        )
+    wrap_up = NormalizedLLMResponse(
+        status=STATUS_SUCCESS, provider="llamacpp", model=agent.model, finish_reason="stop",
+        content="Собрал телеметрию, дальше не продвинулся.",
+        usage=LLMUsage(input_tokens=120, output_tokens=12),
+    )
+
+    # Exactly the repeats the guard allows, then the wrap-up call it makes.
+    text, call = await _run_until_loop_stops(
+        agent,
+        responses=[same_call() for _ in range(_REPEATED_TOOL_CALL_LIMIT)] + [wrap_up],
+    )
+
+    # Stopped at the repeat limit, not at max_tool_iterations (50).
+    assert call.await_count == _REPEATED_TOOL_CALL_LIMIT + 1
+    # The work done is reported, with an honest note about why it stopped.
+    assert "Собрал телеметрию" in text
+    assert "повторила" in text
+    # The wrap-up call may not start anything new.
+    assert not call.await_args_list[-1].kwargs.get("tools")
+
+
+@pytest.mark.asyncio
+@patch("backend.agent.asyncio.to_thread", new_callable=AsyncMock)
+async def test_loop_stops_before_the_context_window_overflows(mock_to_thread, agent):
+    """Stop while the window still holds the turn, rather than let it evict the system prompt."""
+    from backend.llm_client import LLMUsage, NormalizedLLMResponse, STATUS_SUCCESS, STATUS_TOOL_CALL
+
+    agent.provider = "llamacpp"
+    agent.api_base = "http://hermes-llama:8080"
+    agent.local_base_url = agent.api_base
+    agent.auto_rag = False
+    agent.max_tool_iterations = 50
+    agent.local_num_ctx = 1000
+
+    def call_at(prompt_tokens, name):
+        return NormalizedLLMResponse(
+            status=STATUS_TOOL_CALL, provider="llamacpp", model=agent.model, finish_reason="stop",
+            tool_calls=[{"id": "c", "type": "function",
+                         "function": {"name": "dev_exec", "arguments": '{"cmd": "%s"}' % name}}],
+            usage=LLMUsage(input_tokens=prompt_tokens, output_tokens=10),
+        )
+    wrap_up = NormalizedLLMResponse(
+        status=STATUS_SUCCESS, provider="llamacpp", model=agent.model, finish_reason="stop",
+        content="Вот что успела собрать.", usage=LLMUsage(input_tokens=900, output_tokens=8),
+    )
+
+    text, call = await _run_until_loop_stops(
+        agent,
+        # 400 and 700 are under the 85% mark; 900 is over it and ends the loop.
+        responses=[call_at(400, "a"), call_at(700, "b"), call_at(900, "c"), wrap_up],
+    )
+
+    assert call.await_count == 4
+    assert "Вот что успела собрать." in text
+    assert "контекст заполнен" in text.lower()
+
+
+def test_length_fallback_does_not_invent_a_retry_or_blame_reasoning():
+    from backend.agent import _empty_model_response_fallback
+
+    text = _empty_model_response_fallback("Vexa", "length", retry_attempted=False, max_tokens=2048)
+    assert "рассужден" not in text
+    assert "повторная попытка" not in text.lower()
+    assert "2048" in text
+
+    tried = _empty_model_response_fallback("Vexa", "length", retry_attempted=True, max_tokens=4096)
+    assert "повторная попытка" in tried.lower()
 
 @pytest.mark.asyncio
 @patch("backend.agent.asyncio.to_thread", new_callable=AsyncMock)
@@ -662,18 +900,18 @@ def test_plain_chat_still_selects_no_tool():
 
 
 def test_no_think_is_dropped_when_thinking_is_enabled():
-    """`/no_think` next to ollama_think='medium' fought the owner's own setting
+    """`/no_think` next to local_think='medium' fought the owner's own setting
     and stripped the planning that tool chains need."""
     from backend.agent import _local_model_system_hint
 
-    off = _local_model_system_hint("qwen-quality:latest", "http://hermes-ollama:11434", "false")
+    off = _local_model_system_hint("qwen-quality:latest", "http://hermes-llama:8080", "false")
     assert "/no_think" in off
 
-    on = _local_model_system_hint("qwen-quality:latest", "http://hermes-ollama:11434", "medium")
+    on = _local_model_system_hint("qwen-quality:latest", "http://hermes-llama:8080", "medium")
     assert on and "/no_think" not in on
 
     # Non-qwen and remote endpoints are untouched, as before.
-    assert _local_model_system_hint("hermes-brain:latest", "http://hermes-ollama:11434", "medium") == ""
+    assert _local_model_system_hint("hermes-brain:latest", "http://hermes-llama:8080", "medium") == ""
     assert _local_model_system_hint("qwen/qwen3-max", "https://openrouter.ai/api/v1", "medium") == ""
 
 

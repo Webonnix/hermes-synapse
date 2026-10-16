@@ -150,6 +150,7 @@ class AgentBotManager:
             gate_text,
             str(sender.id) if sender else "",
             (f"@{sender.username}" if sender and sender.username else (sender.full_name if sender else "")),
+            event_id=str(update.message.message_id) if update.message else "",
         )
         if decision.action == bot_access_gate.IGNORE:
             return
@@ -158,9 +159,10 @@ class AgentBotManager:
                 await update.message.reply_text(chunk)
             return
 
+        from backend import inbox_routing
         from backend.database import get_subagent
 
-        subagent = get_subagent(subagent_id)
+        subagent = get_subagent(inbox_routing.effective_subagent_id(decision, subagent_id))
         if not subagent or not subagent.get("is_enabled"):
             await update.message.reply_text(
                 bot_access_gate.AGENT_OFFLINE_MESSAGE
@@ -178,8 +180,8 @@ class AgentBotManager:
 
         session_id = decision.session_id or f"tgbot:{binding_id}:{chat_id}"
         try:
-            response_text = await agent_instance._respond_as_subagent(
-                agent_text, subagent, chat_id=session_id, images=images
+            response_text = await inbox_routing.respond_turn(
+                decision, agent_text, subagent, session_id, images=images
             )
         except Exception:
             logger.exception("Agent bot %s: error handling message", binding_id)

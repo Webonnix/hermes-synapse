@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { 
   MessageSquare, 
   Layers, 
@@ -11,25 +11,11 @@ import {
   Play, 
   Send
 } from 'lucide-react';
-import type { ChatMessage, SystemConfig } from '../types';
+import type { ChatMessage, RouterModel, SystemConfig } from '../types';
 import { styles } from '../styles';
 import { renderMarkdown } from '../utils';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-
-const AVAILABLE_MODELS = [
-  { value: 'qwen3:8b',                               label: 'Qwen 3 8B — Ollama default ✓' },
-  { value: 'google/gemini-2.5-flash',              label: 'Gemini 2.5 Flash — cloud, fast' },
-  { value: 'google/gemini-2.5-pro',                label: 'Gemini 2.5 Pro — best quality' },
-  { value: 'anthropic/claude-sonnet-4-5',          label: 'Claude Sonnet 4.5 — balanced' },
-  { value: 'anthropic/claude-opus-4',              label: 'Claude Opus 4 — strongest' },
-  { value: 'openai/gpt-4o',                        label: 'GPT-4o — well-rounded' },
-  { value: 'openai/gpt-4o-mini',                   label: 'GPT-4o Mini — cheap' },
-  { value: 'deepseek/deepseek-r1',                 label: 'DeepSeek R1 — reasoning' },
-  { value: 'deepseek/deepseek-v3-0324',            label: 'DeepSeek V3 — fast & cheap' },
-  { value: 'meta-llama/llama-3.3-70b-instruct',   label: 'Llama 3.3 70B — open weights' },
-  { value: '__custom__',                           label: 'Custom model…' },
-];
 
 const modelSupportsTools = (model: string) => {
   if (!model) return true;
@@ -61,9 +47,9 @@ function SkillChips({ selected, onChange, skillMap }: {
             style={{
               padding: '5px 12px',
               borderRadius: '20px',
-              border: active ? '1px solid #00f0ff' : '1px solid rgba(255,255,255,0.12)',
-              background: active ? 'rgba(0,240,255,0.12)' : 'rgba(255,255,255,0.03)',
-              color: active ? '#00f0ff' : 'rgba(255,255,255,0.5)',
+              border: active ? '1px solid #9da6b5b2' : '1px solid rgba(255,255,255,0.12)',
+              background: active ? 'rgba(94,225,255,0.12)' : 'rgba(255,255,255,0.03)',
+              color: active ? '#5ee1ff' : 'rgba(255,255,255,0.5)',
               fontSize: '0.75rem',
               fontWeight: 600,
               cursor: 'pointer',
@@ -88,12 +74,12 @@ function TempSlider({ value, onChange }: { value: number; onChange: (v: number) 
         min={0} max={1} step={0.05}
         value={value}
         onChange={e => onChange(parseFloat(e.target.value))}
-        style={{ flex: 1, accentColor: '#00f0ff' }}
+        style={{ flex: 1, accentColor: '#5ee1ff' }}
       />
       <span style={{
         fontFamily: 'var(--font-mono)',
         fontSize: '0.9rem',
-        color: value < 0.3 ? '#10b981' : value > 0.7 ? '#f59e0b' : '#00f0ff',
+        color: value < 0.3 ? '#35d49a' : value > 0.7 ? '#f6b84a' : '#5ee1ff',
         minWidth: '36px',
         textAlign: 'right',
       }}>
@@ -106,32 +92,56 @@ function TempSlider({ value, onChange }: { value: number; onChange: (v: number) 
   );
 }
 
-// Model selector with custom option
-function ModelSelect({ value, onChange, className, models }: {
+// Model selector: both catalogs this deployment can actually serve — the local
+// local llama.cpp model the app already fetches (GET /api/models) and the 9Router
+// catalog (GET /api/router/models) — plus a free-text escape hatch. Built the
+// same way as the model picker in AgentsAdminTab.tsx; the hardcoded list that
+// used to live here went stale and offered models nothing here could route to.
+function ModelSelect({ value, onChange, className, models, routerModels, routerModelsLoaded }: {
   value: string;
   onChange: (v: string) => void;
   className?: string;
   models: { id: string; name: string }[];
+  routerModels: RouterModel[];
+  routerModelsLoaded: boolean;
 }) {
-  const listToUse = React.useMemo(() => models && models.length > 0 ? models : [], [models]);
-  const isCustom = listToUse.length > 0 
-    ? !listToUse.some(m => m.id === value)
-    : !AVAILABLE_MODELS.slice(0, -1).some(m => m.value === value);
-
-  const [showCustom, setShowCustom] = useState(isCustom);
-  const [customVal, setCustomVal] = useState(isCustom ? value : '');
-
-  useEffect(() => {
-    const isModelInList = listToUse.length > 0
-      ? listToUse.some(m => m.id === value)
-      : AVAILABLE_MODELS.some(m => m.value === value);
-    if (!isModelInList && value) {
-      setShowCustom(true);
-      setCustomVal(value);
-    } else {
-      setShowCustom(false);
+  const localModels = useMemo(() => models || [], [models]);
+  const routerModelsByOwner = useMemo(() => {
+    const grouped: Record<string, RouterModel[]> = {};
+    for (const model of routerModels) {
+      const owner = model.owned_by || 'other';
+      (grouped[owner] ||= []).push(model);
     }
-  }, [value, listToUse]);
+    return grouped;
+  }, [routerModels]);
+  const knownIds = useMemo(
+    () => new Set([...localModels.map(m => m.id), ...routerModels.map(m => m.id)]),
+    [localModels, routerModels],
+  );
+
+  const [showCustom, setShowCustom] = useState(false);
+  // Custom mode is only ever entered deliberately, so it is left only when the
+  // value is replaced from the outside (switching which agent is being edited)
+  // by something a catalog actually offers — not while the free-text field is
+  // being typed into, and not when the catalogs finish loading underneath.
+  const lastValue = useRef(value);
+  useEffect(() => {
+    if (value === lastValue.current) return;
+    lastValue.current = value;
+    if (value && knownIds.has(value)) setShowCustom(false);
+  }, [value, knownIds]);
+
+  // Nothing is labelled "missing" until at least one catalog has answered —
+  // otherwise a slow/failed fetch would brand every configured model as gone.
+  const catalogsReady = localModels.length > 0 || routerModels.length > 0;
+  const missing = !!value && !showCustom && catalogsReady && !knownIds.has(value);
+  // Which catalog it *should* have come from is inferred from the shape of the
+  // id: 9Router ids are namespaced by provider ('ag/gemini-3.7-flash-high',
+  // 'ds/deepseek-chat'), while the local llama.cpp alias carries no provider
+  // prefix ('qwen3.8-27b').
+  const missingLabel = value.includes('/') && routerModels.length > 0
+    ? 'настроено сейчас (нет в каталоге)'
+    : 'настроено сейчас (нет на локальном сервере)';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -147,26 +157,43 @@ function ModelSelect({ value, onChange, className, models }: {
         }}
         className={className || 'form-input'}
       >
-        {listToUse.length > 0 ? (
-          <>
-            {listToUse.map(m => (
+        {!value && <option value="">— выберите модель —</option>}
+        {localModels.length > 0 && (
+          <optgroup label="llama.cpp (локальная)">
+            {localModels.map(m => (
               <option key={m.id} value={m.id}>{m.name || m.id}</option>
             ))}
-            <option value="__custom__">Custom model…</option>
-          </>
-        ) : (
-          AVAILABLE_MODELS.map(m => (
-            <option key={m.value} value={m.value}>{m.label}</option>
-          ))
+          </optgroup>
         )}
+        {Object.entries(routerModelsByOwner).map(([owner, ownerModels]) => (
+          <optgroup key={owner} label={`9Router · ${owner}`}>
+            {ownerModels.map(m => <option key={m.id} value={m.id}>{m.id}</option>)}
+          </optgroup>
+        ))}
+        {/* Keeps a model neither catalog offers visible and named, instead of
+            the <select> silently snapping the agent onto a different one. */}
+        {missing && (
+          <optgroup label={missingLabel}>
+            <option value={value}>{value}</option>
+          </optgroup>
+        )}
+        {/* Neither catalog has answered yet — show the configured value as-is
+            rather than dropping it out of the list mid-load. */}
+        {!!value && !showCustom && !catalogsReady && (
+          <option value={value}>{value}</option>
+        )}
+        {!routerModelsLoaded && (
+          <option value="__loading__" disabled>Загрузка каталога 9Router…</option>
+        )}
+        <option value="__custom__">Custom model…</option>
       </select>
       {showCustom && (
         <input
           type="text"
           className="form-input"
-          placeholder="e.g. openai/o3-mini or mistralai/mistral-7b"
-          value={customVal}
-          onChange={e => { setCustomVal(e.target.value); onChange(e.target.value); }}
+          placeholder="e.g. ag/gemini-3.7-flash-high or qwen-mtp:latest"
+          value={value}
+          onChange={e => onChange(e.target.value)}
         />
       )}
     </div>
@@ -269,6 +296,11 @@ export function SubagentsTab({
 }: SubagentsTabProps) {
 
   const [skillMap, setSkillMap] = useState<Record<string, string[]>>({});
+  // The local model list arrives as a prop (App.tsx already fetches
+  // /api/models); the 9Router catalog is only needed by the two model pickers
+  // below, so it is fetched here once and shared by both.
+  const [routerModels, setRouterModels] = useState<RouterModel[]>([]);
+  const [routerModelsLoaded, setRouterModelsLoaded] = useState(false);
   const messageContent = (msg: ChatMessage) => {
     if ((msg.content || '').trim()) return msg.content;
     return msg.role === 'assistant'
@@ -277,13 +309,26 @@ export function SubagentsTab({
   };
 
   useEffect(() => {
-    const token = localStorage.getItem('jarvis_auth_token');
+    const token = localStorage.getItem('vexa_auth_token');
     fetch('/api/skills', {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     })
       .then(r => r.json())
       .then(data => setSkillMap(data))
       .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const token = localStorage.getItem('vexa_auth_token');
+    fetch('/api/router/models', {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+      .then(r => (r.ok ? r.json() : null))
+      .then((data: { models?: RouterModel[] } | null) => {
+        setRouterModels(data?.models || []);
+        setRouterModelsLoaded(true);
+      })
+      .catch(() => { setRouterModels([]); setRouterModelsLoaded(true); });
   }, []);
 
   // helpers to convert comma-string <-> string[]
@@ -314,8 +359,8 @@ export function SubagentsTab({
             style={{
               display: 'flex', alignItems: 'center', gap: '10px', padding: '10px',
               borderRadius: '8px',
-              border: currentChatId === 'dashboard' ? '1px solid rgba(0,240,255,0.4)' : '1px solid rgba(255,255,255,0.05)',
-              backgroundColor: currentChatId === 'dashboard' ? 'rgba(0,240,255,0.05)' : 'rgba(6, 9, 19, 0.6)',
+              border: currentChatId === 'dashboard' ? '1px solid rgba(157,166,181,0.28)' : '1px solid rgba(255,255,255,0.05)',
+              backgroundColor: currentChatId === 'dashboard' ? 'rgba(94,225,255,0.05)' : 'rgba(8, 9, 14, 0.6)',
               color: '#fff', textAlign: 'left', cursor: 'pointer', width: '100%', transition: 'all 0.2s'
             }}
           >
@@ -337,8 +382,8 @@ export function SubagentsTab({
                 style={{
                   display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                   padding: '6px 10px', borderRadius: '8px',
-                  border: currentChatId === agent.id ? '1px solid rgba(0,240,255,0.4)' : '1px solid rgba(255,255,255,0.03)',
-                  backgroundColor: currentChatId === agent.id ? 'rgba(0,240,255,0.04)' : 'rgba(255,255,255,0.01)',
+                  border: currentChatId === agent.id ? '1px solid rgba(157,166,181,0.28)' : '1px solid rgba(255,255,255,0.03)',
+                  backgroundColor: currentChatId === agent.id ? 'rgba(94,225,255,0.04)' : 'rgba(255,255,255,0.01)',
                   cursor: 'pointer', transition: 'all 0.2s'
                 }}
                 onClick={() => selectChat(agent.id)}
@@ -349,9 +394,9 @@ export function SubagentsTab({
                     <span style={{ fontSize: '0.8rem', fontWeight: 600, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{agent.name}</span>
                     <span style={{ fontSize: '0.6rem', color: 'var(--text-dim)', display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '4px' }}>
                       <span>{agent.model.split('/').pop()}</span>
-                      {agent.skills && <span style={{ color: 'rgba(0,240,255,0.5)' }}>· {agent.skills.split(',').length} skill{agent.skills.split(',').length !== 1 ? 's' : ''}</span>}
+                      {agent.skills && <span style={{ color: 'rgba(94,225,255,0.5)' }}>· {agent.skills.split(',').length} skill{agent.skills.split(',').length !== 1 ? 's' : ''}</span>}
                       {!modelSupportsTools(agent.model) && (
-                        <span style={{ color: '#f59e0b', padding: '0px 4px', borderRadius: '3px', backgroundColor: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.2)', fontSize: '0.55rem', fontWeight: 600, letterSpacing: '0.3px' }}>
+                        <span style={{ color: '#f6b84a', padding: '0px 4px', borderRadius: '3px', backgroundColor: 'rgba(246,184,74,0.1)', border: '1px solid rgba(246,184,74,0.2)', fontSize: '0.55rem', fontWeight: 600, letterSpacing: '0.3px' }}>
                           NO TOOLS
                         </span>
                       )}
@@ -370,14 +415,14 @@ export function SubagentsTab({
                       setEditAgentTemperature(agent.temperature ?? 0.7);
                       setCurrentChatId('__edit__');
                     }}
-                    style={{ background: 'none', border: 'none', color: 'rgba(0,240,255,0.6)', cursor: 'pointer', padding: '4px', display: 'flex', alignItems: 'center', borderRadius: '4px' }}
+                    style={{ background: 'none', border: 'none', color: 'rgba(94,225,255,0.6)', cursor: 'pointer', padding: '4px', display: 'flex', alignItems: 'center', borderRadius: '4px' }}
                     title="Edit sub-agent"
                   >
                     <Settings size={12} />
                   </button>
                   <button
                     onClick={(e) => { e.stopPropagation(); handleDeleteSubagent(agent.id); }}
-                    style={{ background: 'none', border: 'none', color: 'rgba(239,68,68,0.6)', cursor: 'pointer', padding: '4px', display: 'flex', alignItems: 'center', borderRadius: '4px' }}
+                    style={{ background: 'none', border: 'none', color: 'rgba(240,93,117,0.6)', cursor: 'pointer', padding: '4px', display: 'flex', alignItems: 'center', borderRadius: '4px' }}
                     title="Delete sub-agent"
                   >
                     <Trash2 size={12} />
@@ -391,8 +436,8 @@ export function SubagentsTab({
             onClick={() => setCurrentChatId('__create__')}
             style={{
               display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
-              padding: '10px', borderRadius: '8px', border: '1px dashed rgba(0,240,255,0.3)',
-              backgroundColor: currentChatId === '__create__' ? 'rgba(0,240,255,0.05)' : 'transparent',
+              padding: '10px', borderRadius: '8px', border: '1px dashed rgba(157,166,181,0.21)',
+              backgroundColor: currentChatId === '__create__' ? 'rgba(94,225,255,0.05)' : 'transparent',
               color: 'var(--accent-cyan)', fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer', marginTop: '10px', transition: 'all 0.2s'
             }}
           >
@@ -426,9 +471,9 @@ export function SubagentsTab({
 
                 {formSection('AI Model',
                   <>
-                    <ModelSelect value={newAgentModel} onChange={setNewAgentModel} models={models} />
+                    <ModelSelect value={newAgentModel} onChange={setNewAgentModel} models={models} routerModels={routerModels} routerModelsLoaded={routerModelsLoaded} />
                     {!modelSupportsTools(newAgentModel) && (
-                      <span style={{ fontSize: '0.75rem', color: '#f59e0b', marginTop: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <span style={{ fontSize: '0.75rem', color: '#f6b84a', marginTop: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
                         ⚠️ This reasoning model does not support direct tool calling. Vexa will run research/code tools on its behalf if scheduled in the query plan.
                       </span>
                     )}
@@ -474,9 +519,9 @@ export function SubagentsTab({
 
                 {formSection('AI Model',
                   <>
-                    <ModelSelect value={editAgentModel} onChange={setEditAgentModel} models={models} />
+                    <ModelSelect value={editAgentModel} onChange={setEditAgentModel} models={models} routerModels={routerModels} routerModelsLoaded={routerModelsLoaded} />
                     {!modelSupportsTools(editAgentModel) && (
-                      <span style={{ fontSize: '0.75rem', color: '#f59e0b', marginTop: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <span style={{ fontSize: '0.75rem', color: '#f6b84a', marginTop: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
                         ⚠️ This reasoning model does not support direct tool calling. Vexa will run research/code tools on its behalf if scheduled in the query plan.
                       </span>
                     )}
@@ -517,14 +562,14 @@ export function SubagentsTab({
                       {msg.role === 'system' ? (
                         <div style={styles.systemMsg}>{messageContent(msg)}</div>
                       ) : (
-                        <div style={{ ...styles.msgBubble, backgroundColor: msg.role === 'user' ? 'rgba(255, 159, 0, 0.12)' : 'rgba(0, 240, 255, 0.05)', borderColor: msg.role === 'user' ? 'rgba(255, 159, 0, 0.3)' : 'rgba(0, 240, 255, 0.2)', alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
+                        <div style={{ ...styles.msgBubble, backgroundColor: msg.role === 'user' ? 'rgba(246, 184, 74, 0.12)' : 'rgba(94, 225, 255, 0.05)', borderColor: msg.role === 'user' ? 'rgba(246, 184, 74, 0.3)' : 'rgba(94, 225, 255, 0.2)', alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
                           <div style={styles.msgHeader}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                               <span style={msg.role === 'user' ? styles.userLabel : styles.assistantLabel}>
                                 {msg.role === 'user' ? 'CREATOR' : (currentChatId === 'dashboard' ? 'VEXA' : (subagents.find(a => a.id === currentChatId)?.name.toUpperCase() || 'SUB-AGENT'))}
                               </span>
                               {msg.role === 'assistant' && msg.cost_usd !== undefined && msg.cost_usd > 0 && (
-                                <span style={{ fontSize: '0.7rem', color: 'var(--success)', backgroundColor: 'rgba(16, 185, 129, 0.1)', border: '1px solid rgba(16, 185, 129, 0.2)', padding: '1px 5px', borderRadius: '4px', fontFamily: 'var(--font-mono)', fontWeight: 600, letterSpacing: '0.5px' }}>
+                                <span style={{ fontSize: '0.7rem', color: 'var(--success)', backgroundColor: 'rgba(53, 212, 154, 0.1)', border: '1px solid rgba(53, 212, 154, 0.2)', padding: '1px 5px', borderRadius: '4px', fontFamily: 'var(--font-mono)', fontWeight: 600, letterSpacing: '0.5px' }}>
                                   ${msg.cost_usd.toFixed(5)}
                                 </span>
                               )}
@@ -532,7 +577,7 @@ export function SubagentsTab({
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                               {msg.role === 'assistant' && (
                                 <button onClick={() => speakText(messageContent(msg), index)} title={playingMsgIndex === index ? 'Stop' : 'Play voice'}
-                                  style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', borderRadius: '4px', color: playingMsgIndex === index ? '#ff9f00' : 'rgba(0, 240, 255, 0.45)', display: 'flex', alignItems: 'center', transition: 'color 0.2s, transform 0.15s', transform: playingMsgIndex === index ? 'scale(1.15)' : 'scale(1)' }}>
+                                  style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', borderRadius: '4px', color: playingMsgIndex === index ? '#f6b84a' : 'rgba(94, 225, 255, 0.45)', display: 'flex', alignItems: 'center', transition: 'color 0.2s, transform 0.15s', transform: playingMsgIndex === index ? 'scale(1.15)' : 'scale(1)' }}>
                                   {playingMsgIndex === index ? <Square size={12} fill="currentColor" /> : <Play size={12} fill="currentColor" />}
                                 </button>
                               )}
@@ -579,7 +624,7 @@ export function SubagentsTab({
                 />
                 {isSpeaking && (
                   <button type="button" onClick={() => { window.speechSynthesis?.cancel(); setIsSpeaking(false); setPlayingMsgIndex(null); }}
-                    className="btn-primary" style={{ border: '1px solid rgba(239, 68, 68, 0.4)', color: '#ef4444', backgroundColor: 'rgba(239, 68, 68, 0.05)' }}>
+                    className="btn-primary" style={{ border: '1px solid rgba(240, 93, 117, 0.4)', color: '#f05d75', backgroundColor: 'rgba(240, 93, 117, 0.05)' }}>
                     <Square size={14} fill="currentColor" />
                     <span>Interrupt speech</span>
                   </button>

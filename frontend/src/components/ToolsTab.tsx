@@ -266,10 +266,10 @@ export function ToolsTab({
               <div style={styles.toolRegistryItem}>
                 <div style={styles.toolRegistryHeader}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <span className="pulse-dot" style={{ backgroundColor: '#10b981', boxShadow: '0 0 8px #10b981' }} />
+                    <span className="pulse-dot" style={{ backgroundColor: '#35d49a', boxShadow: '0 0 8px #35d49a80' }} />
                     <span style={styles.toolRegistryName}>ResearchAgent (Information Retrieval)</span>
                   </div>
-                  <span style={{ ...styles.toolRegistryTag, backgroundColor: 'rgba(0, 240, 255, 0.1)', color: 'var(--accent-cyan)', border: '1px solid rgba(0, 240, 255, 0.2)' }}>ONLINE</span>
+                  <span style={{ ...styles.toolRegistryTag, backgroundColor: 'rgba(94, 225, 255, 0.1)', color: 'var(--accent-cyan)', border: '1px solid rgba(157, 166, 181, 0.14)' }}>ONLINE</span>
                 </div>
                 <p style={styles.toolRegistryDesc}>
                   Queries CoinGecko (coin prices) and RSS news feeds autonomously. Scans, filters, and sanitizes web pages by links. Used by the planner to fetch real-time external information.
@@ -280,10 +280,10 @@ export function ToolsTab({
               <div style={styles.toolRegistryItem}>
                 <div style={styles.toolRegistryHeader}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <span className="pulse-dot" style={{ backgroundColor: '#10b981', boxShadow: '0 0 8px #10b981' }} />
+                    <span className="pulse-dot" style={{ backgroundColor: '#35d49a', boxShadow: '0 0 8px #35d49a80' }} />
                     <span style={styles.toolRegistryName}>CodeAgent (Code Execution in Docker)</span>
                   </div>
-                  <span style={{ ...styles.toolRegistryTag, backgroundColor: 'rgba(16, 185, 129, 0.1)', color: 'var(--success)', border: '1px solid rgba(16, 185, 129, 0.2)' }}>SANDBOXED</span>
+                  <span style={{ ...styles.toolRegistryTag, backgroundColor: 'rgba(53, 212, 154, 0.1)', color: 'var(--success)', border: '1px solid rgba(53, 212, 154, 0.2)' }}>SANDBOXED</span>
                 </div>
                 <p style={styles.toolRegistryDesc}>
                   Writes and tests Python scripts. Executes them in isolated Docker micro-containers with memory (128MB) and core (0.5 CPU) limits, no network access. Self-corrects code up to 3 times on exceptions or syntax errors.
@@ -294,10 +294,10 @@ export function ToolsTab({
               <div style={styles.toolRegistryItem}>
                 <div style={styles.toolRegistryHeader}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <span className="pulse-dot" style={{ backgroundColor: '#10b981', boxShadow: '0 0 8px #10b981' }} />
+                    <span className="pulse-dot" style={{ backgroundColor: '#35d49a', boxShadow: '0 0 8px #35d49a80' }} />
                     <span style={styles.toolRegistryName}>AnalystAgent (Data Analysis & Plotting)</span>
                   </div>
-                  <span style={{ ...styles.toolRegistryTag, backgroundColor: 'rgba(0, 240, 255, 0.1)', color: 'var(--accent-cyan)', border: '1px solid rgba(0, 240, 255, 0.2)' }}>ONLINE</span>
+                  <span style={{ ...styles.toolRegistryTag, backgroundColor: 'rgba(94, 225, 255, 0.1)', color: 'var(--accent-cyan)', border: '1px solid rgba(157, 166, 181, 0.14)' }}>ONLINE</span>
                 </div>
                 <p style={styles.toolRegistryDesc}>
                   Works in tandem with CodeAgent. Reads data from uploaded CSV/Excel tables, performs mathematical analysis via pandas/numpy, and generates charts using matplotlib with a signature dark theme. Chart cards are returned in the chat.

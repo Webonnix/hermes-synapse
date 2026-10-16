@@ -171,6 +171,8 @@ class AgentEmailChannelManager:
         # subject as often as into the body, so the gate sees both.
         decision = await asyncio.to_thread(
             bot_access_gate.authorize, binding_id, "email", sender, f"{subject}\n{body}", sender, sender,
+            event_id=message_id,
+            channel_meta={"subject": subject, "message_id": message_id, "references": references},
         )
         if decision.action == bot_access_gate.IGNORE:
             logger.info("Agent email channel %s: ignoring message from %s", binding_id, sender)
@@ -185,9 +187,10 @@ class AgentEmailChannelManager:
                 logger.exception("Agent email channel %s: failed to send the access reply", binding_id)
             return
 
+        from backend import inbox_routing
         from backend.database import get_subagent
 
-        subagent = get_subagent(subagent_id)
+        subagent = get_subagent(inbox_routing.effective_subagent_id(decision, subagent_id))
         if not subagent or not subagent.get("is_enabled"):
             return  # leave unseen; nothing sensible to do while the agent is disabled
 
@@ -199,7 +202,7 @@ class AgentEmailChannelManager:
 
         session_id = decision.session_id or f"emailchannel:{binding_id}:{sender}"
         try:
-            response_text = await agent_instance._respond_as_subagent(body, subagent, chat_id=session_id)
+            response_text = await inbox_routing.respond_turn(decision, body, subagent, session_id)
         except Exception:
             logger.exception("Agent email channel %s: error generating reply", binding_id)
             bot_access_gate.record_turn(decision, agent_instance.last_run_metadata.get(session_id), "")

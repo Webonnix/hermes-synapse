@@ -50,17 +50,10 @@ class ConfigUpdate(BaseModel):
     telegram_reply_mode: str | None = None
     provider: str | None = None
     api_base: str | None = None
-    ollama_base_url: str | None = None
+    local_base_url: str | None = None
     openai_api_base: str | None = None
-    ollama_num_ctx: int | None = None
-    ollama_keep_alive: str | int | None = None
-    ollama_think: bool | str | None = None
-
-class OllamaModelRequest(BaseModel):
-    model: str
-
-class OllamaPullRequest(OllamaModelRequest):
-    insecure: bool = False
+    local_num_ctx: int | None = None
+    local_think: bool | str | None = None
 
 class PriceAlertRequest(BaseModel):
     symbol: str
@@ -81,7 +74,7 @@ class SubagentUpdate(BaseModel):
     role: str = "Specialist"
     status: str = "idle"
     is_enabled: bool = True
-    model_provider: str = "ollama"
+    model_provider: str = "local"
     model_type: str = "local"
     model_params: dict = {}
     budget_usd_limit: Optional[float] = None
@@ -146,70 +139,105 @@ logger = logging.getLogger("hermes.main")
 ACTIVE_CHAT_RUNS: dict[str, asyncio.Task] = {}
 
 
-async def _ensure_ollama_model_available(*, repair: bool) -> str:
-    """Validate the active local model and optionally repair stale persisted settings."""
-    from backend.ollama_client import (
-        OllamaClient,
-        installed_model_names,
-        is_ollama_provider,
-        resolve_installed_model,
-        select_installed_model,
-    )
+async def _ensure_local_model_available(*, repair: bool) -> str:
+    """Validate the configured model against what the llama.cpp server serves.
 
-    if not is_ollama_provider(agent_instance.api_base, agent_instance.provider):
+    llama-server serves exactly one model under its --alias, so the configured
+    id must be that alias. With ``repair`` a stale id (an Ollama tag left over
+    from before the 2026-09-13 migration, say) is replaced, and the context size
+    the server really runs with is adopted so the context guards measure against
+    what is allocated; either change is persisted.
+    """
+    from backend.llamacpp_client import LlamaCppClient, is_llamacpp_provider
+
+    if not is_llamacpp_provider(agent_instance.api_base, agent_instance.provider):
         return agent_instance.model
 
-    models = await OllamaClient(
-        agent_instance.ollama_base_url,
-        timeout=min(agent_instance.request_timeout, 15),
-    ).list_models()
-    available = installed_model_names(models)
-    selected = resolve_installed_model(agent_instance.model, available)
-    if selected:
-        return selected
-    if not repair:
+    client = LlamaCppClient(agent_instance.local_base_url, timeout=min(agent_instance.request_timeout, 15))
+    available = await client.model_ids()
+    if agent_instance.model in available:
+        selected = agent_instance.model
+    elif not repair:
         raise HTTPException(
             status_code=422,
             detail={
-                "code": "ollama_model_not_installed",
-                "message": f"Ollama model '{agent_instance.model}' is not installed.",
+                "code": "local_model_not_served",
+                "message": f"The llama.cpp server does not serve '{agent_instance.model}'.",
                 "available_models": available,
             },
         )
+    elif not available:
+        raise RuntimeError("The llama.cpp server is reachable but serves no model.")
+    else:
+        selected = available[0]
 
-    selected = select_installed_model(
-        agent_instance.model,
-        os.getenv("LLM_MODEL", ""),
-        available,
-    )
-    if not selected:
-        raise RuntimeError("Ollama is reachable but has no installed models.")
+    if not repair:
+        return selected
 
-    stale_model = agent_instance.model
-    agent_instance.model = selected
-    from backend.database import save_app_settings
-    save_app_settings(agent_instance.get_runtime_config())
-    logger.warning(
-        "Repaired stale Ollama model setting: %s -> %s",
-        stale_model,
-        selected,
-    )
+    changed = False
+    if selected != agent_instance.model:
+        logger.warning("Repaired stale local model setting: %s -> %s", agent_instance.model, selected)
+        agent_instance.model = selected
+        changed = True
+    try:
+        props = await client.props()
+        served_ctx = int((props.get("default_generation_settings") or {}).get("n_ctx") or props.get("n_ctx") or 0)
+    except Exception:  # noqa: BLE001 - the context sync is best-effort
+        served_ctx = 0
+    if served_ctx and served_ctx != agent_instance.local_num_ctx:
+        logger.info("Local context window: %s -> %s (from the llama.cpp server)", agent_instance.local_num_ctx, served_ctx)
+        agent_instance.update_runtime_config(local_num_ctx=served_ctx)
+        changed = True
+    if changed:
+        from backend.database import save_app_settings
+        save_app_settings(agent_instance.get_runtime_config())
     return selected
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Before anything else: make a crash or a dying background worker leave a
+    # recorded reason instead of a log that just stops.
+    from backend import crash_visibility
+    crash_visibility.install()
+
     # Startup: Initialize DB, Qdrant/RAG and run the Telegram bot
     from backend.database import init_db
     init_db()
+
+    # Any run still open in the journal belonged to a process that no longer
+    # exists. Close them out so an interrupted turn is a recorded fact instead
+    # of a browser waiting forever on a run nothing will finish.
+    from backend import run_journal
+    interrupted = run_journal.reconcile_interrupted_runs()
+    if interrupted:
+        logger.warning("Closed %d interrupted run(s) from the previous process", len(interrupted))
     
     from backend.rag import init_rag
     init_rag()
 
+    # The inbox archive is written from worker threads (the access gate runs in
+    # asyncio.to_thread); its live-update frames need this loop to be sent on.
+    from backend import inbox
+    inbox.bind_event_loop(asyncio.get_running_loop())
+
+    # Telephony: calls left open by the previous process ended with it; then the
+    # Asterisk driver (ARI events + per-call RTP media) starts in the background and
+    # keeps retrying — a missing sidecar must never block the rest of the backend.
+    from backend import phone_lines
     try:
-        await _ensure_ollama_model_available(repair=True)
+        stale_calls = phone_lines.reconcile_stale_calls()
+        if stale_calls:
+            logger.warning("Closed %d phone call(s) left open by the previous process", stale_calls)
+    except Exception:
+        logger.exception("Could not reconcile phone calls")
+    from backend.phone_asterisk import controller as phone_controller
+    await phone_controller.start()
+
+    try:
+        await _ensure_local_model_available(repair=True)
     except Exception as exc:
-        logger.error("Ollama startup model validation failed: %s", exc)
+        logger.error("Local model startup validation failed: %s", exc)
 
     if os.getenv("VOICE_STT_PRELOAD", "false").lower() in {"1", "true", "yes", "on"}:
         async def _preload_voice():
@@ -220,7 +248,7 @@ async def lifespan(app: FastAPI):
             except Exception as exc:
                 logger.warning("Voice recognition preload failed (will retry on demand): %s", exc)
 
-        asyncio.create_task(_preload_voice())
+        crash_visibility.spawn(_preload_voice(), "_preload_voice", oneshot=True)
 
     if os.getenv("PROJECT_MEMORY_AUTO_INDEX", "true").lower() in {"1", "true", "yes", "on"}:
         async def _index_project_memory():
@@ -235,24 +263,17 @@ async def lifespan(app: FastAPI):
             except Exception as exc:
                 logger.warning("Project memory indexing failed (non-fatal): %s", exc)
 
-        asyncio.create_task(_index_project_memory())
+        crash_visibility.spawn(_index_project_memory(), "_index_project_memory", oneshot=True)
     
     # Start price alert monitor background task
     from backend.price_monitor import price_monitor
     price_monitor.start()
 
-    # Puts the LLM back in VRAM after an Ollama restart and keeps it there —
-    # keep_alive alone cannot do that, see backend/model_keeper.py.
-    model_keeper_task = None
-    from backend import model_keeper
-    if model_keeper.keep_resident_enabled():
-        model_keeper_task = asyncio.create_task(model_keeper.keeper_loop())
-
     # Durable dev-runs worker: resumes unfinished runs after restart.
     dev_runs_worker_task = None
     if os.getenv("DEV_RUNS_WORKER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
         from backend import dev_runs
-        dev_runs_worker_task = asyncio.create_task(dev_runs.worker_loop())
+        dev_runs_worker_task = crash_visibility.spawn(dev_runs.worker_loop(), "dev_runs.worker_loop")
 
     # Content Factory: additive schema, its agent roster, and the pipeline
     # worker that resumes interrupted runs. Every step is guarded — a failure
@@ -267,7 +288,7 @@ async def lifespan(app: FastAPI):
             logger.info("Content Factory: seeded agents %s", ", ".join(seeded))
         if os.getenv("CONTENT_FACTORY_WORKER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
             from backend.content_factory import execution as cf_execution
-            content_factory_worker_task = asyncio.create_task(cf_execution.worker_loop())
+            content_factory_worker_task = crash_visibility.spawn(cf_execution.worker_loop(), "content_factory.worker_loop")
     except Exception:
         logger.exception("Content Factory startup failed — the module is unavailable this run")
 
@@ -312,7 +333,7 @@ async def lifespan(app: FastAPI):
                 logger.info("Obsidian not reachable at startup (plugin not running or key not set — OK).")
         except Exception as e:
             logger.warning(f"Obsidian startup sync failed (non-fatal): {e}")
-    asyncio.create_task(_obsidian_startup_sync())
+    crash_visibility.spawn(_obsidian_startup_sync(), "_obsidian_startup_sync", oneshot=True)
     
     from backend.mcp_client import init_mcp_servers, shutdown_mcp_servers
     await init_mcp_servers()
@@ -329,7 +350,7 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.error(f"Error in BCM session scheduler task: {e}")
             await asyncio.sleep(60)
-    asyncio.create_task(_bcm_session_scheduler_task())
+    crash_visibility.spawn(_bcm_session_scheduler_task(), "_bcm_session_scheduler_task")
 
     # Sweep lapsed subscriptions hourly so the admin view and the token statuses
     # agree. Enforcement doesn't depend on this — bot_access.check_access catches
@@ -343,7 +364,7 @@ async def lifespan(app: FastAPI):
             except Exception:
                 logger.exception("Subscription expiry sweep failed")
             await asyncio.sleep(3600)
-    asyncio.create_task(_subscription_expiry_task())
+    crash_visibility.spawn(_subscription_expiry_task(), "_subscription_expiry_task")
 
     # Recurring client invoices + overdue ageing. Idempotent per (услуга,
     # период), so an hourly sweep is safe and a missed run (backend restart)
@@ -351,7 +372,7 @@ async def lifespan(app: FastAPI):
     client_billing_task = None
     if os.getenv("CLIENT_BILLING_SCHEDULER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
         from backend import client_billing
-        client_billing_task = asyncio.create_task(client_billing.scheduler_loop())
+        client_billing_task = crash_visibility.spawn(client_billing.scheduler_loop(), "client_billing.scheduler_loop")
 
     # SMM Factory: send scheduled posts when their slot arrives. Only auto
     # posts move — a manual one has no way out of here, so a timer must not
@@ -360,7 +381,7 @@ async def lifespan(app: FastAPI):
     smm_scheduler_task = None
     if os.getenv("SMM_SCHEDULER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
         from backend import smm_posts
-        smm_scheduler_task = asyncio.create_task(smm_posts.scheduler_loop())
+        smm_scheduler_task = crash_visibility.spawn(smm_posts.scheduler_loop(), "smm_posts.scheduler_loop")
 
     # Proactively probe every active messenger channel's stored credential so a
     # dead Matrix/Telegram/Discord/Slack/email token surfaces as a visible
@@ -375,7 +396,7 @@ async def lifespan(app: FastAPI):
                 await health_check_all_active()
             except Exception:
                 logger.exception("Messenger channel health check sweep failed")
-    asyncio.create_task(_channel_health_check_task())
+    crash_visibility.spawn(_channel_health_check_task(), "_channel_health_check_task")
 
     # CRM: one Telegram message a day listing overdue and due-today tasks —
     # the "reminder" half of the Задачи/Календарь section. A 30-minute poll
@@ -409,7 +430,7 @@ async def lifespan(app: FastAPI):
                     await asyncio.to_thread(set_setting, "crm_reminder_last_sent", today)
                 except Exception:
                     logger.exception("CRM daily reminder failed")
-        asyncio.create_task(_crm_reminder_task())
+        crash_visibility.spawn(_crm_reminder_task(), "_crm_reminder_task")
 
     yield
     if smm_scheduler_task is not None:
@@ -423,13 +444,6 @@ async def lifespan(app: FastAPI):
         client_billing_task.cancel()
         try:
             await client_billing_task
-        except asyncio.CancelledError:
-            pass
-
-    if model_keeper_task is not None:
-        model_keeper_task.cancel()
-        try:
-            await model_keeper_task
         except asyncio.CancelledError:
             pass
 
@@ -470,6 +484,9 @@ async def lifespan(app: FastAPI):
 
     from backend import agent_whatsapp_channel
     await agent_whatsapp_channel.manager.stop_all()
+
+    from backend.phone_asterisk import controller as phone_controller
+    await phone_controller.stop()
     await shutdown_bot()
     
     # Stop price alert monitor background task
@@ -501,6 +518,21 @@ from backend.auth import validate_session
 from fastapi.responses import JSONResponse
 
 @app.middleware("http")
+async def slow_request_watchdog(request: Request, call_next):
+    """Outermost middleware: a request that hangs inside auth or routing is
+    exactly the kind this needs to see, so tracking starts before anything else.
+
+    Registered after auth_middleware and therefore *outside* it — Starlette runs
+    middleware in reverse registration order."""
+    from backend import request_diagnostics
+    request_id = request_diagnostics.begin(request.method, request.url.path)
+    try:
+        return await call_next(request)
+    finally:
+        request_diagnostics.finish(request_id)
+
+
+@app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
     # Allow public auth routes and plots (images)
@@ -516,12 +548,27 @@ async def auth_middleware(request: Request, call_next):
         # on a bad signature.
         "/api/payments/webhook",
     ) or path.startswith("/api/plots/") or path.startswith("/api/generated-images/") or (
+        # Public read-only conversation snapshots. The token IS the credential,
+        # and what it unlocks was sanitized once at creation — there is nothing
+        # session-scoped behind this path to protect.
+        path.startswith("/share/")
+    ) or (
         # Meta social webhooks (Instagram/Facebook/WhatsApp): the provider can't
         # hold a dashboard session either, so these routes authenticate each
         # delivery themselves — the verify token on the GET handshake and an
         # X-Hub-Signature-256 HMAC over the raw body on every POST
         # (backend/social_webhooks.py). They grant nothing without that proof.
         path.startswith("/api/social/webhook/")
+    ) or (
+        # External voice provider callbacks (backend/voice_providers.py): HMAC over
+        # the raw body with a per-provider secret, idempotent by event id. Unknown
+        # provider, no secret and a bad signature all answer the same 401.
+        path.startswith("/api/voice/webhook/")
+    ) or (
+        # Phone provider webhooks (backend/phone_api.py): X-Twilio-Signature or
+        # Telnyx Ed25519 on every request. Media WebSockets under the same
+        # prefixes are not HTTP and carry a per-call HMAC token instead.
+        path.startswith("/api/phone/twilio/") or path.startswith("/api/phone/telnyx/")
     ):
         return await call_next(request)
         
@@ -679,6 +726,24 @@ except Exception:
     logger.exception("SMM Factory social webhooks not mounted")
 
 
+# INBOX: conversation archive, takeover, routing rules, conversation routing and
+# external voice providers (backend/inbox_api.py).
+try:
+    from backend.inbox_api import router as inbox_router
+    app.include_router(inbox_router)
+except Exception:
+    logger.exception("Inbox API not mounted")
+
+
+# TELEPHONY: lines, numbers, speech services, calls, provider webhooks and media
+# streams (backend/phone_api.py).
+try:
+    from backend.phone_api import router as phone_router
+    app.include_router(phone_router)
+except Exception:
+    logger.exception("Phone API not mounted")
+
+
 @app.get("/health/live", include_in_schema=False)
 async def health_live():
     return {"status": "ok"}
@@ -709,10 +774,10 @@ async def health_ready():
             checks["qdrant"] = {"ok": False, "error": type(exc).__name__}
 
         try:
-            response = await client.get(f"{agent_instance.ollama_base_url}/api/version")
-            checks["ollama"] = {"ok": response.status_code == 200}
+            response = await client.get(f"{agent_instance.local_base_url}/health")
+            checks["llm"] = {"ok": response.status_code == 200}
         except Exception as exc:
-            checks["ollama"] = {"ok": False, "error": type(exc).__name__}
+            checks["llm"] = {"ok": False, "error": type(exc).__name__}
 
     from backend.obsidian import _get_api_key, is_reachable
     if _get_api_key():
@@ -805,41 +870,34 @@ async def update_config(update: ConfigUpdate):
     selected_model = update.model
     prospective_provider = update.provider if update.provider is not None else agent_instance.provider
     prospective_api_base = update.api_base if update.api_base is not None else agent_instance.api_base
-    from backend.ollama_client import (
-        OllamaClient,
-        installed_model_names,
-        is_ollama_provider,
-        resolve_installed_model,
-    )
-    if is_ollama_provider(prospective_api_base, prospective_provider) and (
+    from backend.llamacpp_client import LlamaCppClient, is_llamacpp_provider
+    if is_llamacpp_provider(prospective_api_base, prospective_provider) and (
         update.model is not None
         or update.provider is not None
-        or update.ollama_base_url is not None
+        or update.local_base_url is not None
     ):
-        ollama_base_url = update.ollama_base_url or agent_instance.ollama_base_url
+        local_base_url = update.local_base_url or agent_instance.local_base_url
         try:
-            available = installed_model_names(
-                await OllamaClient(
-                    ollama_base_url,
-                    timeout=min(agent_instance.request_timeout, 15),
-                ).list_models()
-            )
+            available = await LlamaCppClient(
+                local_base_url,
+                timeout=min(agent_instance.request_timeout, 15),
+            ).model_ids()
         except Exception as exc:
             raise HTTPException(
                 status_code=503,
                 detail={
-                    "code": "ollama_unavailable",
+                    "code": "local_llm_unavailable",
                     "message": f"Cannot validate the local model: {exc}",
                 },
             ) from exc
         requested_model = update.model or agent_instance.model
-        selected_model = resolve_installed_model(requested_model, available)
+        selected_model = requested_model if requested_model in available else None
         if selected_model is None:
             raise HTTPException(
                 status_code=422,
                 detail={
-                    "code": "ollama_model_not_installed",
-                    "message": f"Ollama model '{requested_model}' is not installed.",
+                    "code": "local_model_not_served",
+                    "message": f"The llama.cpp server does not serve '{requested_model}'.",
                     "available_models": available,
                 },
             )
@@ -851,11 +909,10 @@ async def update_config(update: ConfigUpdate):
     agent_instance.update_runtime_config(
         provider=update.provider,
         api_base=update.api_base,
-        ollama_base_url=update.ollama_base_url,
+        local_base_url=update.local_base_url,
         openai_api_base=update.openai_api_base,
-        ollama_num_ctx=update.ollama_num_ctx,
-        ollama_keep_alive=update.ollama_keep_alive,
-        ollama_think=update.ollama_think,
+        local_num_ctx=update.local_num_ctx,
+        local_think=update.local_think,
         fast_mode=update.fast_mode,
         max_history_len=update.max_history_len,
         condenser_enabled=update.condenser_enabled,
@@ -903,6 +960,97 @@ async def get_logs():
     from backend.database import get_decision_logs
     return get_decision_logs(100)
 
+
+# ── Run journal ────────────────────────────────────────────────────────────
+# Durable per-run record: what was submitted, which model answered, what it
+# cost, and — crucially — which runs were still in flight when the process died.
+# ── Conversation sharing ───────────────────────────────────────────────────
+@app.post("/api/share/{chat_id}")
+async def create_conversation_share(chat_id: str):
+    """Publish an immutable, sanitized snapshot of a conversation."""
+    from backend import shares
+    from backend.database import get_session_transcript, get_session_title
+    # get_session_transcript, not get_chat_history: it carries timestamps and
+    # deliberately leaves out the run metadata that only exists to feed prompts.
+    messages = get_session_transcript(chat_id, limit=shares.MAX_MESSAGES)
+    return shares.create_share(chat_id, messages, get_session_title(chat_id) or "")
+
+
+@app.get("/api/share/{chat_id}")
+async def get_conversation_share(chat_id: str):
+    from backend import shares
+    existing = shares.get_share_for_chat(chat_id)
+    return existing or {"token": None}
+
+
+@app.delete("/api/share/{chat_id}")
+async def revoke_conversation_share(chat_id: str):
+    from backend import shares
+    return {"revoked": shares.revoke_share(chat_id)}
+
+
+@app.get("/share/{token}", include_in_schema=False)
+async def read_conversation_share(token: str):
+    """Public page. Unauthenticated by design — see backend/shares.py."""
+    from backend import shares
+    snapshot = shares.load_share(token)
+    if snapshot is None:
+        # Same answer for "never existed" and "revoked": a distinguishable
+        # response would let anyone probe which tokens were once valid.
+        return Response(content="Not found", status_code=404, media_type="text/plain")
+    return Response(
+        content=shares.render_html(snapshot),
+        media_type="text/html; charset=utf-8",
+        headers={
+            "X-Robots-Tag": "noindex, nofollow",
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.get("/api/diagnostics")
+async def get_diagnostics():
+    """Operational snapshot: what is in flight right now and what the last
+    process left behind. Deliberately free of request bodies, arguments and
+    credentials — it answers "is something stuck?", not "what was it doing"."""
+    from backend import request_diagnostics, run_journal
+    from backend.websocket_manager import manager as ws_manager
+    return {
+        "in_flight_requests": request_diagnostics.in_flight_snapshot(),
+        "slow_request_threshold_s": request_diagnostics.SLOW_REQUEST_SECONDS,
+        "websocket_connections": len(ws_manager.active_connections),
+        "open_runs": run_journal.list_open_runs(),
+    }
+
+
+@app.get("/api/runs")
+async def list_runs(chat_id: str = "", limit: int = 50):
+    from backend import run_journal
+    return {"runs": run_journal.list_runs(chat_id or None, limit)}
+
+
+@app.get("/api/runs/open")
+async def list_open_runs():
+    """Runs the journal still considers in flight. After a clean startup this is
+    empty; anything here is either live right now or evidence of a crash."""
+    from backend import run_journal
+    return {"runs": run_journal.list_open_runs()}
+
+
+@app.get("/api/runs/{run_id}")
+async def get_run(run_id: str):
+    from backend import run_journal
+    run = run_journal.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    run["events"] = run_journal.get_run_events(run_id)
+    # Live replay state, when the in-memory buffer still has this run.
+    from backend.websocket_manager import manager as ws_manager
+    run["stream"] = ws_manager.run_status(run_id)
+    return run
+
 @app.get("/api/metrics")
 async def get_metrics():
     from backend.database import db_get_aggregated_metrics
@@ -947,24 +1095,36 @@ async def delete_document(doc_id: str):
 
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...)):
-    import shutil
     import os
+    from backend import media_snapshots
     uploads_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "uploads")
-    os.makedirs(uploads_dir, exist_ok=True)
-    file_path = os.path.join(uploads_dir, file.filename)
     try:
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        logger.info(f"File uploaded successfully: {file.filename}")
+        # The client-supplied name is never used as a path directly: it is reduced
+        # to a safe basename and re-checked after resolution, and whatever it
+        # replaces is archived so an earlier chat reference does not silently
+        # start showing different bytes.
+        stored = media_snapshots.store_upload(uploads_dir, file.filename, file.file)
+        file_path = stored["path"]
+        logger.info(f"File uploaded successfully: {stored['filename']}")
         
-        # Broadcast upload event over WS so the UI is notified
-        await manager.broadcast({
+        # Chat-scoped notice: it renders in the dashboard conversation, so it is
+        # addressed there rather than fanned out to every open chat.
+        await manager.send_chat_event("dashboard", {
             "type": "chat_message",
             "role": "system",
             "content": f"⚙️ [Orchestrator] Dataset: Data file '{file.filename}' loaded."
         })
         
-        return {"status": "success", "filename": file.filename, "filepath": file_path}
+        return {
+            "status": "success",
+            "filename": stored["filename"],
+            "filepath": file_path,
+            "replaced_snapshot": stored["replaced_snapshot"],
+        }
+    except ValueError as e:
+        # A name that cannot be contained is a client error, not a server fault.
+        logger.warning("Rejected upload filename %r: %s", file.filename, e)
+        raise HTTPException(status_code=400, detail="Invalid file name.")
     except Exception as e:
         logger.exception(f"Error uploading file: {e}")
         raise HTTPException(status_code=500, detail="Failed to upload file. Check server logs.")
@@ -1175,7 +1335,7 @@ async def save_subagent_api(subagent: SubagentUpdate):
         tier = get_tier(subagent.tier_id)
         if tier and not tier["allow_external_provider"]:
             allowed_provider_ids = []
-            model_provider = "ollama"
+            model_provider = "local"
     save_subagent(
         clean_id,
         subagent.name,
@@ -1647,26 +1807,19 @@ async def get_models_api():
     api_base = agent_instance.api_base
     api_key = os.getenv("OPENROUTER_API_KEY", "")
 
-    from backend.ollama_client import OllamaClient, is_ollama_provider
-    if is_ollama_provider(api_base, agent_instance.provider):
+    from backend.llamacpp_client import LlamaCppClient, is_llamacpp_provider
+    if is_llamacpp_provider(api_base, agent_instance.provider):
         try:
-            raw_models = await OllamaClient(api_base).list_models()
-            result = []
-            for item in raw_models:
-                model_id = item.get("name") or item.get("model")
-                if model_id:
-                    result.append({
-                        "id": model_id,
-                        "name": model_id,
-                        "provider": "ollama",
-                        "size": item.get("size"),
-                        "digest": item.get("digest"),
-                        "modified_at": item.get("modified_at"),
-                        "details": item.get("details") or {},
-                    })
-            return result
+            raw_models = await LlamaCppClient(api_base).list_models()
+            return [{
+                "id": item["id"],
+                "name": item["id"],
+                "provider": "llamacpp",
+                "size": (item.get("meta") or {}).get("size"),
+                "details": item.get("meta") or {},
+            } for item in raw_models]
         except Exception as exc:
-            logger.warning("Failed to list Ollama models: %s", exc)
+            logger.warning("Failed to list llama.cpp models: %s", exc)
             return []
 
     url = f"{api_base}/models"
@@ -1690,7 +1843,7 @@ async def get_models_api():
                         if m_id:
                             result.append({"id": m_id, "name": m_name})
 
-                # ── Format 2: Ollama native /api/tags ──────────────────────
+                # ── Format 2: {"models": [...]} listings ────────────────
                 elif isinstance(data, dict) and "models" in data:
                     raw_models = data["models"]
                     for m in raw_models:
@@ -1717,11 +1870,11 @@ async def get_models_api():
 
     # ── Fallback: local provider vs OpenRouter ─────────────────────────────
     is_local = any(m in (api_base or "").lower()
-                   for m in ("localhost", "127.0.0.1", "0.0.0.0", "ollama",
+                   for m in ("localhost", "127.0.0.1", "0.0.0.0", "hermes-llama",
                              "host.docker.internal", "lmstudio", "vllm"))
     if is_local:
         # Return the currently configured model as the only available option.
-        current_model = os.getenv("LLM_MODEL", "hermes-brain")
+        current_model = os.getenv("LLM_MODEL", "qwen3.8-27b")
         return [{"id": current_model, "name": f"Local: {current_model}"}]
 
     # OpenRouter fallback list
@@ -1738,93 +1891,17 @@ async def get_models_api():
     ]
 
 
-def _ollama_client():
-    from backend.ollama_client import OllamaClient
-    # Model management remains available even while the active chat provider is
-    # temporarily switched to OpenRouter/OpenAI-compatible.
-    return OllamaClient(agent_instance.ollama_base_url, timeout=agent_instance.request_timeout)
+@app.get("/api/llm/status")
+async def get_local_llm_status():
+    """The local llama.cpp server as the dashboard shows it: health, the model it
+    serves, context size, slots and build. Always 200 — an unreachable or still
+    loading server is part of the payload, not an HTTP error."""
+    from backend.llamacpp_client import LlamaCppClient
 
-
-@app.get("/api/ollama/status")
-async def get_ollama_status():
-    return await _ollama_client().status()
-
-
-@app.get("/api/ollama/models")
-async def get_ollama_models():
-    try:
-        return {"models": await _ollama_client().list_models()}
-    except Exception as exc:
-        from backend.ollama_client import OllamaError
-        if isinstance(exc, OllamaError):
-            raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
-        raise
-
-
-@app.get("/api/ollama/running")
-async def get_ollama_running_models():
-    try:
-        return {"models": await _ollama_client().list_running()}
-    except Exception as exc:
-        from backend.ollama_client import OllamaError
-        if isinstance(exc, OllamaError):
-            raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
-        raise
-
-
-@app.post("/api/ollama/models/show")
-async def show_ollama_model(request: OllamaModelRequest):
-    try:
-        return await _ollama_client().show_model(request.model)
-    except Exception as exc:
-        from backend.ollama_client import OllamaError
-        if isinstance(exc, OllamaError):
-            raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
-        raise
-
-
-@app.post("/api/ollama/models/pull")
-async def pull_ollama_model(request: OllamaPullRequest):
-    import json
-
-    async def progress_stream():
-        try:
-            async for event in _ollama_client().pull_model(request.model, insecure=request.insecure):
-                yield json.dumps(event, ensure_ascii=False) + "\n"
-            _models_cache["data"] = None
-            _models_cache["timestamp"] = 0
-        except Exception as exc:
-            from backend.ollama_client import OllamaError
-            code = exc.code if isinstance(exc, OllamaError) else "pull_error"
-            yield json.dumps({"error": str(exc), "code": code}, ensure_ascii=False) + "\n"
-
-    return StreamingResponse(progress_stream(), media_type="application/x-ndjson")
-
-
-@app.delete("/api/ollama/models/{model:path}")
-async def delete_ollama_model(model: str):
-    try:
-        await _ollama_client().delete_model(model)
-        _models_cache["data"] = None
-        _models_cache["timestamp"] = 0
-        return {"status": "deleted", "model": model}
-    except Exception as exc:
-        from backend.ollama_client import OllamaError
-        if isinstance(exc, OllamaError):
-            raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
-        raise
-
-
-@app.post("/api/ollama/models/unload")
-async def unload_ollama_model(request: OllamaModelRequest):
-    try:
-        await _ollama_client().unload_model(request.model)
-        return {"status": "unloaded", "model": request.model}
-    except Exception as exc:
-        from backend.ollama_client import OllamaError
-        if isinstance(exc, OllamaError):
-            raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
-        raise
+    status = await LlamaCppClient(agent_instance.local_base_url, timeout=10).status()
+    status["active_model"] = agent_instance.model
+    status["local_num_ctx"] = agent_instance.local_num_ctx
+    return status
 
 # ─── MCP CONFIG API ───────────────────────────────────────────────────────────
 
@@ -1952,6 +2029,42 @@ async def delete_provider_api(binding_id: str):
     except KeyError:
         raise HTTPException(status_code=404, detail="Binding not found")
     return {"status": "success", "id": binding_id}
+
+@app.get("/api/providers/{binding_id}/models")
+async def list_provider_models_api(binding_id: str):
+    """What one binding says it can serve — `GET {api_base}/models`, the
+    OpenAI-compatible contract 9Router, OpenRouter, DeepSeek and vLLM all
+    answer. Generic on purpose: GET /api/router/models only ever describes the
+    9Router sidecar, so anything that pins a *binding* to a model (a channel, an
+    agent, a Content Factory node) needs to ask that binding, not the sidecar.
+
+    Never an error for an endpoint that simply does not list: a caller is always
+    a picker, and "could not list" has to degrade to typing the name by hand."""
+    from backend.provider_governance import resolve_binding_credentials
+
+    resolved = await asyncio.to_thread(resolve_binding_credentials, binding_id)
+    if not resolved:
+        return {"models": [], "error": "Provider is not active"}
+    api_base, api_key = resolved
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(
+                f"{api_base.rstrip('/')}/models",
+                headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
+            )
+    except httpx.HTTPError as exc:
+        logger.warning("Model list for binding %s failed: %s", binding_id, exc)
+        return {"models": [], "error": "Endpoint unreachable"}
+    if resp.status_code != 200:
+        detail = "invalid API key" if resp.status_code in (401, 403) else f"HTTP {resp.status_code}"
+        return {"models": [], "error": f"GET /models failed: {detail}"}
+    try:
+        entries = resp.json().get("data") or []
+    except ValueError:
+        return {"models": [], "error": "Endpoint returned a non-JSON model list"}
+    models = sorted({str(e["id"]) for e in entries if isinstance(e, dict) and e.get("id")})
+    return {"models": models, "error": None}
+
 
 @app.put("/api/providers/{binding_id}/pricing")
 async def update_provider_pricing_api(binding_id: str, payload: ProviderPricingRequest):
@@ -2107,6 +2220,27 @@ async def router_models_api():
     return {"available": True, "models": models, "error": None}
 
 
+@app.get("/api/chat/models")
+async def chat_models_api(refresh: bool = False):
+    """The chat model picker's catalogue: the model the local llama.cpp server is
+    serving plus the external 9Router catalogue, in one payload.
+
+    /api/models answers "what can the *configured* provider serve" and
+    /api/router/models answers only the 9Router half — the picker needs both
+    at once, each labelled with its source, because that source is what the
+    chat frame sends back and what backend/chat_models.py resolves an endpoint
+    from. Neither half can fail the request: an unreachable source comes back
+    empty with an `*_error` string the UI shows in place of its group."""
+    from backend import chat_models
+
+    return await chat_models.list_chat_models(
+        local_base_url=agent_instance.local_base_url,
+        default_model=agent_instance.model,
+        default_provider=agent_instance.provider,
+        force_refresh=refresh,
+    )
+
+
 class RouterSessionCredentialRequest(BaseModel):
     password: str
 
@@ -2191,6 +2325,49 @@ async def router_connections_api():
     except ValueError:
         return {"available": True, "connections": None, "error": "9Router returned invalid JSON for /api/providers."}
     return {"available": True, "connections": data.get("connections") if isinstance(data, dict) else data, "error": None}
+
+
+@app.get("/api/router/catalog")
+async def router_catalog_api():
+    """Everything 9Router *could* serve, not just what it can serve today.
+
+    GET /api/router/models (the Bearer-key /v1/models) only lists models a
+    connected, active upstream account can answer with — 23 of them on this
+    deployment. 9Router's session-cookie /api/models is the whole catalogue,
+    including providers nobody has connected yet, which is the list to look at
+    when the question is "what would connecting this account give me". Grouped
+    by provider here because that is the unit an account is connected as.
+    """
+    from backend.router_session import session_request, is_configured
+
+    if not await asyncio.to_thread(is_configured):
+        return {"available": False, "providers": [], "error": "Dashboard password is not configured"}
+    resp = await session_request("GET", "/api/models")
+    if resp is None or resp.status_code != 200:
+        detail = "session unavailable" if resp is None else f"HTTP {resp.status_code}"
+        return {"available": False, "providers": [], "error": f"GET /api/models failed: {detail}"}
+    try:
+        entries = resp.json().get("models") or []
+    except ValueError:
+        return {"available": False, "providers": [], "error": "9Router returned a non-JSON catalogue"}
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        provider = str(entry.get("provider") or "")
+        if not provider:
+            continue
+        grouped.setdefault(provider, []).append({
+            "id": entry.get("fullModel") or entry.get("routedModel") or entry.get("model"),
+            "name": entry.get("name") or entry.get("model"),
+            "capabilities": entry.get("caps") if isinstance(entry.get("caps"), dict) else {},
+        })
+    providers = [
+        {"provider": provider, "models": models}
+        for provider, models in sorted(grouped.items(), key=lambda item: item[0])
+    ]
+    return {"available": True, "providers": providers, "error": None}
 
 
 @app.post("/api/router/bind-self")
@@ -2354,6 +2531,10 @@ class MessengerBindingUpdateRequest(BaseModel):
     human_takeover_pause_minutes: Optional[int] = None
     escalation_enabled: Optional[bool] = None
     handling_menu_enabled: Optional[bool] = None
+    # Per-channel model. '' on either clears the override and hands the channel
+    # back to its agent's own provider/model.
+    model: Optional[str] = None
+    model_provider: Optional[str] = None
 
 class MessengerBindingReconnectRequest(BaseModel):
     """One shape covering all 5 platforms' credential fields — the endpoint reads
@@ -3024,6 +3205,8 @@ async def update_messenger_binding_api(binding_id: str, payload: MessengerBindin
             human_takeover_pause_minutes=payload.human_takeover_pause_minutes,
             escalation_enabled=payload.escalation_enabled,
             handling_menu_enabled=payload.handling_menu_enabled,
+            model_override=payload.model,
+            model_provider_override=payload.model_provider,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc) or "Binding not found") from exc
@@ -3065,6 +3248,7 @@ async def reconnect_messenger_binding_api(binding_id: str, payload: MessengerBin
         reconnect_discord_binding, reconnect_slack_binding, reconnect_email_binding,
         reconnect_social_binding,
     )
+    from backend.matrix_oauth import MatrixTransientError
 
     binding = await asyncio.to_thread(get_binding, binding_id)
     if not binding:
@@ -3103,6 +3287,12 @@ async def reconnect_messenger_binding_api(binding_id: str, payload: MessengerBin
                 raise HTTPException(status_code=400, detail="credentials обязательны")
             return await reconnect_social_binding(binding_id, payload.credentials)
         raise HTTPException(status_code=400, detail=f"Unknown platform: {platform}")
+    except MatrixTransientError as exc:
+        # Credentials are saved and the channel stays active; the health check
+        # starts the bot once the homeserver answers again.
+        raise HTTPException(
+            status_code=503, detail=f"Данные сохранены, но Matrix сейчас недоступен — канал запустится сам: {exc}",
+        ) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc) or "Binding not found") from exc
     except ValueError as exc:
@@ -3699,12 +3889,27 @@ async def get_history_sessions():
         last_time_map = {r[0]: r[1] for r in session_rows}
         
         # Fetch all custom titles, agent_ids and project_ids from session_metadata
-        cursor.execute("SELECT session_id, title, agent_id, project_id FROM session_metadata")
-        metadata_map = {r[0]: {"title": r[1], "agent_id": r[2], "project_id": r[3]} for r in cursor.fetchall()}
+        cursor.execute("SELECT session_id, title, agent_id, project_id, created_at FROM session_metadata")
+        metadata_rows = cursor.fetchall()
+        metadata_map = {r[0]: {"title": r[1], "agent_id": r[2], "project_id": r[3]} for r in metadata_rows}
+        created_at_map = {r[0]: r[4] for r in metadata_rows}
         conn.close()
+
+        # A session that exists but has not been spoken in yet. The list used to
+        # be built from `messages` alone, so a chat the user had just created —
+        # named, assigned an agent, and open on screen — was simply absent from
+        # the sidebar until its first reply arrived, which reads as "my new chat
+        # vanished". Its metadata row is proof enough that it exists.
+        sessions.extend(s for s in created_at_map if s not in last_time_map)
+        # No message means no last_time, so order those by when they were made;
+        # a brand-new chat then appears at the top, where it was just created.
+        last_time_map.update({
+            s: created_at_map[s] for s in created_at_map if s not in last_time_map
+        })
 
         # Filter out subagents, and keep only "dashboard" and custom sessions
         user_sessions = [s for s in sessions if s not in subagent_ids and s != "dashboard" and not s.startswith("archive_")]
+        user_sessions.sort(key=lambda s: last_time_map.get(s) or "", reverse=True)
 
         sessions_response = []
         for s in ["dashboard"] + user_sessions:
@@ -3777,6 +3982,17 @@ async def delete_history_api(chat_id: str):
     if chat_id in agent_instance.last_costs:
         agent_instance.last_costs[chat_id] = 0.0
     return {"status": "success"}
+
+@app.delete("/api/history/{chat_id}/messages/{message_id}")
+async def delete_history_message_api(chat_id: str, message_id: int):
+    """Drops a single message from a conversation — the chat UI's per-message
+    delete. The whole-session DELETE above is a different, much blunter thing."""
+    from backend.database import delete_message
+
+    if not delete_message(chat_id, message_id):
+        raise HTTPException(status_code=404, detail="Message not found in this session.")
+    return {"status": "success"}
+
 
 @app.post("/api/history/{session_id}/archive")
 async def archive_history_session(session_id: str):
@@ -3951,6 +4167,10 @@ class ClientRequest(BaseModel):
 
 class ClientServiceRequest(BaseModel):
     model_config = {"extra": "allow"}
+
+
+class CountryTaxRateRequest(BaseModel):
+    taxRatePercent: Any
 
 
 class AgentConnectionRequest(BaseModel):
@@ -4189,6 +4409,30 @@ async def create_service_api(payload: ClientServiceRequest, request: Request):
             clients.create_service, data.get("name", ""), data.get("description", ""),
             bool(data.get("isActive", True)),
         )
+    except Exception as exc:
+        raise _client_error(exc)
+
+
+@app.get("/api/clients/countries")
+async def list_country_settings_api(request: Request):
+    """One row per country in use, each with its tax-deduction %, for the
+    «Клиенты» list's country group headers. Financial-view gated like the
+    dashboard KPIs — a tax rate is a revenue figure, not a locale label."""
+    from backend import clients, permissions
+    role = permissions.require(request, permissions.CLIENTS_VIEW)
+    if not permissions.can_view_financials(role):
+        raise HTTPException(status_code=403, detail="Недостаточно прав: требуется «clients.financials.view»")
+    return await asyncio.to_thread(clients.list_country_settings)
+
+
+@app.patch("/api/clients/countries/{country}")
+async def set_country_tax_rate_api(country: str, payload: CountryTaxRateRequest, request: Request):
+    from backend import clients, permissions
+    role = permissions.require(request, permissions.CLIENTS_EDIT)
+    if not permissions.can_view_financials(role):
+        raise HTTPException(status_code=403, detail="Недостаточно прав: требуется «clients.financials.view»")
+    try:
+        return await asyncio.to_thread(clients.set_country_tax_rate, country, payload.taxRatePercent)
     except Exception as exc:
         raise _client_error(exc)
 
@@ -4873,7 +5117,15 @@ async def websocket_endpoint(websocket: WebSocket):
         "",
     )
     token = auth_protocol.removeprefix("hermes-auth.")
-    response_protocol = "hermes-v1" if "hermes-v1" in offered_protocols else None
+    # Prefer the addressed/resumable protocol. A client still on hermes-v1 (or a
+    # stale cached bundle offering neither) keeps working on the legacy firehose.
+    from backend.websocket_manager import PROTOCOL_V1, PROTOCOL_V2
+    if PROTOCOL_V2 in offered_protocols:
+        response_protocol = PROTOCOL_V2
+    elif PROTOCOL_V1 in offered_protocols:
+        response_protocol = PROTOCOL_V1
+    else:
+        response_protocol = None
     from backend.auth import validate_session
     if not token or not validate_session(token):
         await websocket.accept(subprotocol=response_protocol)
@@ -4897,40 +5149,110 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             # Maintain connection alive, process incoming messages if any
             data = await websocket.receive_text()
+            # Declared out here so the error handler below can always close out
+            # the run the browser is waiting on, even for a frame that failed
+            # before these were read.
+            chat_id, run_id = "dashboard", ""
             try:
                 import json
                 msg = json.loads(data)
-                if msg.get("type") == "chat_message":
+                frame_type = msg.get("type")
+                if frame_type in ("subscribe", "unsubscribe"):
+                    raw_ids = msg.get("chat_ids")
+                    if not isinstance(raw_ids, list):
+                        raw_ids = [msg.get("chat_id")]
+                    chat_ids = [str(item)[:128] for item in raw_ids if item]
+                    if frame_type == "subscribe" and any(c.startswith("inbox") for c in chat_ids):
+                        # The inbox feed is the only subscription behind a
+                        # permission: a role without inbox.view must not even
+                        # learn which conversations changed.
+                        from backend import permissions as _permissions
+                        from backend.auth import role_for_session
+                        if not _permissions.has_permission(role_for_session(token), _permissions.INBOX_VIEW):
+                            chat_ids = [c for c in chat_ids if not c.startswith("inbox")]
+                    if frame_type == "subscribe":
+                        current = manager.subscribe(websocket, chat_ids)
+                    else:
+                        current = manager.unsubscribe(websocket, chat_ids)
+                    await websocket.send_json({
+                        "type": "subscribed",
+                        "chat_ids": sorted(current),
+                    })
+                    continue
+                if frame_type == "resume":
+                    # A reconnecting client asks for the tail of each run it was
+                    # watching. Replay is per run so one expired cursor does not
+                    # invalidate the others.
+                    requests = msg.get("runs")
+                    if not isinstance(requests, list):
+                        requests = [{"run_id": msg.get("run_id"), "after_seq": msg.get("after_seq", 0)}]
+                    for item in requests[:16]:
+                        if not isinstance(item, dict):
+                            continue
+                        resume_run_id = str(item.get("run_id") or "")[:128]
+                        if not resume_run_id:
+                            continue
+                        try:
+                            after_seq = int(item.get("after_seq") or 0)
+                        except (TypeError, ValueError):
+                            after_seq = 0
+                        await manager.resume(websocket, resume_run_id, after_seq)
+                    continue
+                if frame_type == "chat_message":
                     user_text = msg.get("content", "")
                     chat_id = msg.get("chat_id", "dashboard")
                     run_id = str(msg.get("run_id") or "")[:128]
-                    # Broadcast user message to all dashboard connections
-                    await manager.broadcast({
+                    # Per-turn model choice from the chat UI's model picker. The
+                    # frame carries the catalogue id and its source, never an
+                    # endpoint — resolve_chat_model looks the pair up in the live
+                    # catalogue and returns None (i.e. "use the default") for
+                    # anything it doesn't recognise.
+                    from backend import chat_models
+                    llm_override = await chat_models.resolve_chat_model(
+                        str(msg.get("model_source") or ""),
+                        str(msg.get("model") or "")[:256],
+                        local_base_url=agent_instance.local_base_url,
+                        api_key=agent_instance.api_key,
+                    )
+                    # Write-ahead: the turn is durable BEFORE any provider work
+                    # starts, so a crash mid-turn leaves a record instead of a guess.
+                    from backend import run_journal
+                    run_journal.record_submitted(
+                        run_id, chat_id,
+                        user_text=user_text,
+                        initiator="web",
+                        model=(llm_override or {}).get("model") or agent_instance.model,
+                        provider=(llm_override or {}).get("provider") or agent_instance.provider,
+                    )
+                    # The sender is by definition watching this chat; subscribing
+                    # here closes the race between connecting and the first frame.
+                    manager.subscribe(websocket, [chat_id])
+                    await manager.send_chat_event(chat_id, {
                         "type": "chat_message",
                         "role": "user",
                         "content": user_text,
-                        "chat_id": chat_id
                     })
                     # Call agent
                     current_task = asyncio.current_task()
                     if run_id and current_task:
                         ACTIVE_CHAT_RUNS[run_id] = current_task
                     if run_id:
-                        await manager.broadcast({
+                        run_journal.record_started(
+                            run_id,
+                            model=(llm_override or {}).get("model") or agent_instance.model,
+                            provider=(llm_override or {}).get("provider") or agent_instance.provider,
+                        )
+                        await manager.send_run_event(run_id, chat_id, {
                             "type": "chat_stream_start",
-                            "chat_id": chat_id,
-                            "run_id": run_id,
-                            "model": agent_instance.model,
-                            "provider": agent_instance.provider,
+                            "model": (llm_override or {}).get("model") or agent_instance.model,
+                            "provider": (llm_override or {}).get("provider") or agent_instance.provider,
                         })
 
                     async def emit_stream_chunk(chunk):
                         if not run_id:
                             return
-                        await manager.broadcast({
+                        await manager.send_run_event(run_id, chat_id, {
                             "type": "chat_stream_chunk",
-                            "chat_id": chat_id,
-                            "run_id": run_id,
                             "content": chunk.get("content") or "",
                             "thinking": chunk.get("thinking") or "",
                             "tool_calls": chunk.get("tool_calls") or [],
@@ -4941,12 +5263,14 @@ async def websocket_endpoint(websocket: WebSocket):
                             user_text,
                             session_id=chat_id,
                             stream_callback=emit_stream_chunk,
+                            llm_override=llm_override,
                         )
                     except asyncio.CancelledError:
-                        await manager.broadcast({
-                            "type": "chat_cancelled", "chat_id": chat_id,
-                            "run_id": run_id,
+                        await manager.send_run_event(run_id, chat_id, {
+                            "type": "chat_cancelled",
                         })
+                        manager.close_run(run_id)
+                        run_journal.record_finished(run_id, run_journal.STATUS_CANCELLED)
                         # The WebSocket handler itself is the registered task. Clear
                         # cancellation so this connection can keep serving messages.
                         if current_task and hasattr(current_task, "uncancel"):
@@ -4982,32 +5306,43 @@ async def websocket_endpoint(websocket: WebSocket):
                         "tool_iterations": run_meta.get("tool_iterations"),
                     }
 
-                    # Broadcast agent response
-                    await manager.broadcast({
+                    # The terminal frame carries the FULL answer, so replaying it
+                    # repairs a client whose delta chunks had a gap.
+                    await manager.send_run_event(run_id, chat_id, {
                         "type": "chat_message",
                         "role": "assistant",
                         "content": response_text,
-                        "chat_id": chat_id,
                         "cost_usd": cost_usd,
                         "suppress_tts": suppress_tts,
                         "id": assistant_msg_id,
                         "meta": meta,
-                        "run_id": run_id,
                     })
                     if run_id:
-                        await manager.broadcast({
+                        await manager.send_run_event(run_id, chat_id, {
                             "type": "chat_stream_end",
-                            "chat_id": chat_id,
-                            "run_id": run_id,
                             "message_id": assistant_msg_id,
                             "meta": meta,
                         })
+                        # Keep the buffer replayable for a short TTL: a client that
+                        # reconnects AFTER the answer finished still needs it.
+                        manager.close_run(run_id)
+                        # Named apart from meta["status"] one line down — same word,
+                        # entirely different thing.
+                        stream_status = manager.run_status(run_id) or {}
+                        run_journal.record_finished(
+                            run_id,
+                            run_journal.STATUS_ERROR if meta.get("status") == "error"
+                            else run_journal.STATUS_COMPLETED,
+                            meta=meta,
+                            cost_usd=cost_usd,
+                            error_code=None if meta.get("status") != "error" else "agent_error",
+                            last_seq=stream_status.get("last_seq", 0),
+                        )
                     
                     # Broadcast user message ID update
                     if user_msg_id:
-                        await manager.broadcast({
+                        await manager.send_chat_event(chat_id, {
                             "type": "user_message_id_update",
-                            "chat_id": chat_id,
                             "content": user_text,
                             "id": user_msg_id
                         })
@@ -5018,6 +5353,29 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
             except Exception as e:
                 logger.error(f"Error processing websocket frame: {e}")
+                # The composer only stops spinning on a frame carrying this
+                # run_id: a handler that dies silently leaves the UI generating
+                # forever, which is how an UnboundLocalError in the decision log
+                # managed to look like "the agent never answered".
+                if run_id:
+                    try:
+                        await manager.send_run_event(run_id, chat_id, {
+                            "type": "chat_message",
+                            "role": "assistant",
+                            "content": "Простите, Альберт. Сбой при обработке ответа — подробности в логах сервера.",
+                            "meta": {"status": "error"},
+                        })
+                        await manager.send_run_event(run_id, chat_id, {
+                            "type": "chat_stream_end",
+                            "meta": {"status": "error"},
+                        })
+                        manager.close_run(run_id)
+                        from backend import run_journal as _run_journal
+                        _run_journal.record_finished(
+                            run_id, _run_journal.STATUS_ERROR, error_code="handler_exception"
+                        )
+                    except Exception:
+                        logger.exception("Could not notify the UI about a failed chat frame")
     except WebSocketDisconnect:
         manager.disconnect(websocket)
     except Exception as e:

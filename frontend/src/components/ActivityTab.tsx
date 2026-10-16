@@ -47,7 +47,7 @@ export function ActivityTab({
                 gap: '4px',
                 fontSize: '0.8rem'
               }}
-              onMouseEnter={(e) => (e.currentTarget.style.color = '#ef4444')}
+              onMouseEnter={(e) => (e.currentTarget.style.color = '#f05d75')}
               onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-dim)')}
             >
               <Trash2 size={14} />
@@ -67,8 +67,8 @@ export function ActivityTab({
                     flexDirection: 'column',
                     gap: '6px',
                     padding: '12px',
-                    borderBottom: '1px solid rgba(0, 240, 255, 0.08)',
-                    backgroundColor: log.type === 'active' ? 'rgba(0, 240, 255, 0.03)' : 'transparent',
+                    borderBottom: '1px solid rgba(157, 166, 181, 0.056)',
+                    backgroundColor: log.type === 'active' ? 'rgba(94, 225, 255, 0.03)' : 'transparent',
                     fontFamily: 'monospace',
                     fontSize: '0.9rem'
                   }}
@@ -85,10 +85,10 @@ export function ActivityTab({
                         color: log.type === 'active' ? 'var(--accent-cyan)' : 'var(--text-dim)',
                         fontWeight: 'bold',
                         fontSize: '0.8rem',
-                        border: `1px solid ${log.type === 'active' ? 'rgba(0, 240, 255, 0.3)' : 'rgba(255, 255, 255, 0.1)'}`,
+                        border: `1px solid ${log.type === 'active' ? 'rgba(94, 225, 255, 0.3)' : 'rgba(255, 255, 255, 0.1)'}`,
                         borderRadius: '3px',
                         padding: '1px 6px',
-                        backgroundColor: log.type === 'active' ? 'rgba(0, 240, 255, 0.05)' : 'rgba(255, 255, 255, 0.02)'
+                        backgroundColor: log.type === 'active' ? 'rgba(94, 225, 255, 0.05)' : 'rgba(255, 255, 255, 0.02)'
                       }}>
                         {log.source.toUpperCase()}
                       </span>

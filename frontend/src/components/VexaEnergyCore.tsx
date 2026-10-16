@@ -57,10 +57,10 @@ interface VexaEnergyCoreProps {
   onReady: () => void;
 }
 
-const ERROR_PULSE_COLOR = new THREE.Color(1.0, 0.42, 0.32);
+const ERROR_PULSE_COLOR = new THREE.Color(0.94, 0.36, 0.46);
 
 /** Violet the orbit strands blend toward, per their `hue`. */
-const ORBIT_VIOLET = new THREE.Color(0.62, 0.32, 1.0);
+const ORBIT_VIOLET = new THREE.Color(0.49, 0.36, 0.99);
 
 const PHASE_COLOR: Record<VoicePhase, [number, number, number]> = {
   offline: [0.22, 0.26, 0.32],
@@ -252,7 +252,7 @@ export default function VexaEnergyCore({ phase, audioAnalyser, pulseKey, errorPu
       uTime: { value: 0 },
       uAmp: { value: 0 },
       uEnergy: { value: 0.4 },
-      uColor: { value: new THREE.Color(0.2, 0.62, 0.97) },
+      uColor: { value: new THREE.Color(0.23, 0.51, 0.96) },
     };
     const vortex = new THREE.Mesh(quad, makeRadialMaterial(VORTEX_FRAGMENT_SHADER, vortexUniforms));
     scene.add(vortex);
@@ -266,7 +266,7 @@ export default function VexaEnergyCore({ phase, audioAnalyser, pulseKey, errorPu
         uVariant: { value: config.variant },
         uEnergy: { value: 0.4 },
         uOpacity: { value: config.opacity },
-        uColor: { value: new THREE.Color(0.3, 0.75, 1) },
+        uColor: { value: new THREE.Color(0.21, 0.81, 0.98) },
       };
       const mesh = new THREE.Mesh(quad, makeRadialMaterial(RING_FRAGMENT_SHADER, uniforms));
       scene.add(mesh);
@@ -283,7 +283,7 @@ export default function VexaEnergyCore({ phase, audioAnalyser, pulseKey, errorPu
         uOpacity: { value: config.opacity },
         uDashCount: { value: config.dashCount },
         uDashSpeed: { value: config.dashSpeed },
-        uColor: { value: new THREE.Color(0.3, 0.75, 1) },
+        uColor: { value: new THREE.Color(0.21, 0.81, 0.98) },
       };
       const geometry = new THREE.TorusGeometry(config.radius, config.tubeRadius, 8, 160);
       disposables.push(geometry);
@@ -315,7 +315,7 @@ export default function VexaEnergyCore({ phase, audioAnalyser, pulseKey, errorPu
         uAmp: { value: 0 },
         uOpacity: { value: config.opacity },
         uFlowSpeed: { value: config.flowSpeed },
-        uColor: { value: new THREE.Color(0.4, 0.8, 1) },
+        uColor: { value: new THREE.Color(0.21, 0.81, 0.98) },
       };
       const material = new THREE.ShaderMaterial({
         uniforms,
@@ -342,7 +342,7 @@ export default function VexaEnergyCore({ phase, audioAnalyser, pulseKey, errorPu
         uVariant: { value: -1 },
         uEnergy: { value: 0.4 },
         uOpacity: { value: 0 },
-        uColor: { value: new THREE.Color(0.65, 0.95, 1) },
+        uColor: { value: new THREE.Color(0.37, 0.88, 1.00) },
       };
       const mesh = new THREE.Mesh(quad, makeRadialMaterial(RING_FRAGMENT_SHADER, uniforms));
       mesh.visible = false;
@@ -410,7 +410,7 @@ export default function VexaEnergyCore({ phase, audioAnalyser, pulseKey, errorPu
       uTime: { value: 0 },
       uAmp: { value: 0 },
       uSpeedMul: { value: 1 },
-      uColor: { value: new THREE.Color(0.4, 0.82, 1) },
+      uColor: { value: new THREE.Color(0.21, 0.81, 0.98) },
     };
     const particleMaterial = new THREE.ShaderMaterial({
       uniforms: particleUniforms,
@@ -439,8 +439,8 @@ export default function VexaEnergyCore({ phase, audioAnalyser, pulseKey, errorPu
       uAmp: { value: 0 },
       uEnergy: { value: 0.4 },
       uBoot: { value: 0 },
-      uColor: { value: new THREE.Color(0.45, 0.82, 1) },
-      uColorAlt: { value: new THREE.Color(0.68, 0.4, 1) },
+      uColor: { value: new THREE.Color(0.21, 0.81, 0.98) },
+      uColorAlt: { value: new THREE.Color(0.57, 0.47, 1.00) },
     };
     const neuralGeometry = new THREE.BufferGeometry();
     neuralGeometry.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3));
@@ -466,8 +466,8 @@ export default function VexaEnergyCore({ phase, audioAnalyser, pulseKey, errorPu
       uAmp: { value: 0 },
       uEnergy: { value: 0.4 },
       uBoot: { value: 0 },
-      uColor: { value: new THREE.Color(0.35, 0.78, 1) },
-      uColorFar: { value: new THREE.Color(0.42, 0.26, 0.9) },
+      uColor: { value: new THREE.Color(0.21, 0.81, 0.98) },
+      uColorFar: { value: new THREE.Color(0.49, 0.36, 0.99) },
     };
     const linkGeometry = new THREE.BufferGeometry();
     linkGeometry.setAttribute('position', new THREE.BufferAttribute(mesh.linkPositions, 3));
@@ -515,8 +515,8 @@ export default function VexaEnergyCore({ phase, audioAnalyser, pulseKey, errorPu
       uAmp: { value: 0 },
       uEnergy: { value: 0.9 },
       uBoot: { value: 1 },
-      uColor: { value: new THREE.Color(0.7, 0.95, 1) },
-      uColorAlt: { value: new THREE.Color(0.7, 0.95, 1) },
+      uColor: { value: new THREE.Color(0.37, 0.88, 1.00) },
+      uColorAlt: { value: new THREE.Color(0.37, 0.88, 1.00) },
     };
     const signalMaterial = new THREE.ShaderMaterial({
       uniforms: signalUniforms,

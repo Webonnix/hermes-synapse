@@ -8,10 +8,10 @@ export const styles: Record<string, any> = {
     display: 'flex',
     flexDirection: 'column' as const,
     overflow: 'hidden',
-    borderRight: '1px solid rgba(45, 145, 212, 0.16)',
+    borderRight: '1px solid #1F2532',
     borderRadius: '0px',
-    background: 'linear-gradient(180deg, rgba(6, 18, 32, 0.94), rgba(2, 8, 18, 0.88))',
-    boxShadow: '18px 0 70px rgba(0, 0, 0, 0.22), inset -1px 0 0 rgba(255, 255, 255, 0.03)',
+    background: 'rgba(17, 20, 27, 0.92)',
+    boxShadow: 'none',
     zIndex: 10
   },
   sidebarCollapsed: {
@@ -27,8 +27,8 @@ export const styles: Record<string, any> = {
     width: '32px',
     height: '32px',
     borderRadius: '8px',
-    border: '1px solid rgba(45, 145, 212, 0.28)',
-    background: 'rgba(6, 20, 34, 0.92)',
+    border: '1px solid #282E3A',
+    background: '#181C25',
     color: 'var(--text-muted)',
     display: 'inline-flex',
     alignItems: 'center',
@@ -95,10 +95,10 @@ export const styles: Record<string, any> = {
     textTransform: 'uppercase' as const
   },
   navBtnActive: {
-    background: 'linear-gradient(135deg, rgba(27, 220, 255, 0.32), rgba(20, 100, 170, 0.62))',
-    border: '1px solid rgba(56, 220, 255, 0.8)',
-    color: '#f4fcff',
-    boxShadow: '0 14px 34px rgba(27, 220, 255, 0.3), inset 0 0 0 1px rgba(56, 220, 255, 0.14)'
+    background: 'linear-gradient(90deg, rgba(124, 92, 252, 0.30), rgba(124, 92, 252, 0.08))',
+    border: '1px solid rgba(124, 92, 252, 0.45)',
+    color: '#ffffff',
+    boxShadow: 'inset 3px 0 0 #7C5CFC'
   },
   navBtnCollapsed: {
     width: '48px',
@@ -133,8 +133,8 @@ export const styles: Record<string, any> = {
     gap: '6px',
     padding: '4px 8px',
     borderRadius: '6px',
-    backgroundColor: 'rgba(38, 132, 255, 0.12)',
-    border: '1px solid rgba(45, 145, 212, 0.32)'
+    backgroundColor: 'rgba(124, 92, 252, 0.12)',
+    border: '1px solid rgba(124, 92, 252, 0.35)'
   },
   modelName: {
     fontFamily: 'var(--font-mono)',
@@ -179,7 +179,7 @@ export const styles: Record<string, any> = {
     height: 'calc(100vh - 160px)',
     overflow: 'hidden',
     padding: '20px',
-    background: 'rgba(18, 19, 32, 0.58)'
+    background: 'rgba(17, 20, 27, 0.58)'
   },
   chatScroller: {
     flex: 1,
@@ -258,7 +258,7 @@ export const styles: Record<string, any> = {
     gap: '24px',
     width: '100%',
     maxWidth: '1400px',
-    background: 'rgba(18, 19, 32, 0.58)'
+    background: 'rgba(17, 20, 27, 0.58)'
   },
   formGroup: {
     display: 'flex',
@@ -300,7 +300,7 @@ export const styles: Record<string, any> = {
     flexDirection: 'column' as const,
     height: '100%',
     overflow: 'hidden',
-    background: 'rgba(18, 19, 32, 0.58)'
+    background: 'rgba(17, 20, 27, 0.58)'
   },
   logsListHeader: {
     padding: '16px',
@@ -349,7 +349,7 @@ export const styles: Record<string, any> = {
     alignItems: 'center',
     gap: '4px',
     fontSize: '0.7rem',
-    color: '#10b981',
+    color: '#35d49a',
     fontWeight: 600
   },
   statusError: {
@@ -357,7 +357,7 @@ export const styles: Record<string, any> = {
     alignItems: 'center',
     gap: '4px',
     fontSize: '0.7rem',
-    color: '#ef4444',
+    color: '#f05d75',
     fontWeight: 600
   },
   logCardQuery: {
@@ -382,7 +382,7 @@ export const styles: Record<string, any> = {
   logDetailWrapper: {
     height: '100%',
     overflowY: 'auto' as const,
-    background: 'rgba(18, 19, 32, 0.58)',
+    background: 'rgba(17, 20, 27, 0.58)',
     padding: '24px'
   },
   logDetail: {
@@ -416,7 +416,7 @@ export const styles: Record<string, any> = {
   detailStatBox: {
     padding: '12px 16px',
     borderRadius: '8px',
-    backgroundColor: 'rgba(10, 11, 19, 0.46)',
+    backgroundColor: 'rgba(10, 12, 16, 0.46)',
     border: 'var(--glass-border)',
     display: 'flex',
     flexDirection: 'column' as const,
@@ -449,7 +449,7 @@ export const styles: Record<string, any> = {
   codeBlock: {
     padding: '16px',
     borderRadius: '8px',
-    backgroundColor: 'rgba(10, 11, 19, 0.62)',
+    backgroundColor: 'rgba(10, 12, 16, 0.62)',
     border: 'var(--glass-border)',
     fontFamily: 'var(--font-mono)',
     fontSize: '0.85rem',
@@ -481,7 +481,7 @@ export const styles: Record<string, any> = {
     flexDirection: 'column' as const,
     height: '100%',
     padding: '24px',
-    background: 'rgba(18, 19, 32, 0.58)'
+    background: 'rgba(17, 20, 27, 0.58)'
   },
   toolsPanelTitle: {
     fontSize: '1.1rem',
@@ -555,7 +555,7 @@ export const styles: Record<string, any> = {
   },
   toolsTimersWrapper: {
     padding: '24px',
-    background: 'rgba(18, 19, 32, 0.58)'
+    background: 'rgba(17, 20, 27, 0.58)'
   },
   timersList: {
     display: 'grid',
@@ -617,7 +617,7 @@ export const styles: Record<string, any> = {
     color: 'var(--accent-cyan)',
     fontFamily: 'var(--font-mono)',
     lineHeight: 1.1,
-    textShadow: '0 0 12px rgba(115, 217, 255, 0.32)'
+    textShadow: '0 0 12px rgba(94, 225, 255, 0.16)'
   },
   countdownUnit: {
     fontSize: '0.7rem',
@@ -634,7 +634,7 @@ export const styles: Record<string, any> = {
   },
   toolsRegistryWrapper: {
     padding: '24px',
-    background: 'rgba(18, 19, 32, 0.58)',
+    background: 'rgba(17, 20, 27, 0.58)',
     marginBottom: '24px'
   },
   registeredToolsList: {
@@ -645,7 +645,7 @@ export const styles: Record<string, any> = {
   toolRegistryItem: {
     padding: '16px',
     borderRadius: '8px',
-    backgroundColor: 'rgba(10, 11, 19, 0.46)',
+    backgroundColor: 'rgba(10, 12, 16, 0.46)',
     border: 'var(--glass-border)'
   },
   toolRegistryHeader: {
@@ -678,12 +678,12 @@ export const styles: Record<string, any> = {
     flexDirection: 'column' as const,
     gap: '12px',
     padding: '16px',
-    backgroundColor: 'rgba(6, 9, 19, 0.4)',
+    backgroundColor: 'rgba(8, 9, 14, 0.4)',
     border: 'var(--glass-border)',
     borderRadius: '8px'
   },
   traceNode: {
-    borderLeft: '2px solid rgba(155, 136, 255, 0.24)',
+    borderLeft: '2px solid rgba(146, 119, 255, 0.24)',
     paddingLeft: '14px',
     display: 'flex',
     flexDirection: 'column' as const,
@@ -727,7 +727,7 @@ export const styles: Record<string, any> = {
     display: 'flex',
     flexDirection: 'column' as const,
     padding: '24px',
-    backgroundColor: 'rgba(12, 17, 34, 0.5)',
+    backgroundColor: 'rgba(15, 18, 24, 0.5)',
     borderRadius: '12px',
     border: 'var(--glass-border)'
   },
@@ -744,7 +744,7 @@ export const styles: Record<string, any> = {
     justifyContent: 'space-between',
     alignItems: 'center',
     padding: '10px 12px',
-    backgroundColor: 'rgba(6, 9, 19, 0.4)',
+    backgroundColor: 'rgba(8, 9, 14, 0.4)',
     border: 'var(--glass-border)',
     borderRadius: '6px'
   },
@@ -769,7 +769,7 @@ export const styles: Record<string, any> = {
     overflow: 'hidden',
     borderRadius: '8px',
     border: 'var(--glass-border)',
-    background: 'radial-gradient(circle at 50% 18%, rgba(155, 136, 255, 0.16), transparent 34%), rgba(8, 9, 16, 0.58)',
+    background: 'radial-gradient(circle at 50% 18%, rgba(146, 119, 255, 0.16), transparent 34%), rgba(8, 9, 14, 0.58)',
     boxShadow: 'var(--glass-shadow)'
   },
   sceneHeader: {
@@ -809,7 +809,7 @@ export const styles: Record<string, any> = {
     padding: '9px 12px',
     borderRadius: '999px',
     border: '1px solid rgba(255, 255, 255, 0.1)',
-    background: 'rgba(20, 20, 33, 0.6)',
+    background: 'rgba(18, 21, 29, 0.6)',
     backdropFilter: 'blur(14px)'
   },
   sceneCanvas: {
@@ -830,7 +830,7 @@ export const styles: Record<string, any> = {
     padding: '10px 12px',
     borderRadius: '999px',
     border: '1px solid rgba(255, 255, 255, 0.1)',
-    background: 'rgba(20, 20, 33, 0.58)',
+    background: 'rgba(18, 21, 29, 0.58)',
     backdropFilter: 'blur(14px)'
   },
   sceneLegendItem: {
@@ -858,7 +858,7 @@ export const styles: Record<string, any> = {
     padding: '18px',
     borderRadius: '8px',
     border: '1px solid rgba(255, 255, 255, 0.1)',
-    background: 'linear-gradient(145deg, rgba(28, 27, 45, 0.82), rgba(13, 14, 24, 0.76))',
+    background: 'linear-gradient(145deg, rgba(25, 29, 39, 0.82), rgba(13, 15, 20, 0.76))',
     boxShadow: '0 20px 55px rgba(0, 0, 0, 0.34)',
     backdropFilter: 'blur(18px)',
     display: 'flex',
@@ -873,8 +873,8 @@ export const styles: Record<string, any> = {
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: '8px',
-    border: '1px solid rgba(255, 93, 143, 0.28)',
-    background: 'rgba(20, 20, 33, 0.72)',
+    border: '1px solid rgba(240, 93, 117, 0.28)',
+    background: 'rgba(18, 21, 29, 0.72)',
     color: 'var(--danger)',
     textAlign: 'center' as const,
     padding: '24px',
@@ -946,8 +946,8 @@ export const styles: Record<string, any> = {
     width: '44px',
     height: '44px',
     borderRadius: '8px',
-    border: '1px solid rgba(155, 136, 255, 0.28)',
-    backgroundColor: 'rgba(155, 136, 255, 0.08)',
+    border: '1px solid rgba(146, 119, 255, 0.28)',
+    backgroundColor: 'rgba(146, 119, 255, 0.08)',
     cursor: 'pointer',
     transition: 'all 0.2s ease'
   },
@@ -956,7 +956,7 @@ export const styles: Record<string, any> = {
     fontSize: '0.75rem',
     fontWeight: 600,
     color: 'var(--accent-cyan)',
-    borderBottom: '1px solid rgba(0, 240, 255, 0.1)',
+    borderBottom: '1px solid rgba(157, 166, 181, 0.07)',
     marginBottom: '4px',
     textTransform: 'uppercase' as const,
     letterSpacing: '1px'

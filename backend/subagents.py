@@ -1,5 +1,7 @@
 import os
 import re
+import contextlib
+import contextvars
 import sys
 import uuid
 import random
@@ -15,33 +17,70 @@ logger = logging.getLogger("hermes.subagents")
 
 _LLM_RUNTIME: Dict[str, Any] = {}
 
+# Per-turn endpoint, layered over the process-wide one above.
+#
+# The dashboard's configured provider is genuinely global state and stays in
+# _LLM_RUNTIME. A single *turn*, however, can run against a different endpoint
+# (the chat model picker, or an agent bound to its own provider), and the agent
+# is one process-wide singleton shared with the Telegram bot and the schedulers:
+# writing a turn's endpoint into the global dict leaked it into whatever else
+# was mid-answer, and left it behind after the turn. A ContextVar is task-local
+# and is copied into anything the turn spawns (asyncio.to_thread included).
+_LLM_RUNTIME_TURN: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar(
+    "hermes_llm_runtime_turn", default=None,
+)
+
 
 def configure_llm_runtime(api_base: str, provider_options: Optional[Dict[str, Any]] = None) -> None:
     """Share the active dashboard provider configuration with orchestration helpers.
 
-    Hermes has a single runtime LLM configuration, so keeping this tiny process-local
-    snapshot avoids forcing every specialized agent constructor to duplicate provider
-    arguments while still honoring settings changed from the web UI.
+    Process-wide on purpose: this is the configured default, changed when someone
+    edits the settings, and it must outlive the request that changed it. For the
+    endpoint one turn happens to run against, use use_llm_runtime().
     """
     _LLM_RUNTIME["api_base"] = api_base.rstrip("/")
     _LLM_RUNTIME["provider_options"] = dict(provider_options or {})
 
 
+def use_llm_runtime(api_base: str, provider_options: Optional[Dict[str, Any]] = None) -> None:
+    """Point this turn's orchestration helpers at `api_base`, leaving the
+    configured default (and every concurrent turn) untouched."""
+    _LLM_RUNTIME_TURN.set({
+        "api_base": (api_base or "").rstrip("/"),
+        "provider_options": dict(provider_options or {}),
+    })
+
+
+@contextlib.contextmanager
+def default_llm_runtime():
+    """Run a block against the configured default endpoint, ignoring whatever
+    endpoint the surrounding turn is using. The delegation boundary in
+    backend/agent.no_llm_override() is the caller."""
+    token = _LLM_RUNTIME_TURN.set(None)
+    try:
+        yield
+    finally:
+        _LLM_RUNTIME_TURN.reset(token)
+
+
 def _active_llm_runtime() -> tuple[str, Dict[str, Any]]:
-    provider = os.getenv("LLM_PROVIDER", "ollama").strip().lower()
+    from backend.llamacpp_client import LOCAL_PROVIDER, normalize_base_url, normalize_provider
+
+    provider = normalize_provider(os.getenv("LLM_PROVIDER", LOCAL_PROVIDER)) or LOCAL_PROVIDER
     default_base = (
-        os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-        if provider == "ollama"
+        normalize_base_url(os.getenv("LLAMACPP_BASE_URL"))
+        if provider == LOCAL_PROVIDER
         else os.getenv("LLM_API_BASE", "https://openrouter.ai/api/v1")
     )
     options = {
         "provider": provider,
-        "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "8192")),
-        "keep_alive": os.getenv("OLLAMA_KEEP_ALIVE", "5m"),
-        "think": os.getenv("OLLAMA_THINK", "false"),
+        "num_ctx": int(os.getenv("LOCAL_NUM_CTX", "32768")),
+        "think": os.getenv("LOCAL_THINK", "false"),
     }
+    turn = _LLM_RUNTIME_TURN.get() or {}
     options.update(_LLM_RUNTIME.get("provider_options") or {})
-    return _LLM_RUNTIME.get("api_base") or default_base, options
+    options.update(turn.get("provider_options") or {})
+    return turn.get("api_base") or _LLM_RUNTIME.get("api_base") or default_base, options
 
 # ─── Per-agent model helper ──────────────────────────────────────────────────
 

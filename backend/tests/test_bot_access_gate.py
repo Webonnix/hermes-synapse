@@ -145,7 +145,7 @@ def test_a_blocked_subscriber_is_silently_ignored(gate_db, monkeypatch):
 
 
 def test_token_mode_pointing_at_the_main_agent_serves_nobody(gate_db, monkeypatch):
-    _bind(monkeypatch, access_mode="token", subagent_id="jarvis", allowed_chat_ids=[])
+    _bind(monkeypatch, access_mode="token", subagent_id="vexa", allowed_chat_ids=[])
     assert bot_access_gate.authorize("bind-1", "telegram", "999", "привет").action == bot_access_gate.IGNORE
 
 

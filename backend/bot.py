@@ -26,10 +26,17 @@ telegram_app: Application = None
 ACTIVE_CHAT_TASKS = {}
 TELEGRAM_TEXT_LIMIT = 3900
 
+# tool_max_tokens is deliberately larger than max_tokens in every mode: a tool
+# turn spends its budget writing arguments (a whole script, a whole file body),
+# and a call truncated mid-JSON is dropped by the provider's parser, leaving the
+# turn with no content and no tool call at all — the "пустой финальный ответ".
 MODE_PRESETS = {
-    "fast": {"ollama_think": False, "fast_mode": True, "max_tokens": 768, "tool_max_tokens": 1024},
-    "balanced": {"ollama_think": False, "fast_mode": False, "max_tokens": 2048, "tool_max_tokens": 2048},
-    "deep": {"ollama_think": True, "fast_mode": False, "max_tokens": 4096, "tool_max_tokens": 4096},
+    "fast": {"local_think": False, "fast_mode": True, "max_tokens": 768, "tool_max_tokens": 2048},
+    "balanced": {"local_think": False, "fast_mode": False, "max_tokens": 4096, "tool_max_tokens": 6144},
+    # deep is documented as "максимальный бюджет", so it is the mode that uses
+    # the full ceiling the compose file already declares (LLM_*_MAX_TOKENS
+    # 16384) and that update_runtime_config clamps to.
+    "deep": {"local_think": True, "fast_mode": False, "max_tokens": 16384, "tool_max_tokens": 16384},
 }
 
 
@@ -173,8 +180,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Send message to Telegram
     await update.message.reply_text(greeting)
     
-    # Broadcast status / connection message to UI
-    await manager.broadcast({
+    # Chat-scoped: only the dashboards watching this Telegram chat need it.
+    await manager.send_chat_event(chat_id, {
         "type": "chat_message",
         "role": "assistant",
         "content": greeting,
@@ -199,7 +206,7 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "Контекст текущего Telegram-чата очищен."
     await update.message.reply_text(msg)
     
-    await manager.broadcast({
+    await manager.send_chat_event(chat_id, {
         "type": "chat_message",
         "role": "system",
         "content": "History cleared by user.",
@@ -227,7 +234,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from backend.control_plane import get_control_state, list_tasks
     control_state = get_control_state()
     pending_approvals = len(list_tasks(limit=100, status="awaiting_approval"))
-    think_enabled = str(agent_instance.ollama_think).lower() in {"true", "1", "yes", "on", "high", "medium", "low"}
+    think_enabled = str(agent_instance.local_think).lower() in {"true", "1", "yes", "on", "high", "medium", "low"}
     mode = "deep" if think_enabled else ("fast" if agent_instance.fast_mode else "balanced")
     gpu_summary = ", ".join(
         f"GPU {gpu.get('index')}: {gpu.get('memory_usage_percent', '—')}% VRAM, {gpu.get('temperature_celsius', '—')}°C"
@@ -243,8 +250,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         + (f" · проблемы: {', '.join(unhealthy)}" if unhealthy else "") + "\n\n"
         f"Control Plane: {'STOPPED' if control_state['kill_switch'] else 'ACTIVE'} · approval: {pending_approvals}\n"
         f"Модель: {agent_instance.model}\n"
-        f"Режим: {mode} · think={agent_instance.ollama_think}\n"
-        f"Лимит: {agent_instance.max_tokens} токенов · контекст: {agent_instance.ollama_num_ctx}\n"
+        f"Режим: {mode} · think={agent_instance.local_think}\n"
+        f"Лимит: {agent_instance.max_tokens} токенов · контекст: {agent_instance.local_num_ctx}\n"
         f"История чата: {history_len} сообщений"
     )
     await _reply_text(update, status_text)
@@ -280,7 +287,7 @@ async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed_chat(update):
         return
     if not context.args:
-        think_enabled = str(agent_instance.ollama_think).lower() in {"true", "1", "yes", "on", "high", "medium", "low"}
+        think_enabled = str(agent_instance.local_think).lower() in {"true", "1", "yes", "on", "high", "medium", "low"}
         current = "deep" if think_enabled else ("fast" if agent_instance.fast_mode else "balanced")
         await _reply_text(update, f"Текущий режим: {current}. Доступно: fast, balanced, deep.")
         return
@@ -476,8 +483,8 @@ async def _process_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     """Runs the agent loop for a text command from Telegram and mirrors it to the dashboard."""
     chat_id = update.effective_chat.id
 
-    # Broadcast user's message to dashboard UI immediately
-    await manager.broadcast({
+    # Mirror the user's message to the dashboards watching this chat.
+    await manager.send_chat_event(chat_id, {
         "type": "chat_message",
         "role": "user",
         "content": user_text,
@@ -607,9 +614,9 @@ async def _process_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     except OSError:
                         pass
 
-    # Broadcast agent response to dashboard UI
+    # Mirror the agent response to the dashboards watching this chat.
     cost_usd = agent_instance.last_costs.get(str(chat_id), 0.0)
-    await manager.broadcast({
+    await manager.send_chat_event(chat_id, {
         "type": "chat_message",
         "role": "assistant",
         "content": response_text,
@@ -621,7 +628,7 @@ async def _process_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     
     # Broadcast user message ID update
     if user_msg_id:
-        await manager.broadcast({
+        await manager.send_chat_event(chat_id, {
             "type": "user_message_id_update",
             "chat_id": chat_id,
             "content": user_text,
@@ -694,7 +701,7 @@ async def _run_user_request(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         await _process_user_text(update, context, user_text, images=images)
     except asyncio.CancelledError:
         logger.info("Telegram generation cancelled for chat_id=%s", chat_id)
-        await manager.broadcast({
+        await manager.send_chat_event(chat_id, {
             "type": "chat_message",
             "role": "system",
             "content": "Генерация отменена из Telegram.",

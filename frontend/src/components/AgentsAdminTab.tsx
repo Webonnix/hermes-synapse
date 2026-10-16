@@ -1,8 +1,10 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
-import { Activity, CheckCircle2, ChevronRight, CreditCard, Edit3, ExternalLink, FolderKanban, KeyRound, Layers, Plus, RefreshCw, Send, Server, Shuffle, Trash2, Users, X, Zap } from 'lucide-react';
+import { Activity, CheckCircle2, ChevronRight, CreditCard, Edit3, ExternalLink, FolderKanban, KeyRound, Layers, Mic, Plus, RefreshCw, Send, Server, Shuffle, Trash2, Users, X, Zap } from 'lucide-react';
 import { BotAccessTab } from './BotAccessTab';
 import { BillingTab } from './BillingTab';
+import { VoiceProvidersPanel } from './smm/dialogs/VoiceProvidersPanel';
+import { RouteTargetsPanel } from './smm/dialogs/RouteTargetsPanel';
 import type {
   AgentBudgetStatus, AgentModel, AgentTelegramBinding, AgentTier, Project, ProviderBinding, RouterStats,
   RouterSessionStatus, RouterCombosResponse, RouterConnection, RouterConnectionsResponse, RouterModel, RouterTier, RouterOverview,
@@ -27,13 +29,13 @@ const emptyRouterTierForm = {
   provider_binding_id: '', model_override: '', quota_limit: '', quota_window_hours: 24, is_active: true,
 };
 
-type AdminSection = 'agents' | 'router' | 'tiers' | 'projects' | 'access' | 'billing';
+type AdminSection = 'agents' | 'router' | 'voice' | 'tiers' | 'projects' | 'access' | 'billing';
 /** 'chain' = no pinned provider, escalate through the global router_tiers ladder;
  *  'pinned' = always this one provider binding + model. */
 type RoutingMode = 'chain' | 'pinned';
 
 function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem('jarvis_auth_token');
+  const token = localStorage.getItem('vexa_auth_token');
   return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
 }
 
@@ -105,12 +107,17 @@ const emptyAgent: AgentModel = {
   id: '',
   name: '',
   system_prompt: '',
-  model: 'qwen3:8b',
+  // Deliberately empty rather than a model name. It used to read 'qwen3:8b',
+  // which this deployment stopped serving long ago — so every new agent was
+  // born pointing at a model the local server does not serve, and only failed at its
+  // first actual call. An empty default is filled in from the live model list
+  // below, and a list that has not loaded leaves a visible "— выберите модель —".
+  model: '',
   agent_type: 'agent',
   role: 'Specialist',
   status: 'idle',
   is_enabled: true,
-  model_provider: 'ollama',
+  model_provider: 'local',
   model_type: 'local',
   skills: '',
   temperature: 0.7,
@@ -447,7 +454,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
 
     const cleanId = draft.id.replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase();
     try {
-      const token = localStorage.getItem('jarvis_auth_token');
+      const token = localStorage.getItem('vexa_auth_token');
       const response = await fetch('/api/agents', {
         method: 'POST',
         headers: {
@@ -485,7 +492,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
 
   const toggleAgent = async (agent: AgentModel) => {
     const nextEnabled = !agent.is_enabled;
-    const token = localStorage.getItem('jarvis_auth_token');
+    const token = localStorage.getItem('vexa_auth_token');
     await fetch('/api/agents', {
       method: 'POST',
       headers: {
@@ -716,23 +723,32 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
   // enforces the same ceiling again server-side, at save time and call time).
   // Same reasoning as the tier form above, applied to the agent itself: once an
   // agent is pointed at the 9Router binding, its model must come from that
-  // catalog ('kimi/kimi-k3', 'ds/deepseek-chat'), not from the local Ollama
-  // list — a leftover Ollama model id there makes every external call fail with
+  // catalog ('kimi/kimi-k3', 'ds/deepseek-chat'), not from the local model
+  // list — a leftover local model id there makes every external call fail with
   // model_not_found.
   const draftProviderBinding = providers.find(p => p.id === draft.model_provider);
   const draftUsesRouter = !!draftProviderBinding?.api_base.includes('9router');
 
-  // The two routing modes the backend has always had, finally named. 'ollama'
-  // in model_provider is not "use Ollama", it means "no pinned provider" — the
+  // A blank new-agent draft takes the first model the box actually serves.
+  // Only ever fills a gap: an agent being edited, or a model already chosen,
+  // is never overwritten — and a draft on a router provider is left to the
+  // catalog select, whose ids look nothing like the local alias.
+  useEffect(() => {
+    if (draft.model || draftUsesRouter || models.length === 0) return;
+    setDraft(current => (current.model ? current : { ...current, model: models[0].id }));
+  }, [draft.model, draftUsesRouter, models]);
+
+  // The two routing modes the backend has always had, finally named. 'local'
+  // in model_provider means "no pinned provider" — the
   // request starts local and escalates through the global router_tiers chain
   // (agent_provider_access.allowed_binding_ids_for_chain). Anything else pins
   // the agent to that one binding and skips the chain entirely.
-  const routingMode: RoutingMode = (draft.model_provider || 'ollama') === 'ollama' ? 'chain' : 'pinned';
+  const routingMode: RoutingMode = (draft.model_provider || 'local') === 'local' ? 'chain' : 'pinned';
   const routerBinding = providers.find(p => p.status === 'active' && p.api_base.includes('9router'));
   const applyRoutingMode = (mode: RoutingMode) => {
     if (mode === routingMode) return;
     if (mode === 'chain') {
-      setDraft({ ...draft, model_provider: 'ollama', model_type: 'local' });
+      setDraft({ ...draft, model_provider: 'local', model_type: 'local' });
       return;
     }
     const target = routerBinding || providers.find(p => p.status === 'active');
@@ -774,7 +790,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
   const externalProvidersLocked = !!draftTier && !draftTier.allow_external_provider;
   const activeProviders = providers.filter(p => p.status === 'active');
   const providerLabel = (providerId: string) => {
-    if (providerId === 'ollama') return 'Ollama (локально)';
+    if (providerId === 'local') return 'llama.cpp (локально)';
     return providers.find(p => p.id === providerId)?.name || providerId;
   };
   const toggleAllowedProvider = (providerId: string) => {
@@ -787,12 +803,29 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
     });
   };
 
-  const field = (label: string, child: ReactNode) => (
+  const field = (label: string, child: ReactNode, required = false) => (
     <label style={{ display: 'flex', flexDirection: 'column', gap: 6, color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 600 }}>
-      {label}
+      <span>
+        {label}
+        {required && <span style={{ color: 'var(--danger)', marginLeft: 4 }} title="Обязательное поле">*</span>}
+      </span>
       {child}
     </label>
   );
+
+  /** Required fields that are still empty, by their visible label.
+   *
+   *  The save button used to carry these as a `disabled` condition and nothing
+   *  else: with an empty system prompt — which is three screens further down
+   *  than the ID and Name it sits next to — the button simply did nothing when
+   *  clicked, said nothing about why, and marked nothing. A disabled submit
+   *  button also suppresses the browser's own `required` validation, so even
+   *  the native "fill this in" bubble never appeared. */
+  const missingRequired = [
+    !draft.id.trim() && 'ID',
+    !draft.name.trim() && 'Name',
+    !draft.system_prompt.trim() && t('instructions'),
+  ].filter(Boolean) as string[];
 
   return (
     <div style={styles.tabWrapper}>
@@ -820,6 +853,10 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
           <span>{t('adminNavRouter')}</span>
           <em className="admin-subnav-count">{providers.length}</em>
         </button>
+        <button type="button" className={section === 'voice' ? 'is-active' : ''} onClick={() => setSection('voice')}>
+          <Mic size={15} />
+          <span>{t('adminNavVoice')}</span>
+        </button>
         <button type="button" className={section === 'tiers' ? 'is-active' : ''} onClick={() => setSection('tiers')}>
           <Layers size={15} />
           <span>{t('adminNavTiers')}</span>
@@ -844,6 +881,10 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
 
       {section === 'billing' && <BillingTab />}
 
+      {section === 'voice' && <VoiceProvidersPanel />}
+
+      {section === 'router' && <RouteTargetsPanel onOpenVoice={() => setSection('voice')} />}
+
       {section === 'agents' && (
         <div className="admin-agents-grid">
           <div className="glass-panel" style={{ padding: 16, overflowY: 'auto' }}>
@@ -854,7 +895,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
                     <div style={{ minWidth: 0 }}>
                       <div style={{ color: '#fff', fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{agent.name}</div>
-                      <div style={{ color: 'var(--text-dim)', fontSize: '0.75rem', marginTop: 3 }}>{agent.role || 'Specialist'} · {agent.model_type || 'local'} · {agent.model_provider || 'ollama'}</div>
+                      <div style={{ color: 'var(--text-dim)', fontSize: '0.75rem', marginTop: 3 }}>{agent.role || 'Specialist'} · {agent.model_type || 'local'} · {agent.model_provider || 'local'}</div>
                       <div style={{ marginTop: 8 }}>
                         <span className={`admin-status-chip ${agent.is_enabled ? 'is-active' : 'is-revoked'}`}>
                           <i className="dot" />{agent.is_enabled ? t('enabled') : t('disabled')} · {agent.status || 'idle'}
@@ -886,8 +927,8 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-              {field('ID', <input className="form-input" required value={draft.id} onChange={e => setDraft({ ...draft, id: e.target.value.replace(/[^a-zA-Z0-9_-]/g, '') })} />)}
-              {field('Name', <input className="form-input" required value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} />)}
+              {field('ID', <input className="form-input" required value={draft.id} onChange={e => setDraft({ ...draft, id: e.target.value.replace(/[^a-zA-Z0-9_-]/g, '') })} />, true)}
+              {field('Name', <input className="form-input" required value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} />, true)}
               {field(t('role'), <input className="form-input" value={draft.role || ''} onChange={e => setDraft({ ...draft, role: e.target.value })} />)}
               {field(t('status'), <input className="form-input" value={draft.status || 'idle'} onChange={e => setDraft({ ...draft, status: e.target.value })} />)}
               {field(t('modelType'), (
@@ -899,11 +940,11 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
               {field(t('provider'), (
                 <select
                   className="form-input"
-                  value={draft.model_provider || 'ollama'}
+                  value={draft.model_provider || 'local'}
                   disabled={externalProvidersLocked}
                   onChange={e => setDraft({ ...draft, model_provider: e.target.value })}
                 >
-                  <option value="ollama">Ollama ({t('local')})</option>
+                  <option value="local">llama.cpp ({t('local')})</option>
                   {activeProviders.map(p => (
                     <option key={p.id} value={p.id}>{p.name} ({p.provider_type})</option>
                   ))}
@@ -926,7 +967,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
                       // The tier is a ceiling: forbidding external providers
                       // clears whatever was picked before, same as the server
                       // does on save (see save_subagent_api).
-                      ...(tierLocksExternal ? { model_provider: 'ollama', allowed_provider_ids: [] } : {}),
+                      ...(tierLocksExternal ? { model_provider: 'local', allowed_provider_ids: [] } : {}),
                     });
                   }}
                 >
@@ -966,8 +1007,8 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
                   return (
                     <label key={mode} style={{
                       display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 12px', borderRadius: 8,
-                      border: `1px solid ${routingMode === mode ? 'rgba(77,222,180,.4)' : 'rgba(255,255,255,.09)'}`,
-                      background: routingMode === mode ? 'rgba(46,179,139,.08)' : 'rgba(255,255,255,.02)',
+                      border: `1px solid ${routingMode === mode ? 'rgba(53,212,154,.4)' : 'rgba(255,255,255,.09)'}`,
+                      background: routingMode === mode ? 'rgba(53,212,154,.08)' : 'rgba(255,255,255,.02)',
                       cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.5 : 1,
                     }}>
                       <input
@@ -978,7 +1019,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
                         <strong style={{ display: 'block', fontSize: '0.85rem' }}>
                           {mode === 'chain' ? 'Иерархия по умолчанию (AI Router)' : 'Своя модель из каталога 9Router'}
                         </strong>
-                        <span style={{ display: 'block', fontSize: '0.76rem', color: 'var(--text-dim, #8a94a6)', marginTop: 2 }}>
+                        <span style={{ display: 'block', fontSize: '0.76rem', color: 'var(--text-dim, #8c94a3)', marginTop: 2 }}>
                           {mode === 'chain'
                             ? 'Начинает с локальной модели и поднимается по общей цепочке тиров, когда задача её перерастает. Отметки ниже сужают, до каких провайдеров разрешено подниматься именно этому агенту.'
                             : 'Все запросы агента идут в одну выбранную модель, минуя иерархию. Нужен, когда важна конкретная модель, а не «подешевле, если хватит».'}
@@ -989,7 +1030,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
                           </span>
                         )}
                         {mode === 'pinned' && disabled && (
-                          <span style={{ display: 'block', fontSize: '0.74rem', color: '#ffb454', marginTop: 6 }}>
+                          <span style={{ display: 'block', fontSize: '0.74rem', color: '#f6b84a', marginTop: 6 }}>
                             {externalProvidersLocked
                               ? 'Тир агента запрещает внешние провайдеры.'
                               : 'Нет активных провайдеров — добавьте их во вкладке «AI Router».'}
@@ -1050,14 +1091,28 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
                     )}
                   </>
                 ) : (
-                  [{ id: draft.model, name: draft.model }, ...models].filter((m, idx, arr) => m.id && arr.findIndex(x => x.id === m.id) === idx).map(model => (
-                    <option key={model.id} value={model.id}>{model.name || model.id}</option>
-                  ))
+                  <>
+                    {!draft.model && <option value="">— выберите модель —</option>}
+                    {models.map(model => (
+                      <option key={model.id} value={model.id}>{model.name || model.id}</option>
+                    ))}
+                    {/* Same treatment as the router branch above: a model the local
+                        server does not serve stays visible and is labelled, instead of
+                        sitting in the list looking like a working choice. */}
+                    {draft.model && models.length > 0 && !models.some(m => m.id === draft.model) && (
+                      <optgroup label="настроено сейчас (нет на локальном сервере)">
+                        <option value={draft.model}>{draft.model}</option>
+                      </optgroup>
+                    )}
+                    {draft.model && models.length === 0 && (
+                      <option value={draft.model}>{draft.model}</option>
+                    )}
+                  </>
                 )}
               </select>
             ))}
             {draftUsesRouter && routerModelsLoaded && !routerModels.some(m => m.id === draft.model) && (
-              <span style={{ color: '#ffb454', fontSize: '0.75rem', marginTop: -4 }}>
+              <span style={{ color: '#f6b84a', fontSize: '0.75rem', marginTop: -4 }}>
                 Провайдер не отдаёт такую модель — запросы к нему будут падать с model_not_found. Выберите из списка.
               </span>
             )}
@@ -1128,7 +1183,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
                 </summary>
                 <textarea className="form-input admin-mono-textarea" rows={5} value={paramsText}
                   onChange={e => setParamsText(e.target.value)} style={{ marginTop: 8 }} />
-                <span style={{ fontSize: '0.74rem', color: 'var(--text-dim, #8a94a6)' }}>
+                <span style={{ fontSize: '0.74rem', color: 'var(--text-dim, #8c94a3)' }}>
                   Уходят в тело запроса: top_p, top_k, presence_penalty, frequency_penalty, seed, stop,
                   reasoning_effort, thinking, reasoning. Остальные ключи игнорируются.
                 </span>
@@ -1136,7 +1191,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
             </div>
 
             {field(t('skills'), <input className="form-input" value={draft.skills || ''} onChange={e => setDraft({ ...draft, skills: e.target.value })} placeholder="web_search,python_sandbox" />)}
-            {field(t('instructions'), <textarea className="form-input" rows={8} required value={draft.system_prompt} onChange={e => setDraft({ ...draft, system_prompt: e.target.value })} />)}
+            {field(t('instructions'), <textarea className="form-input" rows={8} required value={draft.system_prompt} onChange={e => setDraft({ ...draft, system_prompt: e.target.value })} />, true)}
 
             <label style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text-muted)', fontSize: '0.9rem' }}>
               <input type="checkbox" checked={!!draft.is_enabled} onChange={e => setDraft({ ...draft, is_enabled: e.target.checked })} />
@@ -1248,7 +1303,17 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
 
             {error && <div style={{ color: 'var(--danger)', fontSize: '0.85rem' }}>{error}</div>}
 
-            <button className="btn-primary" type="submit" disabled={saving || !draft.id || !draft.name || !draft.system_prompt} style={{ alignSelf: 'flex-start' }}>
+            {missingRequired.length > 0 && (
+              <div style={{ color: 'var(--warning, #f6b84a)', fontSize: '0.82rem' }}>
+                Не заполнено: {missingRequired.join(', ')}
+              </div>
+            )}
+
+            {/* Disabled only while the request is in flight. Leaving it clickable
+                with fields missing is deliberate: the browser then runs the
+                `required` validation, scrolls the first empty field into view and
+                focuses it — which is the part that was missing. */}
+            <button className="btn-primary" type="submit" disabled={saving} style={{ alignSelf: 'flex-start' }}>
               <CheckCircle2 size={16} />
               <span>{saving ? 'Saving...' : t('saveAgent')}</span>
             </button>

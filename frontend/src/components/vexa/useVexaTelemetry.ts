@@ -42,7 +42,7 @@ export function resourceBand(value: number | null): ResourceBand {
 }
 
 function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem('jarvis_auth_token');
+  const token = localStorage.getItem('vexa_auth_token');
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 

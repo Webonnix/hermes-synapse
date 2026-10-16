@@ -915,6 +915,8 @@ def delete_todoist_task(task_id: str) -> str:
 # TOOLS SCHEMA (OpenAI function-calling format)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+from backend.phone_context import TOOLS_SCHEMA as PHONE_TOOLS_SCHEMA  # noqa: E402 — call-scoped tools
+
 TOOLS_SCHEMA = [
     {
         "type": "function",
@@ -1028,6 +1030,48 @@ TOOLS_SCHEMA = [
                     "interval_hours": {"type": "number", "description": "Интервал повтора в часах, например: 24 для ежедневного"}
                 },
                 "required": ["label", "interval_hours"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "take_message",
+            "description": (
+                "Записывает сообщение для владельца, когда собеседник в канале (мессенджер, почта) просит "
+                "связаться с ним, перезвонить или передать что-то лично. Сначала узнай у собеседника имя и суть "
+                "вопроса; не выдумывай их. После успешной записи скажи собеседнику, что сообщение передано."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Как зовут собеседника — только то, что он сам сказал"},
+                    "reason": {"type": "string", "description": "Суть вопроса своими словами собеседника"},
+                    "callback": {"type": "string", "description": "Контакт для обратной связи (телефон, email, ник), если назван"},
+                    "urgency": {"type": "string", "enum": ["low", "normal", "high"], "description": "Срочность; по умолчанию normal"}
+                },
+                "required": ["name", "reason"]
+            }
+        }
+    },
+    # Call-scoped phone tools; backend/phone_context.py owns their schema and code.
+    *PHONE_TOOLS_SCHEMA,
+    {
+        "type": "function",
+        "function": {
+            "name": "phone_call",
+            "description": (
+                "Звонит человеку по телефону: ИИ-агент телефонной линии сам поговорит голосом и запишет разговор "
+                "во «Входящие». Используй только по прямой просьбе владельца позвонить кому-то."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string", "description": "Номер в международном формате, например +972501234567"},
+                    "purpose": {"type": "string", "description": "Зачем звоним — агент скажет это собеседнику"},
+                    "line": {"type": "string", "description": "Название или id телефонной линии (необязательно)"}
+                },
+                "required": ["to", "purpose"]
             }
         }
     },
@@ -1246,7 +1290,7 @@ TOOLS_SCHEMA = [
                     "model": {"type": "string", "description": "Модель ИИ для работы сабагента. По умолчанию используется локальная модель (LLM_MODEL)."},
                     "role": {"type": "string", "description": "Роль агента в ИИ-офисе, например Researcher, Engineer, Analyst, Planner."},
                     "model_type": {"type": "string", "description": "Тип модели: local (по умолчанию) или external. Не указывай external, если не уверен, что нужен именно внешний провайдер."},
-                    "model_provider": {"type": "string", "description": "Провайдер модели. По умолчанию 'ollama' (локально). Указывай другое значение только если явно нужен внешний провайдер — и тогда используй id реальной активной привязки из /api/providers, а не название вроде 'openrouter'."}
+                    "model_provider": {"type": "string", "description": "Провайдер модели. По умолчанию 'local' (локальная модель llama.cpp). Указывай другое значение только если явно нужен внешний провайдер — и тогда используй id реальной активной привязки из /api/providers, а не название вроде 'openrouter'."}
                 },
                 "required": ["subagent_id", "name", "system_prompt"]
             }
@@ -1634,6 +1678,50 @@ TOOLS_SCHEMA = [
             "description": "Полная синхронизация хранилища Obsidian в базу знаний (векторную БД). Используйте если Альберт добавил новые заметки и хочет обновить базу знаний.",
             "parameters": {"type": "object", "properties": {}}
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_dev_run",
+            "description": (
+                "Запускает автономный прогон разработки: создаёт карточку на Kanban-доске и сразу отдаёт её "
+                "агенту-исполнителю, который сам планирует, пишет код, гоняет тесты, публикует демо-ссылку и "
+                "проверяет её в реальном браузере. Используйте, когда Альберт просит СДЕЛАТЬ продукт — сайт, "
+                "лендинг, приложение, скрипт, — а не ответить на вопрос. Прогон идёт часами и работает без "
+                "присмотра, поэтому goal должен быть полноценным ТЗ: что делаем, для кого, в каком стиле, что "
+                "считать готовым. Одна строка вроде «сделай сайт» даст соответствующий результат."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string", "description": "Полное техническое задание: требования, аудитория, стиль, критерии приёмки. Не заголовок — бриф."},
+                    "title": {"type": "string", "description": "Короткая подпись карточки на доске, до 120 символов. Например 'Сайт салона BYD'."},
+                    "discipline": {"type": "string", "description": "Профиль работы для подбора исполнителя: web, backend, data, mobile, design. Пусто — подберётся автоматически."},
+                    "assignee_agent_id": {"type": "string", "description": "id конкретного агента-исполнителя. Пусто — назначится наименее загруженный подходящий."},
+                    "wall_minutes": {"type": "integer", "description": "Жёсткий предел по времени в минутах. Пусто — без предела."}
+                },
+                "required": ["goal", "title"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_dev_runs",
+            "description": (
+                "Показывает автономные прогоны разработки и их состояние: статус, исполнитель, сколько итераций "
+                "потрачено, ссылка на демо, причина остановки. Используйте, чтобы ответить «как там сайт», "
+                "«что с задачей», «покажи доску» — и после start_dev_run, если Альберт спрашивает о ходе работ."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string", "description": "Фильтр по статусу: backlog, planned, running, done, failed. Пусто — все."},
+                    "limit": {"type": "integer", "description": "Сколько прогонов вернуть, по умолчанию 10."}
+                },
+                "required": []
+            }
+        }
     }
 ]
 
@@ -1965,6 +2053,72 @@ def get_rss_digest(feed_source: str = "Habr", limit: int = 5) -> str:
         return json.dumps({"error": str(e)})
 
 
+
+# ── Autonomous development ──────────────────────────────────────────────────
+# These let the main agent drive the Kanban board it could previously only be
+# told about. Without start_dev_run, "сделай сайт" in chat had nowhere to go:
+# the owner had to open the board and create the card by hand, so the agent
+# could only refuse or try to write the whole product into a chat message.
+
+def start_dev_run(
+    goal: str,
+    title: str,
+    discipline: str = "",
+    assignee_agent_id: str = "",
+    wall_minutes: Optional[int] = None,
+) -> str:
+    goal = (goal or "").strip()
+    if not goal:
+        return json.dumps(
+            {"error": "goal is required — describe the work as a full brief, not a title."},
+            ensure_ascii=False,
+        )
+    from backend import dev_runs
+    try:
+        minutes = int(wall_minutes) if wall_minutes else None
+    except (TypeError, ValueError):
+        minutes = None
+    try:
+        run = dev_runs.create_run(
+            goal,
+            title=(title or "").strip()[:dev_runs.TITLE_MAX_CHARS],
+            discipline=(discipline or "").strip() or None,
+            assignee_agent_id=(assignee_agent_id or "").strip() or None,
+            wall_minutes=minutes,
+            start=True,
+        )
+    except (ValueError, KeyError) as exc:
+        return json.dumps({"error": f"Could not start the run: {exc}"}, ensure_ascii=False)
+    return json.dumps({
+        "run_id": run["id"],
+        "status": run["status"],
+        "title": run.get("title") or "",
+        "assignee_agent_id": run.get("assignee_agent_id"),
+        "note": ("Прогон идёт в фоне и занимает от минут до часов. "
+                 "Состояние — list_dev_runs; ход работ, правки и демо-ссылка — на Kanban-доске."),
+    }, ensure_ascii=False)
+
+
+def list_dev_runs(status: str = "", limit: int = 10) -> str:
+    from backend import dev_runs
+    try:
+        limit = max(1, min(int(limit or 10), 50))
+    except (TypeError, ValueError):
+        limit = 10
+    # Over-fetch before filtering: the status the caller asked about may not be
+    # in the newest `limit` cards at all.
+    runs = dev_runs.list_runs(limit=200)
+    wanted = (status or "").strip().lower()
+    if wanted:
+        runs = [r for r in runs if str(r.get("status", "")).lower() == wanted]
+    fields = ("id", "title", "status", "status_reason", "assignee_agent_id",
+              "iter_used", "demo_url", "updated_at")
+    return json.dumps(
+        {"runs": [{k: r.get(k) for k in fields} for r in runs[:limit]], "matched": len(runs)},
+        ensure_ascii=False,
+    )
+
+
 def create_subagent(
     subagent_id: str,
     name: str,
@@ -1972,7 +2126,7 @@ def create_subagent(
     model: Optional[str] = None,
     role: str = "Specialist",
     model_type: str = "local",
-    model_provider: str = "ollama",
+    model_provider: str = "local",
 ) -> str:
     """Creates a new subagent with a dedicated system prompt and model, or updates an existing one."""
     from backend.database import save_subagent
@@ -2336,7 +2490,7 @@ DEV_PUBLISH_MAX_FILES = 5000
 # live element instead of writing a fresh brief from memory. Self-contained
 # vanilla JS (no build step touches the published output) and inert for
 # anyone else: it reads the SAME localStorage key the dashboard SPA stores its
-# session token under (frontend/src/utils.tsx's 'jarvis_auth_token') — same
+# session token under (frontend/src/utils.tsx's 'vexa_auth_token') — same
 # origin, since nginx serves both the dashboard and /demo/ — and renders
 # nothing at all when that key is absent, so a shared demo link shows a random
 # visitor a plain page, not internal review chrome. The POST itself is still
@@ -2346,7 +2500,7 @@ DEV_PUBLISH_MAX_FILES = 5000
 _REVIEW_OVERLAY_JS = r"""
 <script>(function(){
   try {
-    var token = window.localStorage.getItem('jarvis_auth_token');
+    var token = window.localStorage.getItem('vexa_auth_token') || window.localStorage.getItem('jarvis_auth_token');
     if (!token) return;
     var RUN_ID = "__HERMES_RUN_ID__";
     var active = false, box = null, popup = null;
@@ -2554,9 +2708,32 @@ def dev_publish_demo(build_dir: str) -> str:
     if not run_id:
         return json.dumps({"error": "dev_publish_demo can only be called from within a dev-run."},
                           ensure_ascii=False)
-    from backend import dev_sandbox
+    from backend import dev_runs, dev_sandbox
 
-    source_root = dev_sandbox.repo_run_path(run_id).resolve()
+    # A whole run reads run["sandbox_container"] to work at all — if the
+    # dedicated per-run sandbox is what actually ran the goal, sandbox_container
+    # was set the moment it came up and is not cleared until the run stops
+    # being active (see dev_runs._run_with_sandbox), so it is a safe live
+    # signal here. When per-run provisioning fails (Docker-out-of-docker
+    # unavailable, sandbox never came up healthy), the whole run silently runs
+    # against the one static, serialized dev-runner instead — its writes never
+    # land under repo_run_path(run_id) at all, so publishing that path always
+    # found nothing and failed every single attempt with no way to recover,
+    # looping until the duplicate-action breaker killed the run (run
+    # run-f12f19c261ac, 2026-09-03: 5 identical failed publishes in a row).
+    try:
+        run = dev_runs.get_run(run_id)
+    except Exception as exc:
+        logger.warning("Could not read dev-run %s while resolving its checkout: %s", run_id, exc)
+        run = None
+    # A row we could read and that explicitly has no sandbox_container is the
+    # one case that means the shared checkout — anything else (read failed,
+    # row missing) defaults to the per-run path, same as before this existed,
+    # since CURRENT_DEV_RUN_ID being set at all means a dedicated sandbox the
+    # overwhelming majority of the time.
+    used_shared_checkout = bool(run) and not run.get("sandbox_container")
+    source_root = (dev_sandbox.BASE_REPO_PATH if used_shared_checkout
+                   else dev_sandbox.repo_run_path(run_id)).resolve()
     candidate = (source_root / (build_dir or ".")).resolve()
     try:
         candidate.relative_to(source_root)
@@ -2600,16 +2777,17 @@ def dev_publish_demo(build_dir: str) -> str:
     except Exception as exc:  # noqa: BLE001 — a broken overlay must not cost a successful publish
         logger.warning("Review overlay injection failed for %s: %s", run_id, exc)
 
-    from backend import dev_runs
-
     snapshot_url = f"/demo/{run_id}/"
     # A run whose row cannot be read (or that predates lineage) is its own
     # chain root — publishing must still succeed, never fail on bookkeeping.
+    # `run` was already fetched above to resolve the checkout path; re-check
+    # it here in case the row was deleted in the (very short) window between
+    # that read and the copy just finished.
     try:
-        run = dev_runs.get_run(run_id) or {}
+        run = dev_runs.get_run(run_id) or run or {}
     except Exception as exc:
-        logger.warning("Could not read dev-run %s while publishing: %s", run_id, exc)
-        run = {}
+        logger.warning("Could not re-read dev-run %s while publishing: %s", run_id, exc)
+        run = run or {}
     root_run_id = run.get("root_run_id") or run_id
     demo_url = snapshot_url
     try:
@@ -2796,9 +2974,9 @@ def _design_critique(run_id: str, screenshots_b64: Dict[str, str]) -> Dict[str, 
     technically-clean LŪMEN//ÍNDEX build through review with a "pass" verdict
     while the owner rejected it on sight (2026-08-18).
 
-    Reuses whichever model agent.py is already configured with — Ollama's
-    Qwen3.6/Qwen3.8 checkpoints here carry a CLIP vision projector already, so
-    this needs no separate model, no extra VRAM, no new pull. `think` is
+    Reuses whichever model agent.py is already configured with — the local
+    llama.cpp server runs Qwen3.8 with its vision projector (mmproj) loaded, so
+    this needs no separate model and no extra VRAM. `think` is
     forced off: the same "thinking-only, no visible answer" failure mode
     documented in dev_runs.py's EXECUTOR_SYSTEM_PROMPT context showed up as a
     20,000+ token runaway reasoning chain during testing — a one-paragraph
@@ -2849,8 +3027,7 @@ def _design_critique(run_id: str, screenshots_b64: Dict[str, str]) -> Dict[str, 
             max_tokens=800,
             provider_options={
                 "provider": agent_instance.provider,
-                "num_ctx": agent_instance.ollama_num_ctx,
-                "keep_alive": agent_instance.ollama_keep_alive,
+                "num_ctx": agent_instance.local_num_ctx,
                 "think": False,
             },
         ))
@@ -3056,6 +3233,20 @@ def execute_tool(name: str, arguments: Dict[str, Any], chat_id: str = "default")
     if name == "list_tools":
         return list_tools(str(arguments.get("query", "")))
 
+    if name == "take_message":
+        # chat_id here is the turn's session id; the inbox resolves it to the
+        # conversation, and refuses when the turn is not a channel conversation.
+        from backend.inbox import take_message
+        return take_message(chat_id, arguments)
+
+    if name in ("phone_end_call", "phone_transfer_to_owner", "calendar_free_slots", "propose_meeting"):
+        from backend.phone_context import execute as execute_phone_tool
+        return execute_phone_tool(name, arguments)
+
+    if name == "phone_call":
+        from backend.phone_service import start_outbound_from_tool
+        return start_outbound_from_tool(arguments)
+
     if name == "get_system_stats":
         return get_system_stats()
 
@@ -3208,6 +3399,21 @@ def execute_tool(name: str, arguments: Dict[str, Any], chat_id: str = "default")
             limit=arguments.get("limit", 5)
         )
 
+    elif name == "start_dev_run":
+        return start_dev_run(
+            goal=arguments.get("goal", ""),
+            title=arguments.get("title", ""),
+            discipline=arguments.get("discipline", ""),
+            assignee_agent_id=arguments.get("assignee_agent_id", ""),
+            wall_minutes=arguments.get("wall_minutes"),
+        )
+
+    elif name == "list_dev_runs":
+        return list_dev_runs(
+            status=arguments.get("status", ""),
+            limit=arguments.get("limit", 10),
+        )
+
     elif name == "create_subagent":
         return create_subagent(
             subagent_id=arguments.get("subagent_id", ""),
@@ -3216,7 +3422,7 @@ def execute_tool(name: str, arguments: Dict[str, Any], chat_id: str = "default")
             model=arguments.get("model"),
             role=arguments.get("role", "Specialist"),
             model_type=arguments.get("model_type", "local"),
-            model_provider=arguments.get("model_provider", "ollama"),
+            model_provider=arguments.get("model_provider", "local"),
         )
 
     elif name == "call_subagent":

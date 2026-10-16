@@ -125,10 +125,10 @@ export function VexaCoreStage({
 
       <div className="vx-hud-layer" aria-hidden="true">
         <svg className="vx-hud-connectors">
-          <line x1="18%" y1="16%" x2="40%" y2="34%" stroke="rgba(45,145,212,.3)" strokeWidth="1" />
-          <line x1="82%" y1="16%" x2="60%" y2="34%" stroke="rgba(45,145,212,.3)" strokeWidth="1" />
-          <line x1="14%" y1="72%" x2="40%" y2="58%" stroke="rgba(45,145,212,.24)" strokeWidth="1" />
-          <line x1="86%" y1="72%" x2="60%" y2="58%" stroke="rgba(139,91,255,.26)" strokeWidth="1" />
+          <line x1="18%" y1="16%" x2="40%" y2="34%" stroke="rgba(59,130,246,.3)" strokeWidth="1" />
+          <line x1="82%" y1="16%" x2="60%" y2="34%" stroke="rgba(59,130,246,.3)" strokeWidth="1" />
+          <line x1="14%" y1="72%" x2="40%" y2="58%" stroke="rgba(59,130,246,.24)" strokeWidth="1" />
+          <line x1="86%" y1="72%" x2="60%" y2="58%" stroke="rgba(124,92,252,.26)" strokeWidth="1" />
         </svg>
         <div className="vx-hud-label at-tl">
           <b>{copy.hudAnalyzing}</b>

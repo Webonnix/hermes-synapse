@@ -4,7 +4,7 @@ import { ProcessesTab } from './ProcessesTab';
 
 const pendingTask = {
   id: 'T-test123', origin: 'agent', requester: 'dashboard', goal: 'Execute add_calendar_event',
-  tool_name: 'add_calendar_event', tool_arguments: { title: 'Review' }, assignee: 'jarvis',
+  tool_name: 'add_calendar_event', tool_arguments: { title: 'Review' }, assignee: 'vexa',
   risk_class: 'R3' as const, autonomy_level: 'L3' as const, data_class: 'Internal',
   status: 'awaiting_approval' as const, approvals_required: 1, approval_count: 0, approval_required: true,
   budget_commands: 1, budget_tokens: 0, budget_wallclock_s: 60, commands_used: 0, tokens_used: 0,

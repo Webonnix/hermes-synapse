@@ -88,13 +88,14 @@ async def run_orchestration(query: str, api_key: str, model: str, chat_id: str =
     
     # Resolve orchestrator ID
     from backend.database import get_all_subagents, get_subagent, get_session_agent_id
+    from backend.tool_permissions import MAIN_AGENT_ID, LEGACY_MAIN_AGENT_ID, MAIN_AGENT_IDS
     target_orch_id = get_session_agent_id(chat_id) or chat_id
     orch_meta = get_subagent(target_orch_id)
     if orch_meta:
         orch_id = target_orch_id
     else:
-        orch_id = "jarvis"
-        orch_meta = get_subagent("jarvis")
+        orch_id = MAIN_AGENT_ID
+        orch_meta = get_subagent(MAIN_AGENT_ID) or get_subagent(LEGACY_MAIN_AGENT_ID)
     
     # Compute active_skills (intersection of parent_skills and this orchestrator's connected skills)
     active_skills = ""
@@ -111,8 +112,8 @@ async def run_orchestration(query: str, api_key: str, model: str, chat_id: str =
     all_subagents = get_all_subagents()
     children = [a for a in all_subagents if a.get("parent_id") == orch_id]
     
-    # Fallback to defaults if no children connected to jarvis
-    if not children and orch_id == "jarvis":
+    # Fallback to defaults if no children connected to the main agent (Vexa)
+    if not children and orch_id in MAIN_AGENT_IDS:
         children = [
             {"id": "research", "name": "Search Agent", "system_prompt": "You are a research agent. Search for information on the internet.", "model": "google/gemini-2.5-flash", "agent_type": "agent", "skills": "web_search"},
             {"id": "code", "name": "Code Engineer", "system_prompt": "You are a Code Engineer. Write and execute Python scripts.", "model": "google/gemini-2.5-flash", "agent_type": "agent", "skills": "python_sandbox"},
@@ -388,7 +389,13 @@ Rules:
             else:
                 # Custom Sub-agent execution
                 try:
-                    res = await agent_instance._respond_as_subagent(contextual_instructions, child_agent, parent_skills=active_skills)
+                    # Outside the chat's per-turn model choice: a sub-agent has
+                    # its own model and its own provider binding, and inheriting
+                    # the picked endpoint while keeping its own model name is
+                    # what made every delegated step 404.
+                    from backend.agent import no_llm_override
+                    with no_llm_override():
+                        res = await agent_instance._respond_as_subagent(contextual_instructions, child_agent, parent_skills=active_skills)
                     state.results.append({"step": state.current_step_idx, "agent": agent_type, "output": res})
                     state.add_trace(child_agent["name"], "Execute", f"Sub-agent completed execution: {res[:120]}...")
                 except Exception as e:

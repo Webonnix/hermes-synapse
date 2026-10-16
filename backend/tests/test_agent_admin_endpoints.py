@@ -42,7 +42,7 @@ async def test_save_agent_tier_ceiling_clears_external_provider():
          patch("backend.database.save_subagent") as save:
         await main.save_subagent_api(_subagent_update(tier_id="tier-locked"))
     args = save.call_args.args
-    assert args[13] == "ollama"  # model_provider forced back to local
+    assert args[13] == "local"  # model_provider forced back to local
     assert args[19] == []  # allowed_provider_ids cleared
 
 

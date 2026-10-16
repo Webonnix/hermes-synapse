@@ -46,6 +46,15 @@ DEV_RUN_TOOLS = (
     "dev_read_file", "dev_write_file", "dev_patch", "dev_list_dir",
     "dev_exec", "dev_run_tests", "dev_publish_demo", "dev_review_demo",
     "git_status", "git_diff", "git_commit", "git_push",
+    # Research. Without these a brief that says "find the real models/prices/
+    # specs" is not merely done badly — it is unexecutable, and the executor
+    # cannot even fail loudly: there is no tool to call, so it silently writes
+    # the page from the model's own recollection. A 2026-09-05 run asked for a
+    # BYD showroom shipped nine cars with invented rouble prices and listed the
+    # Atto 3 twice (once under its Chinese name, Yuan Plus) as two different
+    # cars. browser_task is deliberately NOT here: it clicks and submits forms,
+    # is R3, and would park an autonomous run on an approval prompt.
+    "web_search", "browser_read",
 )
 
 # A goal is a full brief, not a title: a serious card carries requirements,
@@ -139,6 +148,19 @@ EXECUTOR_SYSTEM_PROMPT = (
     "If you would not be comfortable showing this to the person who asked for "
     "it, it is not done — go back and make it actually good, not just "
     "working.\n\n"
+    "Research before you write, whenever the brief refers to the real world. "
+    "Product names, model line-ups, specifications, prices, dates, people and "
+    "company facts must come from web_search or browser_read — never from "
+    "memory, however confident it feels. Your recollection is stale and "
+    "unreliable at exactly the level of detail a page displays: it will pass "
+    "off one product under two names as two different products, and it cannot "
+    "know any current price at all. If research is impossible (no network, "
+    "nothing found), say so on the page and in your summary instead of filling "
+    "the gap with plausible numbers — an invented price on a shop or showroom "
+    "page is worse than a missing one. The same goes for imagery: prefer real "
+    "assets you can actually fetch and reference over hand-drawn placeholder "
+    "shapes, and never reuse one generic silhouette for a whole catalogue of "
+    "different products.\n\n"
     "Work autonomously end to end: decide implementation details yourself instead "
     "of stopping to ask, make the best-reasoned assumption when information is "
     "slightly incomplete, and do not stop after the first working result. After "
@@ -1010,11 +1032,11 @@ def _observation_budget() -> int:
     """
     try:
         from backend.agent import agent_instance
-        from backend.ollama_client import is_ollama_provider
+        from backend.llamacpp_client import is_llamacpp_provider
 
-        if not is_ollama_provider(agent_instance.api_base, agent_instance.provider):
+        if not is_llamacpp_provider(agent_instance.api_base, agent_instance.provider):
             return OBSERVATION_BUDGET_CHARS
-        return max(2000, min(OBSERVATION_BUDGET_CHARS, int(agent_instance.ollama_num_ctx * 4 * 0.35)))
+        return max(2000, min(OBSERVATION_BUDGET_CHARS, int(agent_instance.local_num_ctx * 4 * 0.35)))
     except Exception:
         return OBSERVATION_BUDGET_CHARS
 
@@ -1109,7 +1131,13 @@ async def _compact_history(run: Dict[str, Any], *, force: bool = False) -> Dict[
     body = (f"Digest so far:\n{existing}\n\n" if existing else "") + \
            "New steps to fold in:\n" + "\n".join(lines)
 
-    config = _llm_config()
+    config = _llm_config(run)
+    if config.get("budget_exceeded"):
+        # Not this call's problem to raise — the next _iterate() gate check
+        # pauses the run with a proper reason before spending on the actual
+        # executor call. Compaction just sits this round out.
+        logger.info("Dev-run %s: skipping compaction, assignee's budget is exhausted", run["id"])
+        return run
     try:
         response = await call_llm_normalized(
             api_base=config["api_base"], api_key=config["api_key"], model=config["model"],
@@ -1133,6 +1161,12 @@ async def _compact_history(run: Dict[str, Any], *, force: bool = False) -> Dict[
              f"Compacted steps {batch[0]['seq']}–{through} into the progress digest "
              f"({len(digest)} chars).")
     logger.info("Dev-run %s: compacted %d steps through seq %d", run["id"], len(batch), through)
+    # Compaction is a real completion too — on an external provider it costs
+    # real money and must count against the run's budget the same as any
+    # other iteration, or a chatty history could quietly bleed spend past
+    # cost_budget between the gate checks that only look at cost_used.
+    cost_delta = _iteration_cost(config, response)
+    run = update_run(run["id"], cost_used=run["cost_used"] + cost_delta)
     return update_run(run["id"], progress_digest=digest, digest_through_seq=through)
 
 
@@ -1210,8 +1244,22 @@ def _build_messages(run: Dict[str, Any]) -> List[Dict[str, Any]]:
         # is the one instruction that must not get lost mid-context.
         + (f"\n\n{nudge}" if (nudge := _completion_nudge(run, get_steps(run["id"]))) else "")
     )
+    agent_row = _assignee_agent_row(run)
+    persona = (agent_row.get("system_prompt") or "").strip() if agent_row else ""
+    system = EXECUTOR_SYSTEM_PROMPT
+    if persona:
+        # Layered, not swapped: the executor protocol above (tool discipline,
+        # DONE:/BLOCKED:, verification-before-completion) is what the rest of
+        # this state machine parses and must stay in force verbatim. The
+        # assignee's own brief is additional domain/persona context, same
+        # relationship the discipline briefing already has to the goal below.
+        system += (
+            f"\n\nYou are carrying out this run as the specialist agent \"{agent_row['name']}\". "
+            "Bring that agent's domain expertise and voice to the work, without overriding any "
+            f"rule above:\n{persona}"
+        )
     return [
-        {"role": "system", "content": EXECUTOR_SYSTEM_PROMPT},
+        {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
 
@@ -1315,18 +1363,80 @@ def _check_gates(run: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _llm_config() -> Dict[str, Any]:
+def _assignee_agent_row(run: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The subagents row for this run's assignee, or None when there is no
+    *real* assignee to honor: nobody assigned, explicitly Vexa (whose live
+    config already comes from ``agent_instance``, not this stale seed row),
+    or an agent reassigned away / disabled / deleted since the run started."""
+    assignee_id = (run or {}).get("assignee_agent_id")
+    if not assignee_id or assignee_id == "vexa":
+        return None
+    from backend.database import get_subagent
+    agent_row = get_subagent(assignee_id)
+    if not agent_row or not agent_row.get("is_enabled", True):
+        return None
+    return agent_row
+
+
+def _llm_config(run: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Executor's model/provider for this iteration.
+
+    Assigning a specialist to a card used to be purely cosmetic: the kanban
+    board would show e.g. "Antigravity agent" as the assignee while every
+    iteration actually executed through the single global VexaAgent, model
+    and all — the assignee never touched what really ran. This resolves the
+    run's own assignee through the same model_provider/allowed_provider_ids
+    chain the chat side already uses for subagent dispatch (see
+    backend.agent._resolve_agent_llm_config / _respond_as_subagent), falling
+    back to Vexa's live config when there is no real assignee, the assignee
+    has no working external binding, or its budget is exhausted with no
+    local fallback configured (see ``budget_exceeded`` below — the caller in
+    ``_iterate`` must pause rather than spend anyway)."""
     from backend.agent import agent_instance
-    return {
+
+    base = {
         "api_base": agent_instance.api_base,
         "api_key": agent_instance.api_key,
         "model": agent_instance.model,
         "provider_options": {
             "provider": agent_instance.provider,
-            "num_ctx": agent_instance.ollama_num_ctx,
-            "keep_alive": agent_instance.ollama_keep_alive,
-            "think": agent_instance.ollama_think,
+            "num_ctx": agent_instance.local_num_ctx,
+            "think": agent_instance.local_think,
         },
+        "is_external": False,
+        "billed_agent_id": None,
+    }
+    agent_row = _assignee_agent_row(run)
+    if not agent_row:
+        return base
+
+    from backend.agent import _resolve_agent_llm_config
+    api_base, api_key, model, provider_name, is_external, provider_id = _resolve_agent_llm_config(
+        agent_row, agent_instance.api_base, agent_instance.api_key,
+        agent_instance.model, agent_instance.provider,
+    )
+    if is_external:
+        from backend.database import get_agent_budget_status
+        budget_status = get_agent_budget_status(agent_row["id"])
+        if budget_status["exceeded"]:
+            if agent_row.get("budget_fallback_to_local"):
+                # Same opt-in graceful degrade the chat side offers — keep
+                # going on the free local model instead of stalling the run.
+                return base
+            return {**base, "is_external": True, "billed_agent_id": agent_row["id"],
+                    "budget_exceeded": True, "budget_status": budget_status}
+    return {
+        "api_base": api_base,
+        "api_key": api_key,
+        "model": model,
+        "provider_options": {
+            "provider": provider_name,
+            "num_ctx": agent_instance.local_num_ctx,
+            "think": agent_instance.local_think,
+        },
+        "is_external": is_external,
+        "billed_agent_id": agent_row["id"] if is_external else None,
+        "provider_id": provider_id,
     }
 
 
@@ -1342,10 +1452,10 @@ def _iteration_cost(config: Dict[str, Any], response: Any) -> float:
         return float(cost)
     try:
         from backend.cost import calculate_cost
-        from backend.ollama_client import is_ollama_provider
+        from backend.llamacpp_client import is_llamacpp_provider
 
         provider = (config.get("provider_options") or {}).get("provider", "")
-        if is_ollama_provider(config["api_base"], provider):
+        if is_llamacpp_provider(config["api_base"], provider):
             return 0.0
         return float(calculate_cost(
             config["model"],
@@ -1355,6 +1465,36 @@ def _iteration_cost(config: Dict[str, Any], response: Any) -> float:
     except Exception as exc:  # pricing must never break the loop
         logger.debug("Could not price dev-run iteration: %s", exc)
         return 0.0
+
+
+def _log_dev_run_spend(run: Dict[str, Any], config: Dict[str, Any], response: Any, cost_usd: float) -> None:
+    """Records one externally-billed executor call to decision_logs, the same
+    ledger get_agent_budget_status and the Agent Admin spend panel read —
+    without this a dev-run's iterations on an external assignee spend real
+    money that never shows up against that agent anywhere in the product."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from backend.database import save_decision_log
+
+    try:
+        save_decision_log({
+            "timestamp": datetime.now(ZoneInfo("Asia/Jerusalem")).strftime("%Y-%m-%d %H:%M:%S"),
+            "session_id": f"dev-run:{run['id']}",
+            "model": config.get("model", ""),
+            "latency_ms": getattr(response, "latency_ms", 0) or 0,
+            "success": bool(getattr(response, "is_success", False)),
+            "error": getattr(response, "error_message", None),
+            "prompt_tokens_estimate": getattr(response.usage, "input_tokens", 0) or 0,
+            "user_message": f"[dev-run iteration] {run['goal']}"[:500],
+            "assistant_response": (getattr(response, "content", "") or "")[:500],
+            "traces": [],
+            "agent_id": config.get("billed_agent_id"),
+            "completion_tokens_estimate": getattr(response.usage, "output_tokens", 0) or 0,
+            "cost_usd": cost_usd,
+            "provider_id": config.get("provider_id"),
+        })
+    except Exception as exc:  # spend logging must never break the run
+        logger.warning("Dev-run %s: could not log spend for %s: %s", run["id"], config.get("billed_agent_id"), exc)
 
 
 async def _call_executor_llm(run: Dict[str, Any], config: Dict[str, Any]) -> Any:
@@ -1513,7 +1653,15 @@ async def _iterate(run: Dict[str, Any]) -> Dict[str, Any]:
     # ledger that keeps growing until the model answers with nothing at all.
     run = await _compact_history(run)
 
-    config = _llm_config()
+    config = _llm_config(run)
+    if config.get("budget_exceeded"):
+        status = config["budget_status"]
+        reason = (f"Assigned agent's spend limit reached (${status['used_usd']:.4f} / "
+                  f"${status['budget_usd_limit']:.2f}, {status['budget_period']}) — reassign the "
+                  "card, raise the budget, or enable local fallback for this agent to continue.")
+        logger.info("Dev-run %s paused: %s", run["id"], reason)
+        add_step(run["id"], "observe", "", reason, "failed")
+        return update_run(run["id"], status="paused", status_reason=reason[:500])
     response = await _call_executor_llm(run, config)
     cost_delta = _iteration_cost(config, response)
     iter_before, cost_before = run["iter_used"], run["cost_used"]
@@ -1522,6 +1670,13 @@ async def _iterate(run: Dict[str, Any]) -> Dict[str, Any]:
         iter_used=iter_before + 1,
         cost_used=cost_before + cost_delta,
     )
+    if config.get("billed_agent_id"):
+        # Otherwise this spend is invisible to the assignee's own budget
+        # (get_agent_budget_status reads decision_logs) and to the Agent
+        # Admin spend panel — an external assignee's dev-run iterations would
+        # cost real money while the gate above stayed blind to almost all of
+        # it, and the owner's per-agent spend view would silently under-report.
+        _log_dev_run_spend(run, config, response, cost_delta)
     if _crossed_80_percent(iter_before, run["iter_used"], run["iter_budget"]) or \
             _crossed_80_percent(cost_before, run["cost_used"], run["cost_budget"]):
         await _emit_event(run["id"], run["status"],

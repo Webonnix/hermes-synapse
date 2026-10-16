@@ -144,7 +144,7 @@ describe('ChatTab Component', () => {
           thinking: 'Private model trace',
           streaming: true,
           run_id: 'run-1',
-          meta: { provider: 'ollama', model: 'qwen3:8b', status: 'streaming' },
+          meta: { provider: 'llamacpp', model: 'qwen3.8-27b', status: 'streaming' },
         }]}
       />
     );

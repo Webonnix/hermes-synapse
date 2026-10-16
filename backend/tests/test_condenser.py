@@ -22,9 +22,8 @@ def _agent(**overrides):
         api_base="http://fake",
         api_key="",
         model="fake-model",
-        provider="ollama",
-        ollama_num_ctx=8192,
-        ollama_keep_alive="5m",
+        provider="llamacpp",
+        local_num_ctx=8192,
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -112,12 +111,12 @@ async def test_repeated_condense_only_folds_in_whats_newly_fallen_out(condenser_
 
 @pytest.mark.asyncio
 async def test_get_history_prepends_summary_when_enabled(condenser_db, monkeypatch):
-    from backend.agent import JarvisAgent
+    from backend.agent import VexaAgent
 
     for i in range(7):
         database.save_message("s2", "user", f"msg {i}")
 
-    agent = JarvisAgent()
+    agent = VexaAgent()
     agent.condenser_enabled = True
     agent.max_history_len = 4
     agent.condense_trigger_extra = 3

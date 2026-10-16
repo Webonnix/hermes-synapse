@@ -79,7 +79,11 @@ def test_shell_guard_lets_ordinary_inspection_through(command):
 
 
 def test_main_agent_ids_are_reserved():
-    assert "jarvis" in tp.MAIN_AGENT_IDS
+    # canonical id plus the pre-2026-08 legacy id, which stays permanently
+    # recognised so un-migrated rows still resolve to "the main agent".
+    assert tp.MAIN_AGENT_ID == "vexa"
+    assert tp.LEGACY_MAIN_AGENT_ID == "jarvis"
+    assert {"vexa", "jarvis"} <= tp.MAIN_AGENT_IDS
 
 
 # ── Capability discovery (list_tools) ────────────────────────────────────────

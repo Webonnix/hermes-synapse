@@ -70,12 +70,15 @@ class AgentSlackBotManager:
 
             # The allow-list may name the channel or the user; ask about both,
             # same as the pre-gate behaviour.
+            slack_event_id = str(event.get("client_msg_id") or event.get("ts") or "")
             decision = await asyncio.to_thread(
                 bot_access_gate.authorize, binding_id, "slack", channel_id, text, slack_user, slack_user,
+                event_id=slack_event_id,
             )
             if decision.action == bot_access_gate.IGNORE and slack_user:
                 decision = await asyncio.to_thread(
                     bot_access_gate.authorize, binding_id, "slack", slack_user, text, slack_user, slack_user,
+                    event_id=slack_event_id, channel_meta={"reply_chat_id": channel_id},
                 )
             if decision.action == bot_access_gate.IGNORE:
                 return
@@ -84,9 +87,10 @@ class AgentSlackBotManager:
                     await say(text=chunk)
                 return
 
+            from backend import inbox_routing
             from backend.database import get_subagent
 
-            subagent = get_subagent(subagent_id)
+            subagent = get_subagent(inbox_routing.effective_subagent_id(decision, subagent_id))
             if not subagent or not subagent.get("is_enabled"):
                 await say(
                     text=bot_access_gate.AGENT_OFFLINE_MESSAGE
@@ -103,8 +107,8 @@ class AgentSlackBotManager:
 
             session_id = decision.session_id or f"slackbot:{binding_id}:{channel_id}"
             try:
-                response_text = await agent_instance._respond_as_subagent(
-                    text, subagent, chat_id=session_id
+                response_text = await inbox_routing.respond_turn(
+                    decision, text, subagent, session_id
                 )
             except Exception:
                 logger.exception("Agent Slack bot %s: error handling message", binding_id)

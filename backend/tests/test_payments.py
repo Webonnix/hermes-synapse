@@ -158,7 +158,7 @@ async def test_a_free_plan_cannot_be_invoiced(billing_db):
 async def test_the_main_agent_is_never_for_sale(billing_db, paid_plan):
     with pytest.raises(ValueError, match="main agent"):
         await payments.create_invoice(
-            plan_id=paid_plan["id"], binding_id="bind-1", subagent_id="jarvis"
+            plan_id=paid_plan["id"], binding_id="bind-1", subagent_id="vexa"
         )
 
 

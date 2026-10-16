@@ -49,11 +49,13 @@ suffix" does not generalize across them.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -187,13 +189,41 @@ def drop_site_alias(root_run_id: str) -> None:
 
 # ── Per-run repo checkouts ──────────────────────────────────────────────────
 
+@functools.lru_cache(maxsize=1)
+def _safe_directory_gitconfig() -> str:
+    """Writes a throwaway *global* gitconfig that allowlists every path.
+
+    Run checkouts are chowned to the sandbox uid while this backend process is
+    root, so git refuses to touch them ("detected dubious ownership") unless
+    the path is in safe.directory — every path here is one this module itself
+    constructed, hence the blanket `*`.
+
+    It has to arrive as a *global* config file. `git -c safe.directory=*` reads
+    like it would do the same and is what this module used until 2026-09-05,
+    but git honours safe.directory only from protected configuration, which for
+    this setting means the system and global files alone — never `-c`, never a
+    repo's own config. So the old form was silently a no-op: every per-run
+    clone died with exit 128, every Kanban run fell back to the serialized
+    shared dev-runner, and the agent was handed a repo it could not read.
+    """
+    fd, path = tempfile.mkstemp(prefix="hermes-safe-gitconfig-", suffix=".ini")
+    with os.fdopen(fd, "w") as handle:
+        handle.write("[safe]\n\tdirectory = *\n")
+    return path
+
+
 def _git(args: list, timeout: int = 60, check: bool = True) -> subprocess.CompletedProcess:
-    # safe.directory=*: run checkouts are chowned to the sandbox uid while this
-    # backend process is root, which git otherwise refuses to touch ("dubious
-    # ownership") — every path here is one this module itself constructed.
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": _safe_directory_gitconfig(),
+        # Keep the container's system config out of it: the allowlist above is
+        # the only configuration these internal calls should ever depend on,
+        # and every call site passes the identity it needs with `-c`.
+        "GIT_CONFIG_SYSTEM": os.devnull,
+    }
     return subprocess.run(
-        ["git", "-c", "safe.directory=*", *args],
-        check=check, capture_output=True, text=True, timeout=timeout,
+        ["git", *args],
+        check=check, capture_output=True, text=True, timeout=timeout, env=env,
     )
 
 

@@ -67,6 +67,18 @@ def _init_schema() -> None:
                     connection.execute(f"ALTER TABLE provider_bindings ADD COLUMN {col} REAL")
                 except sqlite3.OperationalError:
                     pass
+        # Which model a caller that does not name one gets from this endpoint.
+        # Lived as a lazy ALTER inside content_factory/integrations.py until a
+        # binding created by any *other* path (POST /api/router/bind-self, the
+        # agent admin form) reached content_factory/providers/llm.py, which
+        # reads this column — and got `None`, i.e. an empty model name, i.e. a
+        # provider that fails on first use. The column belongs to the module
+        # that owns the table.
+        if "default_model" not in existing_cols:
+            try:
+                connection.execute("ALTER TABLE provider_bindings ADD COLUMN default_model TEXT")
+            except sqlite3.OperationalError:
+                pass
 
 
 def validate_binding_config(name: str, provider_type: str, api_base: str) -> dict[str, Any]:
@@ -100,6 +112,7 @@ def _validate_pricing(cost_per_1m_input: Optional[float], cost_per_1m_output: Op
 def create_binding_proposal(
     name: str, provider_type: str, api_base: str, api_key: str,
     cost_per_1m_input: Optional[float] = None, cost_per_1m_output: Optional[float] = None,
+    default_model: str = "",
 ) -> dict[str, Any]:
     _init_schema()
     validated = validate_binding_config(name, provider_type, api_base)
@@ -153,8 +166,8 @@ def create_binding_proposal(
             """
             INSERT INTO provider_bindings
                 (id, name, provider_type, api_base, valkey_secret_key, status, config_digest, control_task_id,
-                 created_at, updated_at, cost_per_1m_input, cost_per_1m_output)
-            VALUES (?, ?, ?, ?, ?, 'awaiting_approval', ?, ?, ?, ?, ?, ?)
+                 created_at, updated_at, cost_per_1m_input, cost_per_1m_output, default_model)
+            VALUES (?, ?, ?, ?, ?, 'awaiting_approval', ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 binding_id,
@@ -168,6 +181,7 @@ def create_binding_proposal(
                 now,
                 cost_per_1m_input,
                 cost_per_1m_output,
+                str(default_model or "").strip() or None,
             ),
         )
         row = connection.execute("SELECT * FROM provider_bindings WHERE id = ?", (binding_id,)).fetchone()
@@ -274,6 +288,27 @@ def update_binding_pricing(
         connection.execute(
             "UPDATE provider_bindings SET cost_per_1m_input = ?, cost_per_1m_output = ?, updated_at = ? WHERE id = ?",
             (cost_per_1m_input, cost_per_1m_output, _now(), binding_id),
+        )
+    return get_binding(binding_id)  # type: ignore[return-value]
+
+
+def update_binding_model(binding_id: str, default_model: str) -> dict[str, Any]:
+    """Sets/clears the model a caller gets when it does not name one.
+
+    Same R0 reasoning as update_binding_pricing: the governed part of a binding
+    (its endpoint and its key) was approved when it was created, and naming a
+    model on an already-approved endpoint opens no new network surface.
+    """
+    _init_schema()
+    clean = str(default_model or "").strip()
+    if len(clean) > 200:
+        raise ValueError("default_model is too long")
+    if not get_binding(binding_id):
+        raise KeyError(binding_id)
+    with _connect() as connection:
+        connection.execute(
+            "UPDATE provider_bindings SET default_model = ?, updated_at = ? WHERE id = ?",
+            (clean or None, _now(), binding_id),
         )
     return get_binding(binding_id)  # type: ignore[return-value]
 

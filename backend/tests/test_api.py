@@ -33,8 +33,8 @@ def test_update_config():
     try:
         with (
             patch(
-                "backend.ollama_client.OllamaClient.list_models",
-                new=AsyncMock(return_value=[{"name": "qwen-test:latest"}]),
+                "backend.llamacpp_client.LlamaCppClient.model_ids",
+                new=AsyncMock(return_value=["qwen-test"]),
             ),
             patch("backend.database.save_app_settings"),
         ):
@@ -43,18 +43,18 @@ def test_update_config():
                 json={
                     "system_prompt": "Новый тестовый промпт",
                     "model": "qwen-test",
-                    "provider": "ollama",
+                    "provider": "llamacpp",
                 }
             )
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "success"
         assert data["config"]["system_prompt"] == "Новый тестовый промпт"
-        assert data["config"]["model"] == "qwen-test:latest"
+        assert data["config"]["model"] == "qwen-test"
         
         # Verify in agent
         assert agent_instance.system_prompt == "Новый тестовый промпт"
-        assert agent_instance.model == "qwen-test:latest"
+        assert agent_instance.model == "qwen-test"
     finally:
         # Restore defaults
         agent_instance.system_prompt = original_prompt
@@ -70,8 +70,8 @@ def test_update_config_applies_the_condenser_controls():
     try:
         with (
             patch(
-                "backend.ollama_client.OllamaClient.list_models",
-                new=AsyncMock(return_value=[{"name": "qwen-test:latest"}]),
+                "backend.llamacpp_client.LlamaCppClient.model_ids",
+                new=AsyncMock(return_value=["qwen-test"]),
             ),
             patch("backend.database.save_app_settings"),
         ):
@@ -95,13 +95,13 @@ def test_update_config_rejects_missing_local_model():
     original_provider = agent_instance.provider
     try:
         with patch(
-            "backend.ollama_client.OllamaClient.list_models",
-            new=AsyncMock(return_value=[{"name": "installed:latest"}]),
+            "backend.llamacpp_client.LlamaCppClient.model_ids",
+            new=AsyncMock(return_value=["installed"]),
         ):
-            response = client.post("/api/config", json={"model": "missing-model", "provider": "ollama"})
+            response = client.post("/api/config", json={"model": "missing-model", "provider": "llamacpp"})
 
         assert response.status_code == 422
-        assert response.json()["detail"]["code"] == "ollama_model_not_installed"
+        assert response.json()["detail"]["code"] == "local_model_not_served"
         assert agent_instance.model == original_model
     finally:
         agent_instance.model = original_model

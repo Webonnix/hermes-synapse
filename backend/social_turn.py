@@ -65,16 +65,18 @@ async def handle_incoming(
     display_name: str = "",
     overrides: Optional[dict[str, Any]] = None,
     response_mode: str = "draft",
+    event_id: str = "",
 ) -> None:
     """Runs one turn for a social channel. Never raises to its caller: a webhook
     handler that raises would make the provider retry the same message, and a
     long-poll loop that raises would drop the connection."""
-    from backend import bot_access_gate
+    from backend import bot_access_gate, inbox_routing
 
     try:
         decision = await asyncio.to_thread(
             bot_access_gate.authorize,
             binding_id, platform, chat_id, text, external_user_id, display_name,
+            event_id=event_id,
         )
     except Exception:
         logger.exception("%s %s: access gate failed", platform, binding_id)
@@ -90,7 +92,7 @@ async def handle_incoming(
 
     from backend.database import get_subagent
 
-    subagent = await asyncio.to_thread(get_subagent, subagent_id)
+    subagent = await asyncio.to_thread(get_subagent, inbox_routing.effective_subagent_id(decision, subagent_id))
     if not subagent or not subagent.get("is_enabled"):
         await _safe_send(
             send,
@@ -108,7 +110,7 @@ async def handle_incoming(
 
     session_id = decision.session_id or f"{platform}:{binding_id}:{chat_id}"
     try:
-        response_text = await agent_instance._respond_as_subagent(text, subagent, chat_id=session_id)
+        response_text = await inbox_routing.respond_turn(decision, text, subagent, session_id)
     except Exception:
         logger.exception("%s %s: error handling message", platform, binding_id)
         bot_access_gate.record_turn(decision, agent_instance.last_run_metadata.get(session_id), "")

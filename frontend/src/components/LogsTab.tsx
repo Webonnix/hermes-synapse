@@ -38,8 +38,8 @@ export function LogsTab({
                   key={index} 
                   style={{
                     ...styles.logCard,
-                    backgroundColor: selectedLog === log ? 'rgba(0, 240, 255, 0.08)' : 'transparent',
-                    borderColor: selectedLog === log ? 'var(--accent-cyan)' : 'rgba(0, 240, 255, 0.08)'
+                    backgroundColor: selectedLog === log ? 'rgba(94, 225, 255, 0.08)' : 'transparent',
+                    borderColor: selectedLog === log ? 'var(--accent-cyan)' : 'rgba(94, 225, 255, 0.08)'
                   }}
                   onClick={() => setSelectedLog(log)}
                 >
@@ -81,7 +81,7 @@ export function LogsTab({
                 </div>
                 <div style={styles.detailStatBox}>
                   <span style={styles.detailStatLabel}>Latency</span>
-                  <span style={{ ...styles.detailStatValue, color: '#00f0ff' }}>{selectedLog.latency_ms} ms</span>
+                  <span style={{ ...styles.detailStatValue, color: '#5ee1ff' }}>{selectedLog.latency_ms} ms</span>
                 </div>
                 <div style={styles.detailStatBox}>
                   <span style={styles.detailStatLabel}>Tokens (Approx.)</span>
@@ -105,7 +105,7 @@ export function LogsTab({
                             <span style={{
                               ...styles.traceStatusDot,
                               backgroundColor: trace.status === 'error' ? 'var(--danger)' : (trace.status === 'warning' ? 'var(--warning)' : 'var(--accent-cyan)'),
-                              boxShadow: trace.status === 'error' ? '0 0 8px var(--danger)' : '0 0 8px rgba(0, 240, 255, 0.4)'
+                              boxShadow: trace.status === 'error' ? '0 0 8px var(--danger)' : '0 0 8px rgba(94, 225, 255, 0.4)'
                             }} />
                             <span style={styles.traceAgentName}>{trace.agent.toUpperCase()}</span>
                           </div>
@@ -128,8 +128,8 @@ export function LogsTab({
 
               {selectedLog.error && (
                 <div style={styles.detailBlock}>
-                  <h4 style={{ ...styles.detailBlockTitle, color: '#ef4444' }}>Error Log</h4>
-                  <div style={{ ...styles.codeBlock, color: '#ef4444', backgroundColor: 'rgba(239, 68, 68, 0.05)' }}>
+                  <h4 style={{ ...styles.detailBlockTitle, color: '#f05d75' }}>Error Log</h4>
+                  <div style={{ ...styles.codeBlock, color: '#f05d75', backgroundColor: 'rgba(240, 93, 117, 0.05)' }}>
                     {selectedLog.error}
                   </div>
                 </div>

@@ -22,9 +22,15 @@ def publish_env(tmp_path, monkeypatch):
     recorded = {}
     monkeypatch.setattr(dev_runs, "update_run",
                         lambda rid, **fields: recorded.update(fields))
-    # A root run: its own chain, so the stable URL is /demo/site-<run_id>/.
+    # A root run in its own dedicated per-run sandbox (sandbox_container set):
+    # its own chain, so the stable URL is /demo/site-<run_id>/. Real dev-runs
+    # only reach dev_publish_demo with a live sandbox_container or none at
+    # all (see test_dev_publish_demo_legacy_fallback.py for the latter) —
+    # never omit the key entirely, or a resolution bug that only shows up
+    # when it is absent/None would slip past every test here.
     monkeypatch.setattr(dev_runs, "get_run",
-                        lambda rid, *a, **kw: {"id": rid, "root_run_id": rid})
+                        lambda rid, *a, **kw: {"id": rid, "root_run_id": rid,
+                                               "sandbox_container": f"hermes-dev-runner-{rid}"})
     token = tools.CURRENT_DEV_RUN_ID.set(run_id)
     yield run_id, runs_root / run_id, previews_root, recorded
     tools.CURRENT_DEV_RUN_ID.reset(token)
@@ -134,7 +140,8 @@ def test_a_continuation_republishes_the_same_stable_url(publish_env, monkeypatch
     child_checkout = dev_sandbox.RUNS_ROOT / child_id
     _write(child_checkout / "index.html", "v2")
     monkeypatch.setattr(dev_runs, "get_run",
-                        lambda rid, *a, **kw: {"id": rid, "root_run_id": root_id})
+                        lambda rid, *a, **kw: {"id": rid, "root_run_id": root_id,
+                                               "sandbox_container": f"hermes-dev-runner-{rid}"})
     token = tools.CURRENT_DEV_RUN_ID.set(child_id)
     try:
         result = json.loads(tools.dev_publish_demo("."))
@@ -212,3 +219,68 @@ def test_a_broken_html_file_does_not_fail_the_publish(publish_env, monkeypatch):
     result = json.loads(tools.dev_publish_demo("."))
     assert result["files_published"] == 1
     assert "error" not in result
+
+
+# ── Shared checkout fallback ───────────────────────────────────────────────────
+# When per-run sandbox provisioning fails (Docker-out-of-docker unavailable, or
+# the sandbox never came up healthy), dev_runs._run_with_sandbox silently falls
+# back to the one static, serialized dev-runner instead of failing the run —
+# its writes land in dev_sandbox.BASE_REPO_PATH, never under
+# repo_run_path(run_id). Before this, dev_publish_demo always looked at
+# repo_run_path(run_id) regardless of which mode the run actually used, so
+# every publish attempt on a fallback run failed with "'.' is not a directory
+# in this run's checkout" — looping until the duplicate-action breaker killed
+# the run (real incident: run-f12f19c261ac, 2026-09-03).
+
+def test_publish_reads_the_shared_checkout_when_the_run_has_no_dedicated_sandbox(tmp_path, monkeypatch):
+    run_id = "run-000000000099"
+    base_repo = tmp_path / "dev-repo"
+    base_repo.mkdir(parents=True)
+    previews_root = tmp_path / "dev-previews"
+    monkeypatch.setattr(dev_sandbox, "BASE_REPO_PATH", base_repo)
+    monkeypatch.setattr(dev_sandbox, "RUNS_ROOT", tmp_path / "dev-repo-runs")
+    monkeypatch.setattr(dev_sandbox, "PREVIEWS_ROOT", previews_root)
+    monkeypatch.setattr(dev_runs, "update_run", lambda rid, **fields: None)
+    # sandbox_container explicitly None: this run fell back to the shared
+    # dev-runner rather than getting its own.
+    monkeypatch.setattr(dev_runs, "get_run",
+                        lambda rid, *a, **kw: {"id": rid, "root_run_id": rid, "sandbox_container": None})
+    _write(base_repo / "index.html", "<html>shared checkout</html>")
+
+    token = tools.CURRENT_DEV_RUN_ID.set(run_id)
+    try:
+        result = json.loads(tools.dev_publish_demo("."))
+    finally:
+        tools.CURRENT_DEV_RUN_ID.reset(token)
+
+    assert "error" not in result
+    assert (previews_root / run_id / "index.html").read_text().startswith("<html>shared checkout</html>")
+
+
+def test_publish_prefers_the_dedicated_checkout_when_the_run_row_cannot_be_read(tmp_path, monkeypatch):
+    """An unreadable run row must NOT be treated as 'shared checkout' — that
+    would send an ordinary dedicated-sandbox run's publish to the wrong
+    directory. Falling back to the per-run path (the pre-existing default) is
+    the safe guess here: CURRENT_DEV_RUN_ID being set at all means a
+    dedicated sandbox the overwhelming majority of the time."""
+    run_id = "run-000000000098"
+    runs_root = tmp_path / "dev-repo-runs"
+    previews_root = tmp_path / "dev-previews"
+    (runs_root / run_id).mkdir(parents=True)
+    monkeypatch.setattr(dev_sandbox, "RUNS_ROOT", runs_root)
+    monkeypatch.setattr(dev_sandbox, "PREVIEWS_ROOT", previews_root)
+    monkeypatch.setattr(dev_runs, "update_run", lambda rid, **fields: None)
+
+    def boom(*a, **kw):
+        raise RuntimeError("database is locked")
+    monkeypatch.setattr(dev_runs, "get_run", boom)
+    _write(runs_root / run_id / "index.html", "<html>dedicated</html>")
+
+    token = tools.CURRENT_DEV_RUN_ID.set(run_id)
+    try:
+        result = json.loads(tools.dev_publish_demo("."))
+    finally:
+        tools.CURRENT_DEV_RUN_ID.reset(token)
+
+    assert "error" not in result
+    assert (previews_root / run_id / "index.html").read_text().startswith("<html>dedicated</html>")

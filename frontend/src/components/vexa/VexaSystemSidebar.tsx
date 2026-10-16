@@ -111,7 +111,7 @@ export function ModelSelectorCard({
             aria-label={copy.testModel}
             onChange={event => onSelectProvider(event.target.value)}
           >
-            <option value="ollama">{copy.localModel}</option>
+            <option value="local">{copy.localModel}</option>
             {providers.map(provider => (
               <option key={provider.id} value={provider.id}>{provider.name}</option>
             ))}
@@ -138,7 +138,7 @@ export function ModelSelectorCard({
         )}
 
         <p className="vx-hint">
-          {selectedProviderId !== 'ollama' ? `${copy.testingWith} ${activeProviderName ?? selectedProviderId}` : copy.usingLocalModel}
+          {selectedProviderId !== 'local' ? `${copy.testingWith} ${activeProviderName ?? selectedProviderId}` : copy.usingLocalModel}
           {' '}{copy.modelSwitchCaveat}
         </p>
       </div>

@@ -73,6 +73,22 @@ CF_PUBLISH = "content_factory.publish"
 CF_CHANNELS_MANAGE = "content_factory.channels.manage"
 CF_SETTINGS_EDIT = "content_factory.settings.edit"
 
+# Inbox. Reading conversations, acting in them (take over, reply as a person,
+# whisper, re-route, close) and changing who is routed where are three separate
+# kinds of authority: a support shift works conversations, it does not decide
+# that a phone number is blocked.
+INBOX_VIEW = "inbox.view"
+INBOX_REPLY = "inbox.reply"
+INBOX_RULES_EDIT = "inbox.rules.edit"
+# External voice providers hold third-party credentials and open outbound
+# network paths — owner only, same as connecting a new messenger channel.
+VOICE_PROVIDERS_MANAGE = "voice.providers.manage"
+# Telephony. Managing lines means provider credentials and buying numbers with the
+# owner's money — owner only. Placing an outbound call costs per minute and speaks to
+# a real person in the business's name, so it is its own grant, not inbox.reply.
+PHONE_MANAGE = "phone.manage"
+PHONE_CALL = "phone.call"
+
 ALL_PERMISSIONS: tuple = (
     CLIENTS_VIEW, CLIENTS_CREATE, CLIENTS_EDIT, CLIENTS_ARCHIVE,
     CLIENTS_AGENTS_VIEW, CLIENTS_AGENTS_CONNECT, CLIENTS_AGENTS_DISCONNECT,
@@ -88,6 +104,8 @@ ALL_PERMISSIONS: tuple = (
     SETTINGS_CURRENCY_VIEW, SETTINGS_CURRENCY_EDIT,
     CF_VIEW, CF_PIPELINE_EDIT, CF_RUN_START, CF_RUN_CANCEL, CF_CONTENT_REVIEW,
     CF_PUBLISH, CF_CHANNELS_MANAGE, CF_SETTINGS_EDIT,
+    INBOX_VIEW, INBOX_REPLY, INBOX_RULES_EDIT, VOICE_PROVIDERS_MANAGE,
+    PHONE_MANAGE, PHONE_CALL,
 )
 
 OWNER_ROLE = "owner"
@@ -115,6 +133,7 @@ BUILTIN_ROLES: Dict[str, tuple] = {
         # company's own channels; connecting new channels stays with the owner
         # because it grants a third party access to those accounts.
         CF_VIEW, CF_PIPELINE_EDIT, CF_RUN_START, CF_RUN_CANCEL, CF_CONTENT_REVIEW, CF_PUBLISH,
+        INBOX_VIEW, INBOX_REPLY, INBOX_RULES_EDIT, PHONE_CALL,
     ),
     # Support: sees who the clients are and whether their agents are healthy,
     # and no money at all — no prices, no MRR, no invoices, no sales pipeline
@@ -128,10 +147,11 @@ BUILTIN_ROLES: Dict[str, tuple] = {
         # The spec's REVIEWER (§81): may approve or reject a video, may not
         # edit the pipeline that produced it and may not publish it directly.
         CF_VIEW, CF_CONTENT_REVIEW, CF_RUN_START,
+        INBOX_VIEW, INBOX_REPLY,
     ),
     "viewer": (
         CLIENTS_VIEW, CLIENTS_AGENTS_VIEW, CLIENTS_DEALS_VIEW, CLIENTS_TASKS_VIEW, CLIENTS_NOTES_VIEW,
-        CLIENTS_CALENDAR_VIEW, SETTINGS_CURRENCY_VIEW, CF_VIEW,
+        CLIENTS_CALENDAR_VIEW, SETTINGS_CURRENCY_VIEW, CF_VIEW, INBOX_VIEW,
     ),
 }
 

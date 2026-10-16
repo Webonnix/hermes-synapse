@@ -80,11 +80,11 @@ export function VoiceWaveform({ phase, audioAnalyser, side, simpleMode }: Props)
       // centre line and its excursion grows towards the microphone.
       const gradient = ctx.createLinearGradient(0, 0, width, 0);
       if (side === 'left') {
-        gradient.addColorStop(0, 'rgba(27, 220, 255, .35)');
-        gradient.addColorStop(1, 'rgba(38, 132, 255, 1)');
+        gradient.addColorStop(0, 'rgba(94, 225, 255, .35)');
+        gradient.addColorStop(1, 'rgba(59, 130, 246, 1)');
       } else {
-        gradient.addColorStop(0, 'rgba(38, 132, 255, 1)');
-        gradient.addColorStop(1, 'rgba(161, 93, 255, .45)');
+        gradient.addColorStop(0, 'rgba(59, 130, 246, 1)');
+        gradient.addColorStop(1, 'rgba(146, 119, 255, .45)');
       }
 
       ctx.beginPath();

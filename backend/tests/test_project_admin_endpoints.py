@@ -23,7 +23,7 @@ async def test_create_project_calls_through():
     with patch("backend.projects.create_project", return_value={"id": "proj-1"}) as create:
         result = await main.create_project_api(payload)
     assert result == {"id": "proj-1"}
-    create.assert_called_once_with("Сайт клиента", "лендинг", True)
+    create.assert_called_once_with("Сайт клиента", "лендинг", True, None)
 
 
 @pytest.mark.asyncio

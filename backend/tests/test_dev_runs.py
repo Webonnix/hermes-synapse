@@ -671,7 +671,7 @@ async def test_cost_is_derived_from_tokens_when_the_provider_omits_it(
 ):
     """usage.cost is never populated by llm_client, so the budget has to be fed
     from token counts — otherwise cost_budget can never trip."""
-    monkeypatch.setattr(dev_runs, "_llm_config", lambda: {
+    monkeypatch.setattr(dev_runs, "_llm_config", lambda run=None: {
         "api_base": "https://api.openai.com/v1", "api_key": "k",
         "model": "gpt-4o", "provider_options": {"provider": "openai"},
     })
@@ -1662,3 +1662,139 @@ def test_renaming_renames_the_whole_product_not_one_card(runs_db):
 def test_renaming_a_missing_run_is_refused(runs_db):
     with pytest.raises(KeyError):
         dev_runs.rename_chain("run-doesnotexist", "whatever")
+
+
+# ── Assignee actually drives execution ────────────────────────────────────────
+# Before this, run["assignee_agent_id"] was purely a kanban label: every
+# iteration executed through the single global VexaAgent regardless of who
+# the card said was working it. These pin down that the assignee's own
+# model/provider/persona/budget are what actually get used.
+
+def _external_agent(runs_db, monkeypatch, agent_id="antigravity_ai_agent", **overrides):
+    """A subagent bound to a resolvable external provider binding."""
+    from backend import database, provider_governance
+
+    kwargs = dict(
+        id=agent_id, name="Antigravity Agent", system_prompt="You write punchy landing pages.",
+        model="gpt-4o-mini", model_provider="ext-binding-1",
+    )
+    kwargs.update(overrides)
+    database.save_subagent(**kwargs)
+    monkeypatch.setattr(
+        provider_governance, "resolve_binding_credentials",
+        lambda binding_id: ("https://api.example.com/v1", "sk-test") if binding_id == "ext-binding-1" else None,
+    )
+    return kwargs
+
+
+def test_llm_config_falls_back_to_vexa_when_unassigned_or_explicit_vexa(runs_db, monkeypatch):
+    from backend import agent as agent_module
+
+    monkeypatch.setattr(agent_module.agent_instance, "api_base", "http://local:11434")
+    monkeypatch.setattr(agent_module.agent_instance, "model", "qwen-mtp:latest")
+    # create_run() auto-assigns the least-busy specialist by default — a
+    # genuinely unassigned run only exists after an explicit reassign(None).
+    created = dev_runs.create_run("goal")
+    unassigned = dev_runs.reassign_run(created["id"], None)
+    assert dev_runs._llm_config(unassigned)["model"] == "qwen-mtp:latest"
+    assert dev_runs._llm_config(unassigned)["is_external"] is False
+
+    vexa_run = dev_runs.create_run("goal", assignee_agent_id="vexa")
+    assert dev_runs._llm_config(vexa_run)["model"] == "qwen-mtp:latest"
+
+
+def test_llm_config_resolves_the_assignees_own_model_and_provider(runs_db, monkeypatch):
+    _external_agent(runs_db, monkeypatch)
+    run = dev_runs.create_run("build genrate.ai redesign", assignee_agent_id="antigravity_ai_agent")
+    config = dev_runs._llm_config(run)
+    assert config["model"] == "gpt-4o-mini"
+    assert config["api_base"] == "https://api.example.com/v1"
+    assert config["api_key"] == "sk-test"
+    assert config["is_external"] is True
+    assert config["billed_agent_id"] == "antigravity_ai_agent"
+
+
+def test_llm_config_ignores_a_disabled_assignee(runs_db, monkeypatch):
+    _external_agent(runs_db, monkeypatch, is_enabled=False)
+    run = dev_runs.create_run("goal", assignee_agent_id="antigravity_ai_agent")
+    config = dev_runs._llm_config(run)
+    assert config["is_external"] is False
+    assert config["billed_agent_id"] is None
+
+
+def test_build_messages_layers_the_assignees_persona_without_dropping_the_protocol(runs_db, monkeypatch):
+    _external_agent(runs_db, monkeypatch)
+    run = dev_runs.create_run("build genrate.ai redesign", assignee_agent_id="antigravity_ai_agent")
+    system_msg = dev_runs._build_messages(run)[0]["content"]
+    assert "You write punchy landing pages." in system_msg
+    assert "Antigravity Agent" in system_msg
+    # The executor protocol the state machine parses (DONE:/BLOCKED:) must
+    # still be present verbatim, not replaced by the persona.
+    assert dev_runs.EXECUTOR_SYSTEM_PROMPT in system_msg
+
+
+def test_build_messages_has_no_persona_addendum_for_vexa_or_unassigned(runs_db):
+    created = dev_runs.create_run("goal")
+    unassigned = dev_runs.reassign_run(created["id"], None)
+    assert dev_runs._build_messages(unassigned)[0]["content"] == dev_runs.EXECUTOR_SYSTEM_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_run_pauses_when_the_assignees_budget_is_exhausted(
+    runs_db, monkeypatch, scripted_llm, template_plan, governed_ok
+):
+    from datetime import datetime, timezone
+    from backend import database
+
+    _external_agent(runs_db, monkeypatch, budget_usd_limit=1.0, budget_period="monthly")
+    database.save_decision_log({
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        "session_id": "s", "model": "gpt-4o-mini", "latency_ms": 0, "success": True,
+        "error": None, "prompt_tokens_estimate": 0, "user_message": "", "assistant_response": "",
+        "agent_id": "antigravity_ai_agent", "completion_tokens_estimate": 0, "cost_usd": 5.0,
+    })
+    run = dev_runs.create_run("goal", assignee_agent_id="antigravity_ai_agent")
+    result = await dev_runs.process_run(run["id"])
+    assert result["status"] == "paused"
+    assert "spend limit" in result["status_reason"]
+    assert scripted_llm["calls"] == 0  # never actually spent on the exhausted agent
+
+
+@pytest.mark.asyncio
+async def test_run_degrades_to_local_when_budget_exhausted_and_fallback_enabled(
+    runs_db, monkeypatch, scripted_llm, template_plan, governed_ok
+):
+    from datetime import datetime, timezone
+    from backend import database
+
+    _external_agent(runs_db, monkeypatch, budget_usd_limit=1.0, budget_fallback_to_local=True)
+    database.save_decision_log({
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        "session_id": "s", "model": "gpt-4o-mini", "latency_ms": 0, "success": True,
+        "error": None, "prompt_tokens_estimate": 0, "user_message": "", "assistant_response": "",
+        "agent_id": "antigravity_ai_agent", "completion_tokens_estimate": 0, "cost_usd": 5.0,
+    })
+    scripted_llm["script"] = [_llm_text("DONE: fell back to local")]
+    run = dev_runs.create_run("goal", assignee_agent_id="antigravity_ai_agent")
+    result = await dev_runs.process_run(run["id"])
+    assert result["status"] == "done"
+    assert scripted_llm["calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_external_assignee_spend_is_logged_against_the_agent(
+    runs_db, monkeypatch, scripted_llm, template_plan, governed_ok
+):
+    from backend import database
+
+    _external_agent(runs_db, monkeypatch)
+    tool_call = _llm_tool("dev_write_file", {"path": "a.py", "content": "x"}, cost=0.0)
+    tool_call.usage.input_tokens = 1000
+    tool_call.usage.output_tokens = 200
+    scripted_llm["script"] = [tool_call]
+    run = dev_runs.create_run("goal", assignee_agent_id="antigravity_ai_agent")
+    await dev_runs.process_run(run["id"], max_iterations=1)
+    logs = database.get_decision_logs(limit=10)
+    matching = [l for l in logs if l.get("agent_id") == "antigravity_ai_agent"]
+    assert len(matching) == 1
+    assert matching[0]["cost_usd"] > 0

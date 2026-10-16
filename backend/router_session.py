@@ -8,12 +8,27 @@ and keeps a cached, auto-refreshing login session so the backend can read
 that data without a human re-logging in on every request.
 
 Confirmed against a live instance before building this: GET /api/combos and
-GET /api/providers return 200 with a valid session cookie. GET /api/quota,
-GET /api/usage, and every plausible variant (/api/dashboard/*, /api/stats,
-/api/analytics/*, /api/usage/*, /api/quota/*) return 404 regardless of auth
-method — that data isn't retrievable via any API in this version, so this
-module doesn't attempt to proxy it; see GET /api/router/stats's dashboard_url
-for the one place it's actually visible (9Router's own UI).
+GET /api/providers return 200 with a valid session cookie.
+
+Re-confirmed against 9Router 0.5.59 (2026-09-02), because half of what this
+docstring used to claim had gone stale and a stale "that endpoint does not
+exist" is worse than no note at all:
+
+* GET /api/quota and GET /api/usage are still 404 on every variant tried
+  (/api/dashboard/*, /api/stats, /api/analytics/*, /api/usage/*, /api/quota/*),
+  so per-account quota really is only visible in 9Router's own UI — see GET
+  /api/router/stats's dashboard_url.
+* GET /api/models, GET /api/pricing, GET /api/settings and GET
+  /api/provider-nodes *do* answer now. /api/models is the interesting one: it
+  is the full catalogue, including providers that are not connected yet, with
+  capabilities and aliases per model — strictly more than the Bearer-key
+  /v1/models, which only lists what a connected, *active* account can actually
+  serve. Both matter, for different questions: /v1/models answers "what can I
+  route right now", /api/models answers "what would connecting this account
+  give me".
+* /api/pricing turned out to be far narrower than its name suggests — two
+  providers on this instance, neither of them one we route to — so it is not a
+  usable price source and cost.py keeps its own table.
 
 Credential handling mirrors provider_governance.py's proposal/approve shape:
 the password is never written to the SQL DB, only to Valkey (internal-only),

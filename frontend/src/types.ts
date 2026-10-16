@@ -69,38 +69,33 @@ export interface SystemConfig {
   memory_auto_save?: boolean;
   memory_max_items?: number;
   telegram_reply_mode?: 'text' | 'voice' | 'both' | string;
-  provider?: 'ollama' | 'openrouter' | 'openai_compatible' | string;
+  provider?: 'llamacpp' | 'openrouter' | 'openai_compatible' | string;
   api_base?: string;
-  ollama_base_url?: string;
+  local_base_url?: string;
   openai_api_base?: string;
-  ollama_num_ctx?: number;
-  ollama_keep_alive?: string | number;
-  ollama_think?: boolean | 'low' | 'medium' | 'high' | string;
+  /** Context the llama.cpp server runs with (read from its /props at startup). */
+  local_num_ctx?: number;
+  local_think?: boolean | 'low' | 'medium' | 'xhigh' | string;
 }
 
-export interface OllamaModel {
-  name: string;
-  model?: string;
-  size?: number;
-  digest?: string;
-  modified_at?: string;
-  size_vram?: number;
-  context_length?: number;
-  expires_at?: string;
-  details?: {
-    family?: string;
-    parameter_size?: string;
-    quantization_level?: string;
-    format?: string;
-  };
-}
-
-export interface OllamaStatus {
+/** GET /api/llm/status — the local llama.cpp server as the dashboard shows it. */
+export interface LocalLlmStatus {
   available: boolean;
   base_url: string;
-  version?: string;
-  models_count?: number;
-  running_count?: number;
+  /** "ok", "loading" (model still loading) or "unavailable". */
+  health?: string;
+  model?: string | null;
+  models?: string[];
+  model_size?: number;
+  model_params?: number;
+  n_ctx?: number;
+  n_ctx_train?: number;
+  total_slots?: number;
+  model_path?: string;
+  build?: string;
+  vision?: boolean | null;
+  active_model?: string;
+  local_num_ctx?: number;
   error?: string;
   code?: string;
 }
@@ -243,6 +238,11 @@ export interface MessengerBinding {
    * whether to talk to the AI now or wait for the owner, instead of silently
    * queuing (draft mode) or auto-replying (auto_labeled). See ConversationState. */
   handling_menu_enabled?: boolean;
+  /** Per-channel model. `model_provider_override` is a provider_bindings id,
+   *  'local' for the local model, or null/'' to use the agent's own provider;
+   *  `model_override` is the model name inside that provider. */
+  model_override?: string | null;
+  model_provider_override?: string | null;
   last_error?: string | null;
   /** The id the provider itself uses for this account (VK community id,
    * Facebook page id, Instagram business id, WhatsApp phone number id). Only
@@ -344,7 +344,7 @@ export interface PendingChannelReply {
 }
 
 // An external LLM provider an agent can be bound to (agent.model_provider references
-// its `id`, or the literal "ollama" for the always-available local model). The API key
+// its `id`, or the literal "local" for the always-available local model). The API key
 // itself is never returned by the backend — see backend/provider_governance.py.
 export interface ProviderBinding {
   id: string;
@@ -359,6 +359,8 @@ export interface ProviderBinding {
   // means cost.py falls back to its model-name-substring pricing guess.
   cost_per_1m_input?: number | null;
   cost_per_1m_output?: number | null;
+  /** Model a caller of this endpoint gets when it names none. */
+  default_model?: string | null;
 }
 
 // Read-only reachability/catalog snapshot from the optional 9Router sidecar

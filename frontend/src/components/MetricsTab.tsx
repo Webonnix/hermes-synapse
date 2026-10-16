@@ -75,7 +75,7 @@ export function MetricsTab({
           onClick={onRefresh}
           className="button-glow-cyan"
           style={{
-            background: 'rgba(0, 240, 255, 0.1)',
+            background: 'rgba(94, 225, 255, 0.1)',
             border: '1px solid var(--accent-cyan)',
             color: '#fff',
             padding: '8px 16px',
@@ -100,54 +100,54 @@ export function MetricsTab({
         {/* Card 1: Total Calls */}
         <div className="glass-panel" style={{ padding: '20px', display: 'flex', flexDirection: 'column', position: 'relative' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-            <span style={{ color: '#8a99ad', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Total Runs</span>
+            <span style={{ color: '#9098a7', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Total Runs</span>
             <BarChart3 size={20} color="var(--accent-cyan)" />
           </div>
-          <span style={{ fontSize: '28px', fontWeight: 'bold', color: '#fff', textShadow: '0 0 10px rgba(0, 240, 255, 0.3)' }}>
+          <span style={{ fontSize: '28px', fontWeight: 'bold', color: '#fff', textShadow: '0 0 10px rgba(94, 225, 255, 0.15)' }}>
             {data.summary.total_calls}
           </span>
-          <span style={{ fontSize: '11px', color: '#5f6e80', marginTop: '5px' }}>Total triggered agent completions</span>
+          <span style={{ fontSize: '11px', color: '#656d7b', marginTop: '5px' }}>Total triggered agent completions</span>
         </div>
 
         {/* Card 2: Success Rate */}
         <div className="glass-panel" style={{ padding: '20px', display: 'flex', flexDirection: 'column' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-            <span style={{ color: '#8a99ad', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Success Rate</span>
-            <CheckCircle2 size={20} color={data.summary.success_rate >= 90 ? '#10b981' : '#f59e0b'} />
+            <span style={{ color: '#9098a7', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Success Rate</span>
+            <CheckCircle2 size={20} color={data.summary.success_rate >= 90 ? '#35d49a' : '#f6b84a'} />
           </div>
           <span style={{ 
             fontSize: '28px', 
             fontWeight: 'bold', 
-            color: data.summary.success_rate >= 90 ? '#10b981' : '#f59e0b',
-            textShadow: `0 0 10px ${data.summary.success_rate >= 90 ? 'rgba(16, 185, 129, 0.3)' : 'rgba(245, 158, 11, 0.3)'}`
+            color: data.summary.success_rate >= 90 ? '#35d49a' : '#f6b84a',
+            textShadow: `0 0 10px ${data.summary.success_rate >= 90 ? 'rgba(53, 212, 154, 0.3)' : 'rgba(246, 184, 74, 0.3)'}`
           }}>
             {data.summary.success_rate.toFixed(1)}%
           </span>
-          <span style={{ fontSize: '11px', color: '#5f6e80', marginTop: '5px' }}>Errors: {((100 - data.summary.success_rate) * data.summary.total_calls / 100).toFixed(0)} runs</span>
+          <span style={{ fontSize: '11px', color: '#656d7b', marginTop: '5px' }}>Errors: {((100 - data.summary.success_rate) * data.summary.total_calls / 100).toFixed(0)} runs</span>
         </div>
 
         {/* Card 3: Avg Latency */}
         <div className="glass-panel" style={{ padding: '20px', display: 'flex', flexDirection: 'column' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-            <span style={{ color: '#8a99ad', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Avg Latency</span>
+            <span style={{ color: '#9098a7', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Avg Latency</span>
             <Clock size={20} color="var(--accent-purple)" />
           </div>
-          <span style={{ fontSize: '28px', fontWeight: 'bold', color: '#fff', textShadow: '0 0 10px rgba(139, 92, 246, 0.3)' }}>
+          <span style={{ fontSize: '28px', fontWeight: 'bold', color: '#fff', textShadow: '0 0 10px rgba(124, 92, 252, 0.15)' }}>
             {data.summary.avg_latency_ms.toLocaleString()} ms
           </span>
-          <span style={{ fontSize: '11px', color: '#5f6e80', marginTop: '5px' }}>Average response latency</span>
+          <span style={{ fontSize: '11px', color: '#656d7b', marginTop: '5px' }}>Average response latency</span>
         </div>
 
         {/* Card 4: Total Cost */}
         <div className="glass-panel" style={{ padding: '20px', display: 'flex', flexDirection: 'column' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-            <span style={{ color: '#8a99ad', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Accrued Cost</span>
-            <Coins size={20} color="#f59e0b" />
+            <span style={{ color: '#9098a7', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>Accrued Cost</span>
+            <Coins size={20} color="#f6b84a" />
           </div>
-          <span style={{ fontSize: '28px', fontWeight: 'bold', color: '#f59e0b', textShadow: '0 0 10px rgba(245, 158, 11, 0.3)' }}>
+          <span style={{ fontSize: '28px', fontWeight: 'bold', color: '#f6b84a', textShadow: '0 0 10px rgba(246, 184, 74, 0.15)' }}>
             ${data.summary.total_cost_usd.toFixed(4)}
           </span>
-          <span style={{ fontSize: '11px', color: '#5f6e80', marginTop: '5px' }}>Total estimated API consumption</span>
+          <span style={{ fontSize: '11px', color: '#656d7b', marginTop: '5px' }}>Total estimated API consumption</span>
         </div>
       </div>
 
@@ -159,25 +159,25 @@ export function MetricsTab({
       }} className="metrics-grid-layout">
         {/* Agent Leaderboard */}
         <div className="glass-panel" style={{ padding: '20px', overflowX: 'auto' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '20px', borderBottom: '1px solid rgba(0, 240, 255, 0.1)', paddingBottom: '10px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '20px', borderBottom: '1px solid rgba(157, 166, 181, 0.07)', paddingBottom: '10px' }}>
             <Cpu size={18} color="var(--accent-cyan)" />
             <h3 style={{ margin: 0, fontSize: '16px', color: '#fff', fontWeight: 'bold', letterSpacing: '0.5px' }}>AGENT EFFICIENCY LEADERBOARD</h3>
           </div>
 
-          <table style={{ width: '100%', borderCollapse: 'collapse', color: '#cbd5e1', fontSize: '13px' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', color: '#cfd4dd', fontSize: '13px' }}>
             <thead>
               <tr style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.08)', textAlign: 'left' }}>
-                <th style={{ padding: '10px 5px', color: '#8a99ad', fontWeight: '500' }}>Agent ID</th>
-                <th style={{ padding: '10px 5px', color: '#8a99ad', fontWeight: '500' }}>Runs</th>
-                <th style={{ padding: '10px 5px', color: '#8a99ad', fontWeight: '500' }}>Success Rate</th>
-                <th style={{ padding: '10px 5px', color: '#8a99ad', fontWeight: '500' }}>Avg Latency</th>
-                <th style={{ padding: '10px 5px', color: '#8a99ad', fontWeight: '500' }}>Cost (USD)</th>
+                <th style={{ padding: '10px 5px', color: '#9098a7', fontWeight: '500' }}>Agent ID</th>
+                <th style={{ padding: '10px 5px', color: '#9098a7', fontWeight: '500' }}>Runs</th>
+                <th style={{ padding: '10px 5px', color: '#9098a7', fontWeight: '500' }}>Success Rate</th>
+                <th style={{ padding: '10px 5px', color: '#9098a7', fontWeight: '500' }}>Avg Latency</th>
+                <th style={{ padding: '10px 5px', color: '#9098a7', fontWeight: '500' }}>Cost (USD)</th>
               </tr>
             </thead>
             <tbody>
               {data.by_agent.length === 0 ? (
                 <tr>
-                  <td colSpan={5} style={{ textAlign: 'center', padding: '30px', color: '#5f6e80' }}>No agent logs indexed yet.</td>
+                  <td colSpan={5} style={{ textAlign: 'center', padding: '30px', color: '#656d7b' }}>No agent logs indexed yet.</td>
                 </tr>
               ) : (
                 data.by_agent.map((agent) => (
@@ -187,7 +187,7 @@ export function MetricsTab({
                     <td style={{ padding: '12px 5px' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                         <span style={{
-                          color: agent.success_rate >= 90 ? '#10b981' : agent.success_rate >= 75 ? '#f59e0b' : '#ef4444',
+                          color: agent.success_rate >= 90 ? '#35d49a' : agent.success_rate >= 75 ? '#f6b84a' : '#f05d75',
                           fontWeight: 'bold',
                           minWidth: '45px'
                         }}>
@@ -197,14 +197,14 @@ export function MetricsTab({
                           <div style={{
                             width: `${agent.success_rate}%`,
                             height: '100%',
-                            backgroundColor: agent.success_rate >= 90 ? '#10b981' : agent.success_rate >= 75 ? '#f59e0b' : '#ef4444',
+                            backgroundColor: agent.success_rate >= 90 ? '#35d49a' : agent.success_rate >= 75 ? '#f6b84a' : '#f05d75',
                             borderRadius: '3px'
                           }} />
                         </div>
                       </div>
                     </td>
                     <td style={{ padding: '12px 5px' }}>{agent.avg_latency_ms.toFixed(0)} ms</td>
-                    <td style={{ padding: '12px 5px', color: '#f59e0b', fontWeight: '500' }}>${agent.total_cost_usd.toFixed(5)}</td>
+                    <td style={{ padding: '12px 5px', color: '#f6b84a', fontWeight: '500' }}>${agent.total_cost_usd.toFixed(5)}</td>
                   </tr>
                 ))
               )}
@@ -214,25 +214,25 @@ export function MetricsTab({
 
         {/* Model Resource Consumption */}
         <div className="glass-panel" style={{ padding: '20px', overflowX: 'auto' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '20px', borderBottom: '1px solid rgba(0, 240, 255, 0.1)', paddingBottom: '10px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '20px', borderBottom: '1px solid rgba(157, 166, 181, 0.07)', paddingBottom: '10px' }}>
             <Database size={18} color="var(--accent-purple)" />
             <h3 style={{ margin: 0, fontSize: '16px', color: '#fff', fontWeight: 'bold', letterSpacing: '0.5px' }}>MODEL PERFORMANCE & TOKENS</h3>
           </div>
 
-          <table style={{ width: '100%', borderCollapse: 'collapse', color: '#cbd5e1', fontSize: '13px' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', color: '#cfd4dd', fontSize: '13px' }}>
             <thead>
               <tr style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.08)', textAlign: 'left' }}>
-                <th style={{ padding: '10px 5px', color: '#8a99ad', fontWeight: '500' }}>Model Name</th>
-                <th style={{ padding: '10px 5px', color: '#8a99ad', fontWeight: '500' }}>Runs</th>
-                <th style={{ padding: '10px 5px', color: '#8a99ad', fontWeight: '500' }}>Success Rate</th>
-                <th style={{ padding: '10px 5px', color: '#8a99ad', fontWeight: '500' }}>Tokens</th>
-                <th style={{ padding: '10px 5px', color: '#8a99ad', fontWeight: '500' }}>Cost (USD)</th>
+                <th style={{ padding: '10px 5px', color: '#9098a7', fontWeight: '500' }}>Model Name</th>
+                <th style={{ padding: '10px 5px', color: '#9098a7', fontWeight: '500' }}>Runs</th>
+                <th style={{ padding: '10px 5px', color: '#9098a7', fontWeight: '500' }}>Success Rate</th>
+                <th style={{ padding: '10px 5px', color: '#9098a7', fontWeight: '500' }}>Tokens</th>
+                <th style={{ padding: '10px 5px', color: '#9098a7', fontWeight: '500' }}>Cost (USD)</th>
               </tr>
             </thead>
             <tbody>
               {data.by_model.length === 0 ? (
                 <tr>
-                  <td colSpan={5} style={{ textAlign: 'center', padding: '30px', color: '#5f6e80' }}>No model logs indexed yet.</td>
+                  <td colSpan={5} style={{ textAlign: 'center', padding: '30px', color: '#656d7b' }}>No model logs indexed yet.</td>
                 </tr>
               ) : (
                 data.by_model.map((model) => {
@@ -245,14 +245,14 @@ export function MetricsTab({
                       <td style={{ padding: '12px 5px' }}>{model.total_calls}</td>
                       <td style={{ padding: '12px 5px' }}>
                         <span style={{
-                          color: model.success_rate >= 90 ? '#10b981' : model.success_rate >= 75 ? '#f59e0b' : '#ef4444',
+                          color: model.success_rate >= 90 ? '#35d49a' : model.success_rate >= 75 ? '#f6b84a' : '#f05d75',
                           fontWeight: 'bold'
                         }}>
                           {model.success_rate.toFixed(0)}%
                         </span>
                       </td>
                       <td style={{ padding: '12px 5px' }}>{model.total_tokens.toLocaleString()}</td>
-                      <td style={{ padding: '12px 5px', color: '#f59e0b', fontWeight: '500' }}>${model.total_cost_usd.toFixed(5)}</td>
+                      <td style={{ padding: '12px 5px', color: '#f6b84a', fontWeight: '500' }}>${model.total_cost_usd.toFixed(5)}</td>
                     </tr>
                   );
                 })

@@ -194,6 +194,7 @@ class WebhookChannelManager:
             display_name=display_name,
             overrides=state.get("overrides"),
             response_mode=state.get("response_mode", "draft"),
+            event_id=message_id,
         )
 
 

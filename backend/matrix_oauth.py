@@ -50,6 +50,18 @@ _HTTP_TIMEOUT = 15.0
 REFRESH_MARGIN_SECONDS = 60
 
 
+class MatrixTransientError(Exception):
+    """The homeserver could not be asked at all — network error, timeout, 429 or
+    a 5xx. Says nothing about whether the credential is still good, so callers
+    must retry later instead of declaring the binding dead. Treating these as
+    fatal is what turned every short matrix.senla.eu hiccup into a channel that
+    stayed «Ошибка» until someone reconnected it by hand."""
+
+
+def _is_transient_status(status_code: int) -> bool:
+    return status_code == 429 or status_code >= 500
+
+
 def _new_device_id() -> str:
     """Element-style 10-char device id — MAS scopes the grant to exactly this one."""
     return "".join(random.choices(string.ascii_uppercase, k=10))
@@ -269,11 +281,16 @@ def poll_device_login(flow_id: str) -> Optional[dict[str, Any]]:
 
 
 def whoami(homeserver_url: str, access_token: str) -> str:
-    with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
-        response = client.get(
-            f"{homeserver_url.rstrip('/')}/_matrix/client/v3/account/whoami",
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
+    try:
+        with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
+            response = client.get(
+                f"{homeserver_url.rstrip('/')}/_matrix/client/v3/account/whoami",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+    except httpx.TransportError as exc:
+        raise MatrixTransientError(f"Matrix недоступен: {exc}") from exc
+    if _is_transient_status(response.status_code):
+        raise MatrixTransientError(f"Matrix временно недоступен ({response.status_code})")
     if response.status_code != 200:
         raise ValueError(f"Matrix отклонил токен доступа: {response.text[:200]}")
     return response.json()["user_id"]
@@ -330,26 +347,34 @@ def refresh_credentials(credentials: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("У этого подключения нет refresh_token")
 
     updated = dict(credentials)
-    if credentials.get("auth_kind") == "oauth":
-        token_endpoint = credentials.get("token_endpoint")
-        client_id = credentials.get("oauth_client_id")
-        if not token_endpoint or not client_id:
-            raise ValueError("OAuth-подключение без token_endpoint/client_id")
-        with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
-            response = client.post(
-                token_endpoint,
-                data={"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": client_id},
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-    else:
-        homeserver_url = credentials.get("homeserver_url", "")
-        if not homeserver_url:
-            raise ValueError("Подключение без homeserver_url")
-        with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
-            response = client.post(
-                f"{homeserver_url.rstrip('/')}/_matrix/client/v3/refresh",
-                json={"refresh_token": refresh_token},
-            )
+    try:
+        if credentials.get("auth_kind") == "oauth":
+            token_endpoint = credentials.get("token_endpoint")
+            client_id = credentials.get("oauth_client_id")
+            if not token_endpoint or not client_id:
+                raise ValueError("OAuth-подключение без token_endpoint/client_id")
+            with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
+                response = client.post(
+                    token_endpoint,
+                    data={"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": client_id},
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+        else:
+            homeserver_url = credentials.get("homeserver_url", "")
+            if not homeserver_url:
+                raise ValueError("Подключение без homeserver_url")
+            with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
+                response = client.post(
+                    f"{homeserver_url.rstrip('/')}/_matrix/client/v3/refresh",
+                    json={"refresh_token": refresh_token},
+                )
+    except httpx.TransportError as exc:
+        # Careful: the request may still have reached the server and rotated the
+        # refresh token. Nothing to be done about that from here — but it is not
+        # evidence the session is dead, so do not report it as such.
+        raise MatrixTransientError(f"Сервер обновления токена недоступен: {exc}") from exc
+    if _is_transient_status(response.status_code):
+        raise MatrixTransientError(f"Сервер обновления токена временно недоступен ({response.status_code})")
     if response.status_code != 200:
         raise ValueError(f"Обновление токена отклонено ({response.status_code}): {response.text[:200]}")
 

@@ -86,10 +86,10 @@ def test_tier_with_allow_messenger_true_permits_proposal(messenger_db):
 def test_the_main_agent_cannot_be_bound_to_a_messenger(messenger_db):
     """Vexa answers to the owner only — a binding would hand a channel anyone
     can message straight to the agent that still holds the server tools."""
-    database.save_subagent(id="jarvis", name="Vexa (Main)", system_prompt="", model="llama3")
+    database.save_subagent(id="vexa", name="Vexa (Main)", system_prompt="", model="llama3")
     with pytest.raises(ValueError, match="main agent"):
         agent_messenger_governance.create_telegram_binding_proposal(
-            "jarvis", "123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "vexa", "123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         )
 
 
@@ -188,3 +188,158 @@ async def test_escalation_enabled_defaults_off_and_is_settable(messenger_db):
 
     updated = await agent_messenger_governance.update_binding_settings(proposal["id"], escalation_enabled=False)
     assert updated["escalation_enabled"] is False
+
+
+# ── Per-channel model ────────────────────────────────────────────────────────
+# Every bot runtime in this module has always read model_override /
+# model_provider_override when it starts a binding, but only creation could set
+# them and the connect form never did — so a channel was pinned to its agent's
+# model for life. These cover the edit path that closes that gap, and the one
+# rule it has to enforce: a channel must not be able to point at a provider the
+# owner has not approved (or has revoked).
+
+@pytest.mark.asyncio
+async def test_channel_model_can_be_changed_after_creation(messenger_db):
+    proposal = agent_messenger_governance.create_telegram_binding_proposal(
+        "agent-1", "123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    )
+    updated = await agent_messenger_governance.update_binding_settings(
+        proposal["id"], model_override="ag/gemini-3.7-flash-high", model_provider_override="local",
+    )
+    assert updated["model_override"] == "ag/gemini-3.7-flash-high"
+    assert updated["model_provider_override"] == "local"
+
+
+@pytest.mark.asyncio
+async def test_clearing_the_channel_model_returns_it_to_the_agent(messenger_db):
+    proposal = agent_messenger_governance.create_telegram_binding_proposal(
+        "agent-1", "123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    )
+    await agent_messenger_governance.update_binding_settings(
+        proposal["id"], model_override="m", model_provider_override="local",
+    )
+    cleared = await agent_messenger_governance.update_binding_settings(
+        proposal["id"], model_override="", model_provider_override="",
+    )
+    assert cleared["model_override"] is None
+    assert cleared["model_provider_override"] is None
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_provider_binding_is_refused(messenger_db):
+    proposal = agent_messenger_governance.create_telegram_binding_proposal(
+        "agent-1", "123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    )
+    with pytest.raises(ValueError):
+        await agent_messenger_governance.update_binding_settings(
+            proposal["id"], model_provider_override="prov-does-not-exist",
+        )
+
+
+@pytest.mark.asyncio
+async def test_an_inactive_provider_binding_is_refused(messenger_db, monkeypatch):
+    monkeypatch.setattr(
+        "backend.provider_governance.get_binding",
+        lambda binding_id: {"id": binding_id, "status": "revoked"},
+    )
+    proposal = agent_messenger_governance.create_telegram_binding_proposal(
+        "agent-1", "123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    )
+    with pytest.raises(ValueError):
+        await agent_messenger_governance.update_binding_settings(
+            proposal["id"], model_provider_override="prov-revoked",
+        )
+
+
+@pytest.mark.asyncio
+async def test_an_active_provider_binding_is_accepted(messenger_db, monkeypatch):
+    monkeypatch.setattr(
+        "backend.provider_governance.get_binding",
+        lambda binding_id: {"id": binding_id, "status": "active"},
+    )
+    proposal = agent_messenger_governance.create_telegram_binding_proposal(
+        "agent-1", "123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    )
+    updated = await agent_messenger_governance.update_binding_settings(
+        proposal["id"], model_provider_override="prov-9router", model_override="ag/gemini-pro-agent",
+    )
+    assert updated["model_provider_override"] == "prov-9router"
+    assert updated["model_override"] == "ag/gemini-pro-agent"
+
+
+# ── Matrix health check: outages must not fail a binding ──────────────────────
+
+def _matrix_binding_row(status="active"):
+    return {
+        "id": "mxbind-1", "platform": "matrix", "status": status, "subagent_id": "devops",
+        "allowed_chat_ids": [], "response_mode": "draft", "human_takeover_pause_minutes": 15,
+    }
+
+
+class _FakeMatrixManager:
+    def __init__(self, running, health=None, start_exc=None):
+        self.running = running
+        self.health = health
+        self.start_exc = start_exc
+        self.stopped = []
+        self.started = []
+
+    def is_running(self, binding_id):
+        return self.running
+
+    async def check_health(self, binding_id):
+        return self.health
+
+    async def stop(self, binding_id):
+        self.stopped.append(binding_id)
+
+    async def start(self, binding_id, *args, **kwargs):
+        if self.start_exc:
+            raise self.start_exc
+        self.started.append(binding_id)
+
+    def set_human_takeover_pause(self, binding_id, minutes):
+        pass
+
+
+def _run_matrix_health_check(monkeypatch, fake_manager):
+    import asyncio
+
+    from backend import agent_matrix_bot, agent_messenger_governance as gov
+
+    failed = []
+    monkeypatch.setattr(agent_matrix_bot, "manager", fake_manager)
+    monkeypatch.setattr(gov, "mark_binding_failed", lambda binding_id, reason: failed.append(binding_id))
+    monkeypatch.setattr(gov, "resolve_matrix_binding_credentials", lambda binding_id: {"access_token": "mat_x"})
+    monkeypatch.setattr("backend.channel_activity.record", lambda *a, **k: None)
+    asyncio.run(gov._health_check_matrix_binding(_matrix_binding_row()))
+    return failed
+
+
+def test_matrix_health_check_ignores_a_transient_outage(monkeypatch):
+    from backend import agent_matrix_bot
+
+    fake = _FakeMatrixManager(running=True, health=agent_matrix_bot.RENEW_TRANSIENT)
+    assert _run_matrix_health_check(monkeypatch, fake) == []
+    assert fake.stopped == []
+
+
+def test_matrix_health_check_fails_a_revoked_session(monkeypatch):
+    from backend import agent_matrix_bot
+
+    fake = _FakeMatrixManager(running=True, health=agent_matrix_bot.RENEW_REVOKED)
+    assert _run_matrix_health_check(monkeypatch, fake) == ["mxbind-1"]
+    assert fake.stopped == ["mxbind-1"]
+
+
+def test_matrix_health_check_restarts_an_active_binding_that_is_not_running(monkeypatch):
+    fake = _FakeMatrixManager(running=False)
+    assert _run_matrix_health_check(monkeypatch, fake) == []
+    assert fake.started == ["mxbind-1"]
+
+
+def test_matrix_health_check_postponed_start_is_not_a_failure(monkeypatch):
+    from backend.matrix_oauth import MatrixTransientError
+
+    fake = _FakeMatrixManager(running=False, start_exc=MatrixTransientError("down"))
+    assert _run_matrix_health_check(monkeypatch, fake) == []

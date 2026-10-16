@@ -11,7 +11,7 @@ interface ApiKeyEntry {
 }
 
 function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem('jarvis_auth_token');
+  const token = localStorage.getItem('vexa_auth_token');
   return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
 }
 
@@ -71,7 +71,7 @@ function KeyRow({ entry, onSaved }: { entry: ApiKeyEntry; onSaved: () => void })
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
         <div>
           <strong style={{ fontSize: '0.92rem' }}>{entry.label}</strong>
-          <span style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-dim, #8a94a6)', marginTop: '2px' }}>
+          <span style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-dim, #8c94a3)', marginTop: '2px' }}>
             {entry.description}
           </span>
         </div>
@@ -98,7 +98,7 @@ function KeyRow({ entry, onSaved }: { entry: ApiKeyEntry; onSaved: () => void })
           </button>
         )}
       </div>
-      {error && <span style={{ color: '#ef4444', fontSize: '0.8rem' }}>⚠️ {error}</span>}
+      {error && <span style={{ color: '#f05d75', fontSize: '0.8rem' }}>⚠️ {error}</span>}
     </div>
   );
 }
@@ -129,11 +129,11 @@ export function ApiKeysTab() {
       </div>
 
       {loading ? (
-        <p style={{ color: 'var(--text-dim, #8a94a6)' }}>Загрузка...</p>
+        <p style={{ color: 'var(--text-dim, #8c94a3)' }}>Загрузка...</p>
       ) : (
         categories.map(category => (
           <div key={category} style={{ marginBottom: '20px' }}>
-            <h3 style={{ fontSize: '0.85rem', letterSpacing: '0.05em', textTransform: 'uppercase', color: 'var(--text-dim, #8a94a6)', margin: '0 0 10px' }}>
+            <h3 style={{ fontSize: '0.85rem', letterSpacing: '0.05em', textTransform: 'uppercase', color: 'var(--text-dim, #8c94a3)', margin: '0 0 10px' }}>
               {category}
             </h3>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>

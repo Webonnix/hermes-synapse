@@ -1,17 +1,22 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Bot, Check, ChevronDown, ChevronUp, Copy, Eraser, Hand, MessageCircle, MessageSquare, Plus, Power, PowerOff, RefreshCw, Send, Trash2, Users, X } from 'lucide-react';
 import { styles } from '../styles';
-import type { AccessPlan, AgentModel, ChannelActivityEvent, ConversationMessage, ConversationState, MessengerBinding, PendingChannelReply, SocialPlatformSpec, SocialWebhookDetails } from '../types';
+import type { AccessPlan, AgentModel, ChannelActivityEvent, ConversationMessage, ConversationState, MessengerBinding, PendingChannelReply, ProviderBinding, SocialPlatformSpec, SocialWebhookDetails } from '../types';
 import {
   ACCESS_MODE_LABELS, CREDENTIAL_FIELDS, HANDLING_MODE_LABELS, PLATFORM_LABELS, RESPONSE_MODE_LABELS,
   STATUS_LABELS, authHeaders, isSocialPlatform,
   type AccessMode, type Platform, type ResponseMode,
 } from './smm/platforms';
 
-const field = (label: string, child: ReactNode) => (
+const field = (label: string, child: ReactNode, hint?: string) => (
   <label style={{ display: 'flex', flexDirection: 'column', gap: 6, color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 600 }}>
     {label}
     {child}
+    {hint && (
+      <span style={{ fontSize: '0.74rem', fontWeight: 400, color: 'var(--text-dim, #8c94a3)', lineHeight: 1.5 }}>
+        {hint}
+      </span>
+    )}
   </label>
 );
 
@@ -59,13 +64,13 @@ function AccessModePicker({ value, onChange }: { value: AccessMode; onChange: (m
       {(['owner_only', 'token'] as AccessMode[]).map(mode => (
         <label key={mode} style={{
           display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 12px', borderRadius: 8,
-          border: `1px solid ${value === mode ? 'rgba(77,222,180,.4)' : 'rgba(255,255,255,.09)'}`,
-          background: value === mode ? 'rgba(46,179,139,.08)' : 'rgba(255,255,255,.02)', cursor: 'pointer',
+          border: `1px solid ${value === mode ? 'rgba(53,212,154,.4)' : 'rgba(255,255,255,.09)'}`,
+          background: value === mode ? 'rgba(53,212,154,.08)' : 'rgba(255,255,255,.02)', cursor: 'pointer',
         }}>
           <input type="radio" name="access_mode" checked={value === mode} onChange={() => onChange(mode)} style={{ marginTop: 3 }} />
           <span>
             <strong style={{ display: 'block', fontSize: '0.83rem' }}>{ACCESS_MODE_LABELS[mode]}</strong>
-            <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-dim, #8a94a6)', marginTop: 2 }}>
+            <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-dim, #8c94a3)', marginTop: 2 }}>
               {mode === 'owner_only'
                 ? 'Бот отвечает только чатам из белого списка. Все остальные сообщения игнорируются.'
                 : 'Бот отвечает любому, кто пришлёт действующий токен из раздела «Доступ к ботам». Каждому токену заводится своя учётка, лимиты и учёт расхода; режим ответа переключается на автоответ с пометкой.'}
@@ -97,13 +102,13 @@ function ResponseModePicker({ value, onChange }: { value: ResponseMode; onChange
       {(['draft', 'auto_labeled'] as ResponseMode[]).map(mode => (
         <label key={mode} style={{
           display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 12px', borderRadius: 8,
-          border: `1px solid ${value === mode ? 'rgba(77,222,180,.4)' : 'rgba(255,255,255,.09)'}`,
-          background: value === mode ? 'rgba(46,179,139,.08)' : 'rgba(255,255,255,.02)', cursor: 'pointer',
+          border: `1px solid ${value === mode ? 'rgba(53,212,154,.4)' : 'rgba(255,255,255,.09)'}`,
+          background: value === mode ? 'rgba(53,212,154,.08)' : 'rgba(255,255,255,.02)', cursor: 'pointer',
         }}>
           <input type="radio" name="response_mode" checked={value === mode} onChange={() => onChange(mode)} style={{ marginTop: 3 }} />
           <span>
             <strong style={{ display: 'block', fontSize: '0.83rem' }}>{RESPONSE_MODE_LABELS[mode]}</strong>
-            <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-dim, #8a94a6)', marginTop: 2 }}>
+            <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-dim, #8c94a3)', marginTop: 2 }}>
               {mode === 'draft'
                 ? 'Ничего не уходит собеседнику автоматически — Vexa готовит ответ, вы проверяете и отправляете сами на вкладке «Черновики».'
                 : 'Отвечает сразу, но каждое сообщение помечено как ответ ассистента — собеседник всегда знает, что говорит не Альберт лично.'}
@@ -128,8 +133,18 @@ function MatrixDeviceLogin({ homeserverUrl, onComplete }: {
   const [status, setStatus] = useState<'idle' | 'waiting' | 'done'>('idle');
   const [userId, setUserId] = useState('');
   const [loginError, setLoginError] = useState('');
+  const [starting, setStarting] = useState(false);
+  // One poll at a time, and nothing after the login completed: the interval and
+  // the focus/visibility listeners used to fire overlapping polls, so the late
+  // one hit an already-redeemed device code, showed a bogus error and could
+  // trigger the reconnect twice.
+  const pollInFlight = useRef(false);
+  const completed = useRef(false);
 
   const start = async () => {
+    if (starting) return;
+    setStarting(true);
+    completed.current = false;
     setLoginError('');
     setUserId('');
     setStatus('idle');
@@ -144,19 +159,25 @@ function MatrixDeviceLogin({ homeserverUrl, onComplete }: {
       if (data.verification_uri_complete) window.open(data.verification_uri_complete, '_blank', 'noopener');
     } catch (err) {
       setLoginError(err instanceof Error ? err.message : 'Не удалось начать вход');
+    } finally {
+      setStarting(false);
     }
   };
 
   useEffect(() => {
     if (status !== 'waiting' || !flow) return;
     const poll = async () => {
+      if (pollInFlight.current || completed.current) return;
+      pollInFlight.current = true;
       try {
         const response = await fetch(`/api/matrix/device-login/${flow.flow_id}/poll`, {
           method: 'POST', headers: authHeaders(),
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || 'Вход не завершён');
+        if (completed.current) return;
         if (data.status === 'complete') {
+          completed.current = true;
           setStatus('done');
           setUserId(data.user_id);
           onComplete(flow.flow_id, data.user_id);
@@ -165,8 +186,11 @@ function MatrixDeviceLogin({ homeserverUrl, onComplete }: {
           setFlow(current => (current ? { ...current, ...data } : current));
         }
       } catch (err) {
+        if (completed.current) return;
         setStatus('idle');
         setLoginError(err instanceof Error ? err.message : 'Вход не завершён');
+      } finally {
+        pollInFlight.current = false;
       }
     };
     const interval = setInterval(poll, Math.max(3, flow.interval || 5) * 1000);
@@ -187,23 +211,23 @@ function MatrixDeviceLogin({ homeserverUrl, onComplete }: {
   return (
     <div style={{
       display: 'flex', flexDirection: 'column', gap: 8, padding: '12px', borderRadius: 8,
-      border: '1px solid rgba(77,222,180,.25)', background: 'rgba(46,179,139,.06)',
+      border: '1px solid rgba(53,212,154,.25)', background: 'rgba(53,212,154,.06)',
     }}>
       {status === 'done' ? (
-        <span style={{ fontSize: '0.82rem', color: 'var(--accent-green, #4ddeb4)' }}>
+        <span style={{ fontSize: '0.82rem', color: 'var(--accent-green, #35d49a)' }}>
           <Check size={13} style={{ verticalAlign: '-2px' }} /> Вход выполнен: {userId} — токен будет продлеваться автоматически.
         </span>
       ) : (
         <>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            <button type="button" className="btn-primary" onClick={start} disabled={!homeserverUrl}>
+            <button type="button" className="btn-primary" onClick={start} disabled={!homeserverUrl || starting || status === 'waiting'}>
               {status === 'waiting' ? 'Ожидаю подтверждения...' : 'Войти через браузер (рекомендуется)'}
             </button>
           </div>
           {status === 'waiting' && flow && (
             <div style={{
               display: 'flex', flexDirection: 'column', gap: 8, padding: '14px 16px', borderRadius: 10,
-              border: '1px solid rgba(77,222,180,.45)', background: 'rgba(46,179,139,.12)',
+              border: '1px solid rgba(53,212,154,.45)', background: 'rgba(53,212,154,.12)',
             }}>
               <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
                 Введите этот код на странице «Link a new device»:
@@ -219,19 +243,19 @@ function MatrixDeviceLogin({ homeserverUrl, onComplete }: {
                   открыть страницу подтверждения
                 </a>
               </div>
-              <span style={{ fontSize: '0.74rem', color: 'var(--text-dim, #8a94a6)' }}>
+              <span style={{ fontSize: '0.74rem', color: 'var(--text-dim, #8c94a3)' }}>
                 Код действует ещё ~{Math.max(0, Math.round((flow.expires_in || 0) / 60))} мин. Не закрывайте эту вкладку —
                 подключение завершится само, как только вы нажмёте Continue.
               </span>
             </div>
           )}
-          <span style={{ fontSize: '0.74rem', color: 'var(--text-dim, #8a94a6)' }}>
+          <span style={{ fontSize: '0.74rem', color: 'var(--text-dim, #8c94a3)' }}>
             Для серверов с Matrix Authentication Service (matrix.senla.eu, Element-хостинг) это единственный
             способ подключиться надолго: вставленный из Element access token там живёт минуты и канал постоянно отваливается.
           </span>
         </>
       )}
-      {loginError && <span style={{ fontSize: '0.78rem', color: '#ff6b81' }}>{loginError}</span>}
+      {loginError && <span style={{ fontSize: '0.78rem', color: '#f05d75' }}>{loginError}</span>}
     </div>
   );
 }
@@ -276,7 +300,14 @@ export function MessengerChannelsTab({ agents, view }: MessengerChannelsTabProps
   const [editPauseMinutes, setEditPauseMinutes] = useState(120);
   const [editEscalation, setEditEscalation] = useState(false);
   const [editHandlingMenu, setEditHandlingMenu] = useState(false);
+  const [editModel, setEditModel] = useState('');
+  const [editModelProvider, setEditModelProvider] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
+  /** Approved external provider bindings a channel can be pinned to, and the
+   *  model catalogue of whichever one is selected. Both are loaded once when a
+   *  channel is expanded — a channel that never gets opened costs neither. */
+  const [providerBindings, setProviderBindings] = useState<ProviderBinding[]>([]);
+  const [providerModels, setProviderModels] = useState<string[]>([]);
   /** Binding id currently mid enable/disable/delete, so its row can disable its own buttons. */
   const [busyBindingId, setBusyBindingId] = useState('');
 
@@ -608,6 +639,34 @@ export function MessengerChannelsTab({ agents, view }: MessengerChannelsTabProps
     setEditPauseMinutes(binding.human_takeover_pause_minutes ?? 120);
     setEditEscalation(Boolean(binding.escalation_enabled));
     setEditHandlingMenu(Boolean(binding.handling_menu_enabled));
+    setEditModel(binding.model_override || '');
+    setEditModelProvider(binding.model_provider_override || '');
+    void loadProviderChoices(binding.model_provider_override || '');
+  };
+
+  /** The provider list, and the models of the selected provider. `providerId`
+   *  empty or 'local' means the local model, which has no catalogue to fetch:
+   *  the field stays free text, same as it is for the agent itself. */
+  const loadProviderChoices = async (providerId: string) => {
+    try {
+      const response = await fetch('/api/providers', { headers: authHeaders() });
+      const bindings: ProviderBinding[] = response.ok ? await response.json() : [];
+      setProviderBindings(Array.isArray(bindings) ? bindings : []);
+    } catch {
+      setProviderBindings([]);
+    }
+    if (!providerId || providerId === 'local') {
+      setProviderModels([]);
+      return;
+    }
+    try {
+      const response = await fetch(`/api/providers/${encodeURIComponent(providerId)}/models`,
+        { headers: authHeaders() });
+      const body = response.ok ? await response.json() : { models: [] };
+      setProviderModels(Array.isArray(body.models) ? body.models : []);
+    } catch {
+      setProviderModels([]);
+    }
   };
 
   const saveEdit = async (binding: MessengerBinding) => {
@@ -623,6 +682,8 @@ export function MessengerChannelsTab({ agents, view }: MessengerChannelsTabProps
         ...(binding.platform === 'matrix' ? { human_takeover_pause_minutes: editPauseMinutes } : {}),
         escalation_enabled: editEscalation,
         handling_menu_enabled: editHandlingMenu,
+        model: editModel,
+        model_provider: editModelProvider,
       };
       if (editAccessMode === 'owner_only') {
         body.allowed_chat_ids = editOpenToEveryone
@@ -790,33 +851,35 @@ export function MessengerChannelsTab({ agents, view }: MessengerChannelsTabProps
         <div className="glass-panel" style={{ padding: '16px', marginBottom: '18px', display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <strong style={{ fontSize: '0.9rem' }}>Журнал сообщений (все каналы)</strong>
-            <span style={{ fontSize: '0.72rem', color: 'var(--text-dim, #8a94a6)' }}>Обновляется каждые 3 с · последние {activity.length} событий</span>
+            <span style={{ fontSize: '0.72rem', color: 'var(--text-dim, #8c94a3)' }}>Обновляется каждые 3 с · последние {activity.length} событий</span>
           </div>
-          <p style={{ fontSize: '0.74rem', color: 'var(--text-dim, #8a94a6)', margin: 0 }}>
+          <p style={{ fontSize: '0.74rem', color: 'var(--text-dim, #8c94a3)', margin: 0 }}>
             Показывает каждое входящее сообщение и что с ним сделал шлюз доступа: доставлено агенту, отвечено без LLM,
             проигнорировано или упало с ошибкой. Не сохраняется — сбрасывается при перезапуске сервера.
           </p>
           <div style={{ maxHeight: 360, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
             {activity.length === 0 ? (
-              <span style={{ fontSize: '0.8rem', color: 'var(--text-dim, #8a94a6)' }}>Пока ничего не приходило.</span>
+              <span style={{ fontSize: '0.8rem', color: 'var(--text-dim, #8c94a3)' }}>Пока ничего не приходило.</span>
             ) : (
               activity.map((event, i) => {
                 const binding = bindings.find(b => b.id === event.binding_id);
                 const kindMeta: Record<string, { label: string; color: string }> = {
-                  proceed: { label: 'доставлено агенту', color: '#4ddeb4' },
-                  reply: { label: 'ответ без LLM', color: '#63b3ed' },
-                  ignore: { label: 'проигнорировано', color: '#8a94a6' },
-                  invite: { label: 'приглашение', color: '#b794f4' },
-                  error: { label: 'ошибка', color: '#f76b6b' },
+                  proceed: { label: 'доставлено агенту', color: '#35d49a' },
+                  reply: { label: 'ответ без LLM', color: '#3b82f6' },
+                  ignore: { label: 'проигнорировано', color: '#8c94a3' },
+                  invite: { label: 'приглашение', color: '#b197ff' },
+                  error: { label: 'ошибка', color: '#f05d75' },
+                  warning: { label: 'предупреждение', color: '#f5a524' },
+                  info: { label: 'служебное', color: '#8c94a3' },
                 };
-                const meta = kindMeta[event.kind] || { label: event.kind, color: '#8a94a6' };
+                const meta = kindMeta[event.kind] || { label: event.kind, color: '#8c94a3' };
                 return (
                   <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: '0.78rem', padding: '6px 8px', borderRadius: 6, background: 'rgba(255,255,255,.02)' }}>
-                    <span style={{ color: 'var(--text-dim, #8a94a6)', whiteSpace: 'nowrap' }}>{new Date(event.ts * 1000).toLocaleTimeString()}</span>
+                    <span style={{ color: 'var(--text-dim, #8c94a3)', whiteSpace: 'nowrap' }}>{new Date(event.ts * 1000).toLocaleTimeString()}</span>
                     <span style={{ whiteSpace: 'nowrap' }}>{PLATFORM_LABELS[event.platform as Platform] || event.platform}</span>
-                    <span style={{ whiteSpace: 'nowrap', color: 'var(--text-dim, #8a94a6)' }}>{binding?.agent_name || event.binding_id}</span>
+                    <span style={{ whiteSpace: 'nowrap', color: 'var(--text-dim, #8c94a3)' }}>{binding?.agent_name || event.binding_id}</span>
                     <span style={{ whiteSpace: 'nowrap', color: meta.color, fontWeight: 600 }}>{meta.label}</span>
-                    <span style={{ color: 'var(--text-dim, #8a94a6)', whiteSpace: 'nowrap' }}>{event.sender || event.chat_id}</span>
+                    <span style={{ color: 'var(--text-dim, #8c94a3)', whiteSpace: 'nowrap' }}>{event.sender || event.chat_id}</span>
                     <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{event.detail}</span>
                   </div>
                 );
@@ -831,7 +894,7 @@ export function MessengerChannelsTab({ agents, view }: MessengerChannelsTabProps
           <strong style={{ fontSize: '0.9rem' }}>Черновики, ожидающие отправки ({replies.length})</strong>
           {replies.map(reply => (
             <div key={reply.id} style={{ padding: '12px', borderRadius: 8, border: '1px solid rgba(255,255,255,.08)', background: 'rgba(255,255,255,.02)', display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <span style={{ fontSize: '0.75rem', color: 'var(--text-dim, #8a94a6)' }}>
+              <span style={{ fontSize: '0.75rem', color: 'var(--text-dim, #8c94a3)' }}>
                 {PLATFORM_LABELS[reply.platform as Platform] || reply.platform} · от {reply.incoming_from || 'неизвестно'}
               </span>
               <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>«{reply.incoming_text}»</span>
@@ -854,7 +917,7 @@ export function MessengerChannelsTab({ agents, view }: MessengerChannelsTabProps
         </div>
       )}
       {view === 'drafts' && !repliesLoading && replies.length === 0 && (
-        <p style={{ color: 'var(--text-dim, #8a94a6)', fontSize: '0.8rem', marginBottom: '14px' }}>Черновиков на подтверждение сейчас нет.</p>
+        <p style={{ color: 'var(--text-dim, #8c94a3)', fontSize: '0.8rem', marginBottom: '14px' }}>Черновиков на подтверждение сейчас нет.</p>
       )}
 
       {view === 'connections' && showForm && (
@@ -1036,9 +1099,9 @@ export function MessengerChannelsTab({ agents, view }: MessengerChannelsTabProps
       {notice && <div className="glass-panel" style={{ padding: '10px 14px', marginBottom: '14px', color: 'var(--success)', fontSize: '0.85rem' }}>{notice}</div>}
 
       {view !== 'connections' ? null : loading ? (
-        <p style={{ color: 'var(--text-dim, #8a94a6)' }}>Загрузка...</p>
+        <p style={{ color: 'var(--text-dim, #8c94a3)' }}>Загрузка...</p>
       ) : bindings.length === 0 ? (
-        <p style={{ color: 'var(--text-dim, #8a94a6)' }}>Пока нет ни одного подключённого канала.</p>
+        <p style={{ color: 'var(--text-dim, #8c94a3)' }}>Пока нет ни одного подключённого канала.</p>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
           {bindings.map(binding => (
@@ -1048,11 +1111,11 @@ export function MessengerChannelsTab({ agents, view }: MessengerChannelsTabProps
                   <MessageCircle size={16} />
                   <div>
                     <strong style={{ fontSize: '0.9rem' }}>{binding.agent_name}</strong>
-                    <span style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-dim, #8a94a6)' }}>
+                    <span style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-dim, #8c94a3)' }}>
                       {PLATFORM_LABELS[binding.platform as Platform] || binding.platform} · {binding.bot_username} · {RESPONSE_MODE_LABELS[(binding.response_mode as ResponseMode) || 'draft']} · {ACCESS_MODE_LABELS[(binding.access_mode as AccessMode) || 'owner_only']}
                     </span>
                     {binding.status === 'failed' && binding.last_error && (
-                      <span style={{ display: 'block', fontSize: '0.74rem', color: '#f76b6b', marginTop: 2 }}>{binding.last_error}</span>
+                      <span style={{ display: 'block', fontSize: '0.74rem', color: '#f05d75', marginTop: 2 }}>{binding.last_error}</span>
                     )}
                   </div>
                 </div>
@@ -1116,7 +1179,7 @@ export function MessengerChannelsTab({ agents, view }: MessengerChannelsTabProps
 
               {reconnectingId === binding.id && (
                 <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,.07)', display: 'flex', flexDirection: 'column', gap: 10 }}>
-                  <span style={{ fontSize: '0.78rem', color: 'var(--text-dim, #8a94a6)' }}>
+                  <span style={{ fontSize: '0.78rem', color: 'var(--text-dim, #8c94a3)' }}>
                     Вставьте новые учётные данные для этого же канала — промпт, режим ответа и белый список останутся как есть.
                     Проверяются перед сохранением, как при первом подключении.
                   </span>
@@ -1248,7 +1311,7 @@ export function MessengerChannelsTab({ agents, view }: MessengerChannelsTabProps
                           ['ID аккаунта', details.account_id],
                         ] as [string, string][]).map(([label, value]) => (
                           <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.78rem' }}>
-                            <span style={{ color: 'var(--text-dim, #8a94a6)', minWidth: 110 }}>{label}</span>
+                            <span style={{ color: 'var(--text-dim, #8c94a3)', minWidth: 110 }}>{label}</span>
                             <code style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value || '—'}</code>
                             {value && (
                               <button type="button" className="icon-btn" title="Скопировать"
@@ -1259,7 +1322,7 @@ export function MessengerChannelsTab({ agents, view }: MessengerChannelsTabProps
                           </div>
                         ))}
                         {!details.base_url_configured && (
-                          <span style={{ fontSize: '0.75rem', color: '#f0b23c' }}>
+                          <span style={{ fontSize: '0.75rem', color: '#f6b84a' }}>
                             Публичный адрес не задан — укажите его в «SMM Factory → Настройки», иначе URL выше неполный.
                           </span>
                         )}
@@ -1271,12 +1334,42 @@ export function MessengerChannelsTab({ agents, view }: MessengerChannelsTabProps
                       placeholder="Пусто — использовать промпт агента как есть" />
                   ))}
                   <ResponseModePicker value={editMode} onChange={setEditMode} />
+                  {field('Модель этого канала', (
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                      <select className="form-input" style={{ flex: '1 1 180px' }} value={editModelProvider}
+                        onChange={e => {
+                          setEditModelProvider(e.target.value);
+                          // The model names of one provider mean nothing to
+                          // another, so a provider change clears the model
+                          // rather than carrying a now-invalid id across.
+                          setEditModel('');
+                          void loadProviderChoices(e.target.value);
+                        }}>
+                        <option value="">Как у агента</option>
+                        <option value="local">Локальная модель</option>
+                        {providerBindings.filter(p => p.status === 'active').map(p => (
+                          <option key={p.id} value={p.id}>{p.name}</option>
+                        ))}
+                      </select>
+                      {providerModels.length > 0 ? (
+                        <select className="form-input" style={{ flex: '1 1 200px' }} value={editModel}
+                          onChange={e => setEditModel(e.target.value)}>
+                          <option value="">Модель агента</option>
+                          {providerModels.map(model => <option key={model} value={model}>{model}</option>)}
+                        </select>
+                      ) : (
+                        <input className="form-input" style={{ flex: '1 1 200px' }} value={editModel}
+                          onChange={e => setEditModel(e.target.value)}
+                          placeholder="Пусто — модель агента" />
+                      )}
+                    </div>
+                  ), 'Канал может отвечать не той моделью, что агент по умолчанию: например, публичный канал — внешней Gemini через 9Router, а внутренний — локальной. Пусто в обоих полях = как у агента.')}
                   <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: '0.85rem', color: 'var(--text-muted)', cursor: 'pointer' }}>
                     <input type="checkbox" checked={editEscalation} style={{ marginTop: 3 }}
                       onChange={e => setEditEscalation(e.target.checked)} />
                     <span>
                       Предлагать позвать Альберта в сложных вопросах
-                      <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-dim, #8a94a6)', marginTop: 2 }}>
+                      <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-dim, #8c94a3)', marginTop: 2 }}>
                         Если сообщение похоже на то, что должен решать лично Альберт, бот вместо обычного ответа
                         спросит «Вижу, что данное сообщение требует участие Альберта. Позвонить и сообщить ему?».
                         При согласии собеседника Альберту придёт уведомление в Telegram — реального звонка нет,
@@ -1290,7 +1383,7 @@ export function MessengerChannelsTab({ agents, view }: MessengerChannelsTabProps
                       onChange={e => setEditHandlingMenu(e.target.checked)} />
                     <span>
                       Предлагать выбор при первом сообщении: «ИИ сейчас», «подождать» или «срочно»
-                      <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-dim, #8a94a6)', marginTop: 2 }}>
+                      <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-dim, #8c94a3)', marginTop: 2 }}>
                         Новому собеседнику вместо тишины (в режиме «черновик») бот напишет, что вы загружены
                         другими задачами, и предложит три варианта: пообщаться с ИИ-ассистентом прямо сейчас
                         (с пометкой, что его обучает Альберт); просто подождать вас лично — тогда бот замолкает;
@@ -1343,7 +1436,7 @@ export function MessengerChannelsTab({ agents, view }: MessengerChannelsTabProps
                           onChange={e => setEditOpenToEveryone(e.target.checked)} />
                         <span>
                           Отвечать всем, кто пишет мне в личку
-                          <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-dim, #8a94a6)', marginTop: 2 }}>
+                          <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-dim, #8c94a3)', marginTop: 2 }}>
                             Без списка — бот отвечает любому, кто напишет ему напрямую, без токенов и оплаты.
                           </span>
                         </span>
@@ -1399,16 +1492,16 @@ export function MessengerChannelsTab({ agents, view }: MessengerChannelsTabProps
                     />
                   )}
                   {conversationsLoading ? (
-                    <span style={{ fontSize: '0.8rem', color: 'var(--text-dim, #8a94a6)' }}>Загрузка...</span>
+                    <span style={{ fontSize: '0.8rem', color: 'var(--text-dim, #8c94a3)' }}>Загрузка...</span>
                   ) : conversations.length === 0 ? (
-                    <span style={{ fontSize: '0.8rem', color: 'var(--text-dim, #8a94a6)' }}>Пока никто не писал.</span>
+                    <span style={{ fontSize: '0.8rem', color: 'var(--text-dim, #8c94a3)' }}>Пока никто не писал.</span>
                   ) : (() => {
                     const needle = conversationSearch.trim().toLowerCase();
                     const shown = needle
                       ? conversations.filter(c => `${c.display_name} ${c.chat_id}`.toLowerCase().includes(needle))
                       : conversations;
                     if (shown.length === 0) {
-                      return <span style={{ fontSize: '0.8rem', color: 'var(--text-dim, #8a94a6)' }}>Никто не найден.</span>;
+                      return <span style={{ fontSize: '0.8rem', color: 'var(--text-dim, #8c94a3)' }}>Никто не найден.</span>;
                     }
                     return (
                       // Capped height so a binding with hundreds of people can't
@@ -1424,10 +1517,10 @@ export function MessengerChannelsTab({ agents, view }: MessengerChannelsTabProps
                               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
                                 <div style={{ minWidth: 0 }}>
                                   <strong style={{ fontSize: '0.85rem' }}>{conversation.display_name || conversation.chat_id}</strong>
-                                  <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-dim, #8a94a6)' }}>
+                                  <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-dim, #8c94a3)' }}>
                                     {PLATFORM_LABELS[conversation.platform as Platform] || conversation.platform} · {conversation.chat_id}
                                   </span>
-                                  <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-dim, #8a94a6)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-dim, #8c94a3)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                     {conversation.messages_count > 0
                                       ? `${conversation.messages_count} сообщ.${conversation.last_message_preview ? ` · ${conversation.last_message_role === 'assistant' ? 'бот' : 'он'}: ${conversation.last_message_preview}` : ''}`
                                       : 'переписка пуста'}
@@ -1463,9 +1556,9 @@ export function MessengerChannelsTab({ agents, view }: MessengerChannelsTabProps
                               {openHistoryKey === key && (
                                 <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,.07)' }}>
                                   {historyLoading ? (
-                                    <span style={{ fontSize: '0.78rem', color: 'var(--text-dim, #8a94a6)' }}>Загрузка переписки...</span>
+                                    <span style={{ fontSize: '0.78rem', color: 'var(--text-dim, #8c94a3)' }}>Загрузка переписки...</span>
                                   ) : historyMessages.length === 0 ? (
-                                    <span style={{ fontSize: '0.78rem', color: 'var(--text-dim, #8a94a6)' }}>
+                                    <span style={{ fontSize: '0.78rem', color: 'var(--text-dim, #8c94a3)' }}>
                                       Пусто — агент ничего не помнит об этом человеке.
                                     </span>
                                   ) : (
@@ -1475,10 +1568,10 @@ export function MessengerChannelsTab({ agents, view }: MessengerChannelsTabProps
                                           alignSelf: message.role === 'assistant' ? 'flex-end' : 'flex-start',
                                           maxWidth: '82%', padding: '7px 10px', borderRadius: 10, fontSize: '0.8rem',
                                           whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                                          background: message.role === 'assistant' ? 'rgba(46,179,139,.10)' : 'rgba(255,255,255,.04)',
-                                          border: `1px solid ${message.role === 'assistant' ? 'rgba(77,222,180,.22)' : 'rgba(255,255,255,.08)'}`,
+                                          background: message.role === 'assistant' ? 'rgba(53,212,154,.10)' : 'rgba(255,255,255,.04)',
+                                          border: `1px solid ${message.role === 'assistant' ? 'rgba(53,212,154,.22)' : 'rgba(255,255,255,.08)'}`,
                                         }}>
-                                          <span style={{ display: 'block', fontSize: '0.68rem', color: 'var(--text-dim, #8a94a6)', marginBottom: 2 }}>
+                                          <span style={{ display: 'block', fontSize: '0.68rem', color: 'var(--text-dim, #8c94a3)', marginBottom: 2 }}>
                                             {message.role === 'assistant' ? 'Бот' : 'Собеседник'}
                                             {message.timestamp ? ` · ${message.timestamp.slice(0, 16).replace('T', ' ')}` : ''}
                                           </span>

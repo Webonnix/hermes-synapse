@@ -11,21 +11,21 @@ import { resourceBand } from './useVexaTelemetry';
  */
 
 const BAND_COLOR: Record<ReturnType<typeof resourceBand>, string> = {
-  nominal: '#2ce8aa',
-  elevated: '#47dfff',
-  high: '#f1b63d',
-  critical: '#ff4e78',
+  nominal: '#35d49a',
+  elevated: '#5ee1ff',
+  high: '#f6b84a',
+  critical: '#f05d75',
 };
 
 export function ResourceGauge({ value, label }: { value: number | null; label: string }) {
   const radius = 11;
   const circumference = 2 * Math.PI * radius;
   const filled = value === null ? 0 : (value / 100) * circumference;
-  const color = value === null ? '#344d61' : BAND_COLOR[resourceBand(value)];
+  const color = value === null ? '#414b59' : BAND_COLOR[resourceBand(value)];
 
   return (
     <svg className="vx-gauge" viewBox="0 0 30 30" role="img" aria-label={`${label}: ${value === null ? 'нет данных' : `${Math.round(value)}%`}`}>
-      <circle cx="15" cy="15" r={radius} fill="none" stroke="rgba(45,145,212,.2)" strokeWidth="2.5" />
+      <circle cx="15" cy="15" r={radius} fill="none" stroke="rgba(59,130,246,.2)" strokeWidth="2.5" />
       <circle
         cx="15"
         cy="15"
@@ -66,7 +66,7 @@ export function ActivityChart({ series, live }: { series: number[]; live: boolea
     ctx.clearRect(0, 0, width, height);
 
     // grid
-    ctx.strokeStyle = 'rgba(45, 145, 212, .12)';
+    ctx.strokeStyle = 'rgba(59, 130, 246, .12)';
     ctx.lineWidth = Math.max(1, dpr * 0.5);
     for (let index = 1; index < 4; index += 1) {
       const y = (height / 4) * index;
@@ -86,8 +86,8 @@ export function ActivityChart({ series, live }: { series: number[]; live: boolea
     ctx.lineTo(width, height);
     ctx.closePath();
     const fill = ctx.createLinearGradient(0, 0, 0, height);
-    fill.addColorStop(0, live ? 'rgba(27, 220, 255, .28)' : 'rgba(88, 117, 139, .16)');
-    fill.addColorStop(1, 'rgba(27, 220, 255, 0)');
+    fill.addColorStop(0, live ? 'rgba(94, 225, 255, .28)' : 'rgba(106, 113, 127, .16)');
+    fill.addColorStop(1, 'rgba(94, 225, 255, 0)');
     ctx.fillStyle = fill;
     ctx.fill();
 
@@ -98,7 +98,7 @@ export function ActivityChart({ series, live }: { series: number[]; live: boolea
       if (index === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     });
-    ctx.strokeStyle = live ? '#1bdcff' : '#58758b';
+    ctx.strokeStyle = live ? '#5ee1ff' : '#6a717f';
     ctx.lineWidth = Math.max(1, dpr * 1.2);
     ctx.stroke();
   }, [series, live]);
@@ -139,7 +139,7 @@ export function DensityGraph({ intensity }: { intensity: number }) {
             <line
               key={`l${index}`}
               x1={node.x} y1={node.y} x2={next.x} y2={next.y}
-              stroke={node.violet ? 'rgba(161,93,255,.35)' : 'rgba(38,132,255,.32)'}
+              stroke={node.violet ? 'rgba(146,119,255,.35)' : 'rgba(59,130,246,.32)'}
               strokeWidth=".4"
             />
           );
@@ -148,23 +148,23 @@ export function DensityGraph({ intensity }: { intensity: number }) {
           <circle
             key={`c${index}`}
             cx={node.x} cy={node.y} r={node.r}
-            fill={node.violet ? '#a15dff' : '#47dfff'}
+            fill={node.violet ? '#9277ff' : '#5ee1ff'}
             opacity={opacity}
           />
         ))}
       </g>
-      <circle cx="30" cy="30" r="4.5" fill="#c9f2ff" opacity={opacity} />
-      <circle cx="30" cy="30" r="9" fill="none" stroke="rgba(27,220,255,.28)" strokeWidth=".6" />
+      <circle cx="30" cy="30" r="4.5" fill="#e7eaef" opacity={opacity} />
+      <circle cx="30" cy="30" r="9" fill="none" stroke="rgba(94,225,255,.28)" strokeWidth=".6" />
     </svg>
   );
 }
 
 const SERIES_COLOR = {
-  cyan: '#1bdcff',
-  blue: '#2684ff',
-  violet: '#a15dff',
-  green: '#2ce8aa',
-  red: '#ff4e78',
+  cyan: '#5ee1ff',
+  blue: '#3b82f6',
+  violet: '#9277ff',
+  green: '#35d49a',
+  red: '#f05d75',
 } as const;
 
 /** Compact area/line chart rendered inside an assistant message. */
@@ -188,7 +188,7 @@ export function MessageLineChart({ widget }: { widget: LineChartWidget }) {
     <figure className="vx-message-chart">
       <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label={widget.title || 'График'}>
         {[0.25, 0.5, 0.75].map(ratio => (
-          <line key={ratio} x1="0" y1={height * ratio} x2={width} y2={height * ratio} stroke="rgba(45,145,212,.14)" strokeWidth=".5" />
+          <line key={ratio} x1="0" y1={height * ratio} x2={width} y2={height * ratio} stroke="rgba(59,130,246,.14)" strokeWidth=".5" />
         ))}
         {widget.series.map((item, index) => {
           const color = SERIES_COLOR[item.colorToken ?? (index === 0 ? 'violet' : 'blue')];

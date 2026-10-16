@@ -221,17 +221,16 @@ def test_deleting_a_run_takes_its_audit_screenshots_with_it(site_env):
 # can. These cover the critique in isolation and its effect on the verdict.
 
 class _FakeAgent:
-    api_base = "http://ollama:11434"
+    api_base = "http://hermes-llama:8080"
     api_key = ""
     model = "test-vision-model"
-    provider = "ollama"
-    ollama_num_ctx = 8192
-    ollama_keep_alive = "5m"
+    provider = "llamacpp"
+    local_num_ctx = 8192
 
 
 def _vision_response(content):
     return llm_client.NormalizedLLMResponse(
-        status="success", provider="ollama", model="test-vision-model", content=content,
+        status="success", provider="llamacpp", model="test-vision-model", content=content,
         usage=llm_client.LLMUsage(cost=0.0),
     )
 
@@ -327,7 +326,7 @@ def test_design_critique_survives_a_failed_llm_call(fake_agent, monkeypatch):
                         lambda rid, *a, **kw: {"id": rid, "root_run_id": rid, "goal": "a landing page"})
     async def fake_call(**kw):
         return llm_client.NormalizedLLMResponse(
-            status="provider_error", provider="ollama", model="test-vision-model",
+            status="provider_error", provider="llamacpp", model="test-vision-model",
             error_message="connection refused", usage=llm_client.LLMUsage(cost=0.0),
         )
     monkeypatch.setattr(llm_client, "call_llm_normalized", fake_call)
