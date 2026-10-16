@@ -21,6 +21,7 @@
 server {
     listen 80;
     listen 443 ssl;
+    http2 on;
     ssl_certificate /etc/nginx/ssl/hermes.crt;
     ssl_certificate_key /etc/nginx/ssl/hermes.key;
     server_name ${ROUTER_HOSTNAME};
@@ -48,9 +49,23 @@ server {
     # must stay explicit rather than relying on file order.
     listen 80 default_server;
     listen 443 ssl default_server;
+    http2 on;
     ssl_certificate /etc/nginx/ssl/hermes.crt;
     ssl_certificate_key /etc/nginx/ssl/hermes.key;
     server_name _;
+
+    # The app bundle is ~1.8 MB uncompressed (index-*.js alone is over 1 MB)
+    # and the stock nginx.conf leaves gzip off, so every first load shipped it
+    # raw. Compressed on the fly rather than via gzip_static: Vite is not
+    # configured to emit .gz siblings. gzip_proxied any because Cloudflare
+    # fronts this origin, and forwarded requests would otherwise be skipped.
+    gzip on;
+    gzip_vary on;
+    gzip_comp_level 5;
+    gzip_min_length 1024;
+    gzip_proxied any;
+    gzip_types text/plain text/css application/javascript application/json
+               application/wasm image/svg+xml text/xml application/xml;
 
     add_header Permissions-Policy "microphone=(self)" always;
 
@@ -61,16 +76,17 @@ server {
     # the request with X-Forwarded-Proto: https; redirecting those would
     # break public access. (2) the container's own Docker healthcheck, which
     # curls http://127.0.0.1/ from inside the container and can't follow a
-    # redirect to an HTTPS port with a self-signed cert. (3) /ollama/ — the
-    # token-gated Ollama proxy below: LAN clients like Cline's Ollama
-    # provider reject our self-signed cert outright with no override, so
-    # this path is deliberately reachable over plain HTTP; the bearer-token
-    # check in the location block is the only auth for it either way.
+    # redirect to an HTTPS port with a self-signed cert. (3) /llm/ — the
+    # token-gated llama.cpp proxy below: LAN clients like Cline reject our
+    # self-signed cert outright with no override, so this path is
+    # deliberately reachable over plain HTTP; the bearer-token check in the
+    # location block is the only auth for it either way. The old /ollama/
+    # path shares the exemption so a stale client still reads its 410.
     set $needs_https_redirect 0;
     if ($scheme = "http") { set $needs_https_redirect 1; }
     if ($http_x_forwarded_proto = "https") { set $needs_https_redirect 0; }
     if ($remote_addr = "127.0.0.1") { set $needs_https_redirect 0; }
-    if ($request_uri ~ "^/ollama/") { set $needs_https_redirect 0; }
+    if ($request_uri ~ "^/(llm|ollama)/") { set $needs_https_redirect 0; }
     if ($needs_https_redirect) {
         return 301 https://$host:9443$request_uri;
     }
@@ -85,7 +101,7 @@ server {
     # live 502 outage on every backend-only deploy.
     resolver 127.0.0.11 valid=10s;
     set $backend_upstream http://backend:8000;
-    set $ollama_upstream http://hermes-ollama:11434;
+    set $llm_upstream http://hermes-llama:8080;
 
     # Proxy API requests to backend
     # NOTE: proxy_pass has no URI part here on purpose. With a variable in
@@ -116,37 +132,69 @@ server {
         proxy_read_timeout 3600s;
     }
 
-    # Token-gated reverse proxy onto the internal Ollama server, so external
-    # OpenAI/Ollama-compatible clients (Cline, etc.) can reach it with a
-    # single bearer token instead of an SSH tunnel. ${OLLAMA_PROXY_TOKEN} is
-    # baked in at container start by nginx's own envsubst-on-templates
-    # entrypoint (this file lives under /etc/nginx/templates/), so by the
-    # time nginx parses the config it's a fixed literal, not a live variable.
-    # The rewrite+break before a URI-less proxy_pass is nginx's documented
-    # way to strip the /ollama prefix without hitting the proxy_pass-with-
-    # variable trap noted above (variable + literal suffix silently drops
-    # the rest of the path) — rewrite ... break followed by a bare
-    # proxy_pass $var forwards the *rewritten* URI, not the original one.
-    location /ollama/ {
-        if ($http_authorization != "Bearer ${OLLAMA_PROXY_TOKEN}") {
-            return 401;
-        }
-        rewrite ^/ollama/(.*)$ /$1 break;
-        proxy_pass $ollama_upstream;
+    # Model *listing* is deliberately not token-gated. Some OpenAI-compatible
+    # clients (Cline among them) fetch the catalogue without an Authorization
+    # header, and with the whole prefix gated their settings pane shows no models
+    # while chat — which *does* send the token — works fine. Model names are not
+    # a secret; every endpoint that can run inference stays behind the bearer
+    # token in the location below. Exact-match location, so it wins over the
+    # /llm/ prefix, and private source addresses only, so the catalogue is not
+    # exposed to whatever sits in front of this nginx.
+    location = /llm/v1/models {
+        allow 127.0.0.0/8;
+        allow 10.0.0.0/8;
+        allow 172.16.0.0/12;
+        allow 192.168.0.0/16;
+        deny all;
+        rewrite ^/llm/(.*)$ /$1 break;
+        proxy_pass $llm_upstream;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
-        # The model's window is 262144 tokens, which is roughly 1 MB of JSON —
-        # exactly nginx's default body limit, so long prompts were silently
-        # 413ing here and capping usable context at ~65k tokens. Vision
-        # requests carry base64 images on top of that.
+    }
+
+    # Token-gated reverse proxy onto the internal llama.cpp server, so external
+    # OpenAI-compatible clients (Cline, etc.) can reach the local model with a
+    # single bearer token instead of an SSH tunnel: base URL <host>/llm/v1.
+    # ${LLM_PROXY_TOKEN} is baked in at container start by nginx's own
+    # envsubst-on-templates entrypoint (this file lives under
+    # /etc/nginx/templates/), so by the time nginx parses the config it's a fixed
+    # literal, not a live variable. The rewrite+break before a URI-less
+    # proxy_pass is nginx's documented way to strip the /llm prefix without
+    # hitting the proxy_pass-with-variable trap noted above (variable + literal
+    # suffix silently drops the rest of the path) — rewrite ... break followed by
+    # a bare proxy_pass $var forwards the *rewritten* URI, not the original one.
+    location /llm/ {
+        if ($http_authorization != "Bearer ${LLM_PROXY_TOKEN}") {
+            return 401;
+        }
+        rewrite ^/llm/(.*)$ /$1 break;
+        proxy_pass $llm_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        # The model's window is 196608 tokens, roughly 1 MB of JSON — exactly
+        # nginx's default body limit, so long prompts were silently 413ing and
+        # capping usable context. Vision requests carry base64 images on top.
         client_max_body_size 256m;
         # Without this every prompt over 16k gets spooled to /var/cache/nginx
         # first ("a client request body is buffered to a temporary file").
         client_body_buffer_size 2m;
-        # Prompt processing of a full 256k context runs ~145 s before the first
+        # Prompt processing of a full context runs minutes before the first
         # token, and thinking adds more; 300 s cut those requests off.
         proxy_read_timeout 900s;
         proxy_send_timeout 900s;
+        # Chat completions stream as SSE. With nginx's default buffering the
+        # client gets nothing until a buffer fills, which reads as a hung
+        # "Thinking..." instead of tokens appearing as they are generated.
+        proxy_buffering off;
+        proxy_cache off;
+    }
+
+    # The Ollama-era path. The local model is served by llama.cpp now, which
+    # does not speak the Ollama API, so tell a stale client where to go instead
+    # of letting the SPA fallback answer 200 with index.html.
+    location /ollama/ {
+        default_type text/plain;
+        return 410 "Moved: the local model is now served by llama.cpp at /llm/v1 (OpenAI-compatible, same bearer token).\n";
     }
 
     # Kanban dev-run demo previews — static files only, no proxying, so the
@@ -183,6 +231,21 @@ server {
     location = /index.html {
         add_header Permissions-Policy "microphone=(self)" always;
         add_header Cache-Control "no-cache" always;
+    }
+
+    # The service worker must never be cached. A cached sw.js is how a browser
+    # keeps running the previous build's worker forever: the new one is only
+    # installed when the byte content at this exact URL changes, and it cannot
+    # change if the response came from cache. Same reasoning as index.html.
+    location = /sw.js {
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Service-Worker-Allowed "/" always;
+        try_files $uri =404;
+    }
+
+    location = /manifest.json {
+        add_header Cache-Control "no-cache" always;
+        try_files $uri =404;
     }
 
     # SPA fallback — all other routes serve index.html
