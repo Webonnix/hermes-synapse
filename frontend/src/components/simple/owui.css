@@ -1,0 +1,1071 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   Open WebUI-style chat surface.
+
+   Everything here is scoped under .owui so it cannot leak into the rest of the
+   dashboard, which keeps its own dark neon identity. The grey ramp is Open
+   WebUI's own (src/tailwind.css there): a neutral, chroma-free oklch scale, so
+   surfaces read as paper/ink rather than as a themed panel.
+
+   Both themes are always defined. `data-theme` on the root element decides,
+   defaulting to dark to match the app it is embedded in.
+   ──────────────────────────────────────────────────────────────────────────── */
+
+.owui {
+  --g50:  oklch(0.98 0 0);
+  --g100: oklch(0.94 0 0);
+  --g200: oklch(0.92 0 0);
+  --g300: oklch(0.85 0 0);
+  --g400: oklch(0.77 0 0);
+  --g500: oklch(0.69 0 0);
+  --g600: oklch(0.51 0 0);
+  --g700: oklch(0.42 0 0);
+  --g800: oklch(0.32 0 0);
+  --g850: oklch(0.27 0 0);
+  --g900: oklch(0.20 0 0);
+  --g950: oklch(0.16 0 0);
+
+  --owui-font: 'Inter', -apple-system, BlinkMacSystemFont, ui-sans-serif, system-ui,
+    'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --owui-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, 'Cascadia Mono', 'Roboto Mono', monospace;
+  --owui-radius: 0.75rem;
+  /* "Violet Gradient" from the VEXA design system (index.css --brand-gradient). */
+  --brand-grad: linear-gradient(135deg, #7C5CFC 0%, #36CFFB 100%);
+
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  font-family: var(--owui-font);
+  font-size: 1rem;
+  color: var(--text);
+  background: var(--bg-app);
+}
+
+.owui[data-theme='light'] {
+  --bg-app: #ffffff;
+  --bg-side: var(--g50);
+  --bg-elevated: #ffffff;
+  --bg-bubble: var(--g50);
+  --bg-input: #ffffff;
+  --bg-code: var(--g50);
+  --hover: var(--g100);
+  --hover-soft: rgba(0, 0, 0, 0.035);
+  --active: rgba(0, 0, 0, 0.05);
+  --border: var(--g100);
+  --border-strong: var(--g200);
+  --text: #171717;
+  --text-muted: var(--g600);
+  --text-dim: var(--g500);
+  --accent-fg: #ffffff;
+  --accent-bg: #0a0a0a;
+  --danger: #dc2626;
+  --danger-soft: rgba(220, 38, 38, 0.1);
+  --brand: #7c3aed;
+  --brand-soft: rgba(124, 58, 237, 0.09);
+  --brand-line: rgba(124, 58, 237, 0.32);
+  --link: #0369a1;
+  --shadow: 0 6px 24px rgba(0, 0, 0, 0.08);
+  color-scheme: light;
+}
+
+.owui,
+.owui[data-theme='dark'] {
+  /* VEXA design system (2026-09-13 board): cool navy ramp + violet/cyan brand. */
+  --bg-app: #0B0D12;
+  --bg-side: #11141B;
+  --bg-elevated: #1F2532;
+  --bg-bubble: #181C25;
+  --bg-input: #161B28;
+  --bg-code: #11141B;
+  --hover: #23293A;
+  --hover-soft: rgba(35, 41, 58, 0.6);
+  --active: #2A1F5F;
+  --border: #282E3A;
+  --border-strong: #343D4D;
+  --text: #F2F4F8;
+  --text-muted: #9DA6B5;
+  --text-dim: #6B7280;
+  --accent-fg: #ffffff;
+  --accent-bg: #7C5CFC;
+  --danger: #F05D75;
+  --danger-soft: rgba(240, 93, 117, 0.14);
+  --brand: #7C5CFC;
+  --brand-hover: #9277FF;
+  --brand-light: #B197FF;
+  --brand-soft: rgba(124, 92, 252, 0.16);
+  --brand-line: rgba(124, 92, 252, 0.5);
+  --link: #36CFFB;
+  --shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  color-scheme: dark;
+}
+
+.owui *,
+.owui *::before,
+.owui *::after { box-sizing: border-box; }
+
+.owui button { font-family: inherit; cursor: pointer; }
+.owui input,
+.owui textarea { font-family: inherit; }
+
+/* Thin, self-effacing scrollbars — Open WebUI hides them until you scroll. */
+.owui ::-webkit-scrollbar { width: 6px; height: 6px; }
+.owui ::-webkit-scrollbar-track { background: transparent; }
+.owui ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 999px; }
+.owui ::-webkit-scrollbar-thumb:hover { background: var(--g500); }
+
+/* ─── Shared atoms ────────────────────────────────────────────────────────── */
+
+.owui-icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 1.875rem;
+  height: 1.875rem;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: transparent;
+  transition: background 120ms ease, color 120ms ease;
+}
+.owui-icon-btn:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.owui-icon-btn:disabled { opacity: .4; cursor: not-allowed; }
+.owui-icon-btn.is-active { color: var(--text); background: var(--hover); }
+
+/* Way back to the immersive Vexa view — was only reachable via the user card. */
+.owui-mode-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: .375rem;
+  height: 1.875rem;
+  padding: 0 .75rem;
+  border: 1px solid var(--border, rgba(255, 255, 255, .12));
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: transparent;
+  font-size: .8125rem;
+  white-space: nowrap;
+  transition: background 120ms ease, color 120ms ease;
+}
+.owui-mode-btn:hover { background: var(--hover); color: var(--text); }
+@media (max-width: 640px) { .owui-mode-btn span { display: none; } .owui-mode-btn { padding: 0; width: 1.875rem; justify-content: center; } }
+
+.owui-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 1.5rem;
+  padding: 0 0.625rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: transparent;
+  font-size: 0.75rem;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.owui-chip:hover { background: var(--hover); color: var(--text); }
+.owui-chip.is-active {
+  color: var(--brand-light, #B197FF);
+  background: var(--brand-soft);
+  border-color: var(--brand-line);
+}
+.owui-chip-count { opacity: .6; font-size: 0.6875rem; }
+
+.owui-badge {
+  padding: 0 0.3125rem;
+  border-radius: 0.25rem;
+  background: var(--hover);
+  color: var(--text-muted);
+  font-size: 0.625rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: .02em;
+  white-space: nowrap;
+}
+.owui-badge.is-default { background: var(--accent-bg); color: var(--accent-fg); }
+
+/* ─── Sidebar ─────────────────────────────────────────────────────────────── */
+
+.owui-sidebar {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  width: 16rem;
+  height: 100%;
+  padding: 0.5rem;
+  background: var(--bg-side);
+  border-right: 1px solid var(--border);
+  transition: width 180ms ease, padding 180ms ease;
+}
+.owui-sidebar.is-collapsed {
+  width: 0;
+  padding-left: 0;
+  padding-right: 0;
+  overflow: hidden;
+  border-right-color: transparent;
+}
+
+.owui-sidebar-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.25rem;
+  padding: 0.25rem 0.25rem 0.5rem;
+}
+.owui-sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.owui-sidebar-brand-mark {
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 0.5rem;
+  background: var(--brand-grad);
+  color: #fff;
+  font-size: 0.6875rem;
+  font-weight: 700;
+}
+
+.owui-new-chat {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 2.25rem;
+  padding: 0 0.625rem;
+  margin-bottom: 0.375rem;
+  border: 0;
+  border-radius: var(--owui-radius);
+  color: var(--text);
+  background: transparent;
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: background 120ms ease;
+}
+.owui-new-chat:hover { background: var(--hover); }
+.owui-new-chat svg { color: var(--brand); }
+
+.owui-search {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.25rem;
+  padding: 0 0.625rem;
+  margin-bottom: 0.5rem;
+  border-radius: var(--owui-radius);
+  color: var(--text-dim);
+  background: transparent;
+  transition: background 120ms ease;
+}
+.owui-search:focus-within { background: var(--hover); }
+.owui-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.8125rem;
+}
+.owui-search input::placeholder { color: var(--text-dim); }
+
+.owui-sidebar-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 0.5rem;
+}
+
+.owui-section-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 0.625rem 0.25rem;
+  color: var(--text-dim);
+  font-size: 0.6875rem;
+  font-weight: 500;
+}
+.owui-section-label:first-child { padding-top: 0.25rem; }
+
+.owui-chat-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  width: 100%;
+  min-height: 2rem;
+  padding: 0.375rem 0.5rem;
+  border-radius: var(--owui-radius);
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.owui-chat-item:hover { background: var(--hover); color: var(--text); }
+.owui-chat-item.is-active {
+  background: var(--brand-soft);
+  color: var(--text);
+  font-weight: 500;
+  box-shadow: inset 2px 0 0 var(--brand);
+}
+.owui-chat-item-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.owui-chat-item input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.8125rem;
+}
+.owui-chat-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.owui-chat-item:hover .owui-chat-item-actions,
+.owui-chat-item:focus-within .owui-chat-item-actions,
+.owui-chat-item-actions.is-forced { opacity: 1; }
+.owui-chat-item-action {
+  display: grid;
+  place-items: center;
+  width: 1.375rem;
+  height: 1.375rem;
+  border: 0;
+  border-radius: 0.375rem;
+  color: var(--text-dim);
+  background: transparent;
+}
+.owui-chat-item-action:hover { color: var(--text); background: var(--border-strong); }
+.owui-chat-item-action.is-confirming {
+  width: auto;
+  padding: 0 0.375rem;
+  color: #fff;
+  background: var(--danger);
+  font-size: 0.625rem;
+  font-weight: 600;
+}
+
+.owui-folder {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-height: 2rem;
+  padding: 0.375rem 0.5rem;
+  border-radius: var(--owui-radius);
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.owui-folder:hover { background: var(--hover); color: var(--text); }
+.owui-folder-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.owui-folder input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.8125rem;
+}
+.owui-folder-count {
+  padding: 0 0.3125rem;
+  border-radius: 999px;
+  background: var(--hover);
+  color: var(--text-dim);
+  font-size: 0.625rem;
+}
+.owui-folder-empty {
+  padding: 0.125rem 0 0.25rem;
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  opacity: .7;
+}
+.owui-folder-new {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-height: 2rem;
+  padding: 0.375rem 0.5rem;
+  color: var(--text-muted);
+}
+.owui-folder-new input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.125rem 0.375rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.375rem;
+  outline: 0;
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 0.8125rem;
+}
+
+.owui-sidebar-foot {
+  padding-top: 0.375rem;
+  border-top: 1px solid var(--border);
+}
+.owui-user-card {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.375rem 0.5rem;
+  border: 0;
+  border-radius: var(--owui-radius);
+  color: var(--text);
+  background: transparent;
+  font-size: 0.8125rem;
+  transition: background 120ms ease;
+}
+.owui-user-card:hover { background: var(--hover); }
+.owui-avatar {
+  display: grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--brand-grad);
+  color: #fff;
+  font-size: 0.6875rem;
+  font-weight: 600;
+}
+
+/* Floating menus are position:fixed because the sidebar list scrolls and would
+   otherwise clip them. */
+.owui-menu {
+  position: fixed;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  min-width: 11rem;
+  max-height: 17rem;
+  overflow-y: auto;
+  padding: 0.25rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--owui-radius);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow);
+}
+.owui-menu button {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 0.5rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.8125rem;
+  text-align: left;
+  white-space: nowrap;
+}
+.owui-menu button:hover { background: var(--hover); }
+.owui-menu button.is-danger { color: var(--danger); }
+.owui-menu button.is-danger:hover { background: var(--danger-soft); }
+.owui-menu-sep { height: 1px; margin: 0.25rem 0; background: var(--border); }
+
+/* ─── Main column ─────────────────────────────────────────────────────────── */
+
+.owui-main {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-app);
+}
+
+.owui-navbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-app);
+}
+.owui-navbar-left,
+.owui-navbar-right { display: flex; align-items: center; gap: 0.25rem; min-width: 0; }
+
+/* ─── Model picker ────────────────────────────────────────────────────────── */
+
+.owui-model-picker { position: relative; min-width: 0; }
+
+.owui-model-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  max-width: 20rem;
+  height: 2rem;
+  padding: 0 0.5rem;
+  border: 0;
+  border-radius: 0.625rem;
+  color: var(--text);
+  background: transparent;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  transition: background 120ms ease;
+}
+.owui-model-trigger:hover:not(:disabled),
+.owui-model-trigger.is-open { background: var(--hover); }
+.owui-model-trigger:disabled { opacity: .55; cursor: not-allowed; }
+.owui-model-trigger-icon { flex-shrink: 0; color: var(--brand); }
+.owui-model-trigger-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.owui-model-chevron { flex-shrink: 0; color: var(--text-dim); }
+
+.owui-model-menu {
+  position: absolute;
+  top: calc(100% + 0.25rem);
+  left: 0;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  width: 24rem;
+  max-width: calc(100vw - 2rem);
+  max-height: 26rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 1rem;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.owui-model-search {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.625rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.owui-model-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.875rem;
+}
+.owui-model-refresh.is-spinning svg { animation: owui-spin 1s linear infinite; }
+@keyframes owui-spin { to { transform: rotate(360deg); } }
+
+.owui-model-filters {
+  display: flex;
+  gap: 0.375rem;
+  padding: 0.5rem 0.625rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.owui-model-list { flex: 1; min-height: 0; overflow-y: auto; padding: 0.375rem; }
+
+.owui-model-group + .owui-model-group { margin-top: 0.375rem; }
+.owui-model-group-label {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.375rem 0.5rem 0.25rem;
+  color: var(--text-dim);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.owui-model-group-count { margin-left: auto; font-weight: 400; opacity: .7; }
+
+.owui-model-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: 'main actions' 'meta actions';
+  gap: 0 0.5rem;
+  padding: 0.375rem 0.5rem;
+  border-radius: 0.625rem;
+  cursor: pointer;
+}
+.owui-model-row.is-highlighted { background: var(--hover); }
+.owui-model-row.is-selected { background: var(--active); }
+.owui-model-row-main {
+  grid-area: main;
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-width: 0;
+  color: var(--text);
+  font-size: 0.8125rem;
+}
+.owui-model-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.owui-model-row-meta {
+  grid-area: meta;
+  color: var(--text-dim);
+  font-size: 0.6875rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.owui-model-row-meta:empty { display: none; }
+.owui-model-row-actions {
+  grid-area: actions;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+.owui-model-pin { width: 1.375rem; height: 1.375rem; opacity: 0; }
+.owui-model-row:hover .owui-model-pin,
+.owui-model-pin.is-active { opacity: 1; }
+.owui-model-pin.is-active { color: var(--text); }
+.owui-model-check { color: var(--text); flex-shrink: 0; }
+
+.owui-model-empty { padding: 1.75rem 1rem; text-align: center; color: var(--text-muted); font-size: 0.875rem; }
+.owui-model-empty p { margin: 0.375rem 0 0; color: var(--text-dim); font-size: 0.75rem; }
+
+.owui-model-errors { border-top: 1px solid var(--border); padding: 0.5rem 0.625rem; }
+.owui-model-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.375rem;
+  color: var(--text-dim);
+  font-size: 0.6875rem;
+  line-height: 1.4;
+}
+.owui-model-error + .owui-model-error { margin-top: 0.25rem; }
+.owui-model-error svg { flex-shrink: 0; margin-top: 1px; }
+/* Why a tag the user may remember seeing is not in the list any more. Quieter
+   than an error, because nothing is broken. */
+.owui-model-hidden-note {
+  color: var(--text-dim);
+  font-size: 0.625rem;
+  line-height: 1.4;
+  opacity: 0.8;
+  overflow-wrap: anywhere;
+}
+.owui-model-error + .owui-model-hidden-note { margin-top: 0.25rem; }
+
+/* ─── Messages ────────────────────────────────────────────────────────────── */
+
+.owui-messages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.5rem 1rem 0;
+  scroll-behavior: smooth;
+}
+.owui-messages-inner { max-width: 48rem; margin: 0 auto; padding-bottom: 1rem; }
+
+.owui-message { padding: 0.5rem 0; }
+.owui-message.is-user { display: flex; justify-content: flex-end; }
+.owui-message-user-wrap { display: flex; flex-direction: column; align-items: flex-end; max-width: 90%; }
+.owui-bubble {
+  padding: 0.5rem 1rem;
+  border-radius: 1.25rem 1.25rem 0.375rem 1.25rem;
+  background: linear-gradient(135deg, #7C5CFC 0%, #6647EE 100%);
+  color: #ffffff;
+  box-shadow: 0 6px 20px rgba(124, 92, 252, 0.22);
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.owui-message-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+.owui-message-name { font-size: 0.875rem; font-weight: 600; color: var(--text); }
+.owui-message-model { color: var(--text-dim); font-size: 0.6875rem; }
+
+.owui-assistant-body {
+  font-size: 0.9375rem;
+  line-height: 1.7;
+  color: var(--text);
+  word-break: break-word;
+}
+.owui-assistant-body > *:first-child { margin-top: 0; }
+.owui-assistant-body > *:last-child { margin-bottom: 0; }
+.owui-assistant-body p { margin: 0 0 0.75rem; }
+.owui-assistant-body h1 { font-size: 1.25rem; margin: 1rem 0 0.5rem; font-weight: 600; }
+.owui-assistant-body h2 { font-size: 1.125rem; margin: 1rem 0 0.5rem; font-weight: 600; }
+.owui-assistant-body h3 { font-size: 1rem; margin: 0.875rem 0 0.375rem; font-weight: 600; }
+.owui-assistant-body h4 { font-size: 0.9375rem; margin: 0.75rem 0 0.375rem; font-weight: 600; }
+.owui-assistant-body ul,
+.owui-assistant-body ol { margin: 0.5rem 0; padding-left: 1.5rem; }
+.owui-assistant-body li { margin: 0.25rem 0; }
+.owui-assistant-body a { color: var(--link); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--link) 45%, transparent); text-underline-offset: 2px; }
+.owui-assistant-body a:hover { text-decoration-color: var(--link); }
+.owui-assistant-body blockquote {
+  margin: 0.75rem 0;
+  padding: 0.25rem 0 0.25rem 0.875rem;
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-muted);
+}
+.owui-assistant-body hr { margin: 1rem 0; border: 0; border-top: 1px solid var(--border); }
+.owui-code-inline {
+  padding: 0.125rem 0.3125rem;
+  border-radius: 0.25rem;
+  background: var(--hover);
+  font-family: var(--owui-mono);
+  font-size: 0.85em;
+}
+
+.owui-codeblock {
+  margin: 0.75rem 0;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  overflow: hidden;
+  background: var(--bg-code);
+}
+.owui-codeblock-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.25rem 0.5rem 0.25rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  font-family: var(--owui-mono);
+  font-size: 0.6875rem;
+}
+.owui-codeblock-head button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.125rem 0.375rem;
+  border: 0;
+  border-radius: 0.375rem;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 0.6875rem;
+}
+.owui-codeblock-head button:hover { background: var(--hover); color: var(--text); }
+.owui-codeblock pre {
+  margin: 0;
+  padding: 0.75rem;
+  overflow-x: auto;
+  font-family: var(--owui-mono);
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  white-space: pre;
+}
+.owui-codeblock code { font-family: inherit; }
+
+.owui-table-wrap { margin: 0.75rem 0; overflow-x: auto; border: 1px solid var(--border); border-radius: 0.75rem; }
+.owui-table-wrap table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
+.owui-table-wrap th,
+.owui-table-wrap td { padding: 0.4375rem 0.75rem; text-align: left; border-bottom: 1px solid var(--border); }
+.owui-table-wrap th { font-weight: 600; background: var(--hover-soft); }
+.owui-table-wrap tr:last-child td { border-bottom: 0; }
+
+/* Action rows appear on hover for finished messages, and stay put for the last
+   one so the primary actions are always reachable without hunting. */
+.owui-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.125rem;
+  margin-top: 0.25rem;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.owui-message:hover .owui-actions,
+.owui-actions.is-pinned,
+.owui-actions:focus-within { opacity: 1; }
+.owui-action {
+  display: grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border: 0;
+  border-radius: 0.5rem;
+  color: var(--text-dim);
+  background: transparent;
+  transition: background 120ms ease, color 120ms ease;
+}
+.owui-action:hover { color: var(--text); background: var(--hover); }
+.owui-action.is-active { color: var(--text); background: var(--hover); }
+.owui-action.is-danger:hover { color: var(--danger); background: var(--danger-soft); }
+
+.owui-edit-box {
+  width: 100%;
+  min-width: 18rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 1.5rem;
+  background: var(--bg-bubble);
+}
+.owui-edit-box textarea {
+  width: 100%;
+  min-height: 3rem;
+  border: 0;
+  outline: 0;
+  resize: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.9375rem;
+  line-height: 1.6;
+}
+.owui-edit-actions { display: flex; justify-content: flex-end; gap: 0.375rem; margin-top: 0.5rem; }
+.owui-btn {
+  padding: 0.25rem 0.75rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.8125rem;
+}
+.owui-btn:hover { background: var(--hover); }
+.owui-btn.is-primary {
+  border-color: var(--accent-bg);
+  background: var(--accent-bg);
+  color: var(--accent-fg);
+}
+
+/* Generation read-out — same data the previous view showed, restyled. */
+.owui-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.625rem;
+  margin-top: 0.375rem;
+  color: var(--text-dim);
+  font-size: 0.6875rem;
+  font-family: var(--owui-mono);
+}
+.owui-stats.is-live { opacity: .7; }
+.owui-stats-rate { color: var(--text-muted); font-weight: 600; }
+.owui-stats-details {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  gap: 0.25rem 1rem;
+  margin: 0.5rem 0 0;
+  padding: 0.625rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.625rem;
+  background: var(--hover-soft);
+  font-size: 0.6875rem;
+}
+.owui-stats-details > div { display: flex; justify-content: space-between; gap: 0.5rem; }
+.owui-stats-details dt { color: var(--text-dim); }
+.owui-stats-details dd { margin: 0; color: var(--text); font-family: var(--owui-mono); }
+
+/* Stats popover from the action bar. Opens upward so the last reply, which
+   sits right above the composer, isn't pushed under it. */
+.owui-stats-anchor { position: relative; display: inline-flex; }
+.owui-actions:has(.owui-stats-pop) { opacity: 1; }
+.owui-stats-pop {
+  position: absolute;
+  bottom: calc(100% + 0.375rem);
+  left: 0;
+  z-index: 30;
+  width: min(22rem, calc(100vw - 2rem));
+  padding: 0.625rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow);
+}
+.owui-stats-pop .owui-stats { margin-top: 0; }
+.owui-stats-pop .owui-stats-details {
+  grid-template-columns: 1fr;
+  padding: 0.5rem 0 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  background: none;
+}
+
+.owui-typing { display: inline-flex; gap: 3px; padding: 0.25rem 0; }
+.owui-typing span {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--text-dim);
+  animation: owui-blink 1.2s infinite ease-in-out;
+}
+.owui-typing span:nth-child(2) { animation-delay: .18s; }
+.owui-typing span:nth-child(3) { animation-delay: .36s; }
+@keyframes owui-blink { 0%, 60%, 100% { opacity: .25; } 30% { opacity: 1; } }
+
+/* ─── Placeholder ─────────────────────────────────────────────────────────── */
+
+.owui-placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  max-width: 48rem;
+  width: 100%;
+  margin: 0 auto;
+  padding: 1rem;
+}
+.owui-placeholder h1 {
+  margin: 0 0 0.375rem;
+  font-size: 1.875rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+.owui-placeholder p { margin: 0 0 1.5rem; color: var(--text-muted); font-size: 0.9375rem; }
+.owui-suggestions { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 0.5rem; }
+.owui-suggestion {
+  padding: 0.75rem 0.875rem;
+  border: 1px solid var(--border);
+  border-radius: var(--owui-radius);
+  background: transparent;
+  color: var(--text);
+  font-size: 0.8125rem;
+  text-align: left;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.owui-suggestion:hover { background: var(--hover); border-color: var(--border-strong); }
+.owui-suggestion strong { display: block; font-weight: 600; margin-bottom: 0.125rem; }
+.owui-suggestion span { color: var(--text-dim); }
+
+/* ─── Composer ────────────────────────────────────────────────────────────── */
+
+.owui-composer-wrap { padding: 0 1rem 0.75rem; }
+.owui-composer-inner { max-width: 48rem; margin: 0 auto; }
+
+.owui-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 100%;
+  margin-bottom: 0.375rem;
+  padding: 0.375rem 0.5rem 0.375rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--bg-bubble);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+.owui-attachment span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.owui-attachment button { display: grid; place-items: center; border: 0; border-radius: 0.375rem; background: transparent; color: var(--text-dim); }
+.owui-attachment button:hover { color: var(--text); background: var(--hover); }
+
+.owui-composer {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-strong);
+  border-radius: 1.5rem;
+  background: var(--bg-input);
+  box-shadow: var(--shadow);
+  transition: border-color 120ms ease;
+}
+.owui-composer:focus-within { border-color: var(--brand-line); box-shadow: 0 0 0 3px var(--brand-soft); }
+/* index.css forces a square grey outline on every focused textarea with
+   !important; here the composer's rounded glow already marks focus, so the
+   extra rectangle just drew a second ring cutting across the panel's corners. */
+.owui-composer textarea:focus-visible { outline: none !important; }
+.owui-composer textarea {
+  width: 100%;
+  max-height: 12.5rem;
+  padding: 0.875rem 1rem 0.25rem;
+  border: 0;
+  outline: 0;
+  resize: none;
+  overflow-y: auto;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.9375rem;
+  line-height: 1.55;
+}
+.owui-composer textarea::placeholder { color: var(--text-dim); }
+.owui-composer textarea:disabled { opacity: .6; }
+.owui-composer-row {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0.5rem 0.5rem;
+}
+.owui-composer-row .owui-spacer { flex: 1; }
+.owui-attach { display: grid; place-items: center; width: 1.875rem; height: 1.875rem; border-radius: 999px; color: var(--text-muted); cursor: pointer; }
+.owui-attach:hover { background: var(--hover); color: var(--text); }
+.owui-send {
+  display: grid;
+  place-items: center;
+  width: 1.875rem;
+  height: 1.875rem;
+  border: 0;
+  border-radius: 0.625rem;
+  background: var(--brand);
+  color: #fff;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+.owui-send:hover:not(:disabled) { background: var(--brand-hover, #9277FF); }
+.owui-send:disabled { opacity: .35; cursor: not-allowed; }
+.owui-send.is-stop { background: var(--danger); color: #fff; }
+.owui-mic.is-active { color: var(--danger); background: var(--danger-soft); }
+
+.owui-composer-hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  padding-top: 0.375rem;
+  color: var(--text-dim);
+  font-size: 0.6875rem;
+}
+.owui-composer-hint .owui-dot { width: 5px; height: 5px; border-radius: 999px; background: currentColor; }
+.owui-composer-hint.is-offline { color: var(--danger); }
+
+.owui-scroll-bottom {
+  position: absolute;
+  left: 50%;
+  bottom: 7.5rem;
+  transform: translateX(-50%);
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  box-shadow: var(--shadow);
+  z-index: 20;
+}
+.owui-scroll-bottom:hover { color: var(--text); }
+
+/* ─── Narrow screens ──────────────────────────────────────────────────────── */
+
+@media (max-width: 900px) {
+  .owui-sidebar {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 70;
+    box-shadow: var(--shadow);
+  }
+  .owui-sidebar.is-collapsed { box-shadow: none; }
+  .owui-messages { padding-left: 0.75rem; padding-right: 0.75rem; }
+  .owui-composer-wrap { padding-left: 0.75rem; padding-right: 0.75rem; }
+  .owui-model-menu { width: min(24rem, calc(100vw - 1.5rem)); }
+}
