@@ -1,0 +1,79 @@
+name: Browser smoke
+
+# Loads the built frontend in a real browser and asserts the app actually
+# mounted. Unit tests render components in isolation and cannot catch a bundle
+# that fails to parse, a dangling asset, or a first render that throws — all of
+# which present identically in production: a blank page over the CSS background.
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+
+jobs:
+  browser:
+    name: The dashboard is not blank
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build and serve the frontend image
+        run: |
+          docker build \
+            --build-arg HERMES_BUILD_ID="${GITHUB_SHA::12}" \
+            -t hermes-frontend:smoke ./frontend
+          # The nginx config terminates TLS, so the image cannot start without a
+          # certificate. A throwaway self-signed pair is enough: the smoke test
+          # asserts what is served, not who signed it.
+          mkdir -p /tmp/smoke-ssl
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -keyout /tmp/smoke-ssl/hermes.key -out /tmp/smoke-ssl/hermes.crt \
+            -subj "/CN=localhost" >/dev/null 2>&1
+          docker run -d --name hermes-frontend-smoke -p 8443:443 \
+            -v /tmp/smoke-ssl:/etc/nginx/ssl:ro \
+            -e ROUTER_HOSTNAME=router.invalid \
+            -e LLM_PROXY_TOKEN=smoke \
+            hermes-frontend:smoke
+          for attempt in $(seq 1 30); do
+            curl -fsSk https://localhost:8443/ >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+      - name: Install Playwright
+        working-directory: frontend
+        run: |
+          npm ci
+          # Pinned: this is the version the suite was verified against.
+          npm install --no-save @playwright/test@1.48.0
+          npx playwright install --with-deps chromium
+
+      - name: Run the smoke suite
+        working-directory: frontend
+        env:
+          SMOKE_BASE_URL: https://localhost:8443
+        run: npx playwright test
+
+      - name: Failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-smoke-artifacts
+          path: |
+            frontend/test-results/
+            frontend/playwright-report/
+          if-no-files-found: ignore
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs hermes-frontend-smoke || true
+
+      - name: Stop
+        if: always()
+        run: docker rm -f hermes-frontend-smoke || true
