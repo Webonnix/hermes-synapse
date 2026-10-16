@@ -96,8 +96,8 @@ jobs:
       - name: Install runtime dependencies
         working-directory: backend
         run: |
-          pip install uv
-          uv sync --dev
+          pip install "uv==0.12.1"
+          uv sync --frozen --group dev --python 3.11
 
       - name: Boot the app and probe it
         working-directory: backend
@@ -111,7 +111,7 @@ jobs:
           set -euo pipefail
           # Import-time and startup errors do not show up in unit tests that
           # import individual modules — only a real boot finds them.
-          uv run uvicorn backend.main:app --host 127.0.0.1 --port 8000 > boot.log 2>&1 &
+          uv run --frozen uvicorn backend.main:app --host 127.0.0.1 --port 8000 > boot.log 2>&1 &
           for attempt in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:8000/health/live >/dev/null 2>&1; then
               echo "backend is live"

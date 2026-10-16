@@ -10,6 +10,9 @@ jobs:
   backend-test:
     name: Backend CI
     runs-on: ubuntu-latest
+    env:
+      # The interpreter setup-python installs; uv would otherwise pick its own.
+      UV_PYTHON: "3.11"
     defaults:
       run:
         working-directory: backend
@@ -28,11 +31,14 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Check the lockfile matches pyproject.toml
+        run: uv lock --check
+
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --frozen --group dev
 
       - name: Run Backend Tests
-        run: uv run pytest
+        run: uv run --frozen pytest
         env:
           PYTHONPATH: ..
           OPENROUTER_API_KEY: "mock-openrouter-key"
