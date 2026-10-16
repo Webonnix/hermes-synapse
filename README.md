@@ -2,7 +2,7 @@
 
 # 🏛️ Hermes
 
-**Hermes** is a low-code, self-hosted framework for building managed networks of AI agents. Powered by Jarvis, it combines a beautiful React visual canvas (drag-and-drop node graph) with an autonomous planning backend.
+**Hermes** is a low-code, self-hosted framework for building managed networks of AI agents. Powered by Vexa, it combines a beautiful React visual canvas (drag-and-drop node graph) with an autonomous planning backend.
 
 **Build networks of AI agents that plan dynamically, coordinate via DAG, and never spin out of control.**
 
@@ -16,7 +16,7 @@
 [![Hermes Synapse Demo Video](https://img.youtube.com/vi/3GFh-1Gglno/maxresdefault.jpg)](https://youtu.be/3GFh-1Gglno)
 
 The built-in Web Dashboard is running on port `9119` and features:
-1. **Communication Hub**: Live chat interface with the main orchestrator (Jarvis) or isolated sub-agents.
+1. **Communication Hub**: Live chat interface with the main orchestrator (Vexa) or isolated sub-agents.
 2. **Core Config**: Real-time adjustment of system prompts, models, and active system properties.
 3. **Decision Logs**: Full visual telemetry of the planner's "thoughts", decision latencies, token consumption, and errors.
 4. **Memory Vault (RAG)**: Manage vector database documents (PDF, MD, TXT) parsed and indexed dynamically into Qdrant.
@@ -32,7 +32,7 @@ graph TD
     User <--> Web[💻 Web Dashboard]
     
     subgraph Backend [Hermes Backend FastAPI]
-        Orch[🤖 Root Orchestrator: jarvis]
+        Orch[🤖 Root Orchestrator: Vexa]
         SubOrch[Layers: Sub-orchestrator]
         SubAgent[GitBranch: Sub-agent]
         
@@ -45,13 +45,13 @@ graph TD
     end
 
     subgraph Inference [Local inference]
-        Ollama[🦙 Ollama native API]
-        Models[(Local model store)]
-        Ollama <--> Models
+        Llama[🦙 llama.cpp server]
+        Models[(GGUF model files)]
+        Llama <--> Models
     end
 
-    Orch <--> Ollama
-    SubAgent <--> Ollama
+    Orch <--> Llama
+    SubAgent <--> Llama
     
     subgraph ExternalServices [Integrations & Tools]
         Google[📅 Google Calendar]
@@ -114,24 +114,23 @@ Telegram, search, calendar, and cloud-provider keys can be added later.
 ```bash
 docker-compose up -d --build
 ```
-This starts the backend (FastAPI), frontend dashboard (Nginx/React), Ollama,
-and the Qdrant vector database. Pull the default model once:
+This starts the backend (FastAPI), frontend dashboard (Nginx/React), the local
+llama.cpp server and the Qdrant vector database. Put the model's GGUF files in
+`models/qwen3.8-27b/` first (weights, `mmproj.gguf` and the MTP draft
+`mtp-draft.gguf` — see the `llama` service in `docker-compose.yml`).
 
-```bash
-docker-compose exec ollama ollama pull hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M
-```
-
-You can also pull and delete models from **System Core Parameters → Ollama Models**.
+**System Core Parameters → llama.cpp server** shows whether the server is up,
+the model it serves and its context window.
 
 # 4. Open dashboard
 open http://localhost:9119
 ```
 
-**Want to use a local model (Ollama)?** Set in `.env`:
+**Running llama-server outside Docker?** Set in `.env`:
 ```bash
-LLM_API_BASE=http://host.docker.internal:11434/v1
-LLM_MODEL=llama3
-OPENROUTER_API_KEY=local  # any non-empty placeholder
+LLM_PROVIDER=llamacpp
+LLAMACPP_BASE_URL=http://host.docker.internal:8080
+LLM_MODEL=qwen3.8-27b   # the server's --alias
 ```
 
 ---
@@ -142,35 +141,34 @@ OPENROUTER_API_KEY=local  # any non-empty placeholder
 User ──→ Web Dashboard (React Canvas)
            │
            ▼
-     🤖 Root Orchestrator (Jarvis)       ← DAG entry point
+     🤖 Root Orchestrator (Vexa)         ← DAG entry point
           / \
    Sub-Orch  Sub-Agent                   ← Hierarchical delegation
         |         |
    Sub-Agents   Skills                   ← Tools: web_search, python_sandbox, ...
 
-### 🤖 Ollama and model providers
+### 🤖 llama.cpp and model providers
 
-Ollama is the default provider and uses its **native API**, including streamed
-chat responses, tool calls, thinking output, usage counters, model inspection,
-pull progress, unload, and deletion. No placeholder API key or `/v1` compatibility
-endpoint is required.
+The local model is served by upstream **llama.cpp** (`llama-server`) and is the
+default provider: streamed chat, native tool calls, reasoning switched through
+the model's chat template, vision via the projector, and server timings for
+generation stats. It runs with tensor-split across the GPUs and the model's MTP
+draft head — chosen by measurement over Ollama and vLLM
+(`../docs/inference-engine-evaluation-2026-09-13.md`). No API key is required.
 
 For a host installation, use:
 
 ```dotenv
-LLM_PROVIDER=ollama
-OLLAMA_BASE_URL=http://127.0.0.1:11434
-# Optional for a protected remote Ollama server:
-OLLAMA_API_KEY=
-LLM_MODEL=hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M
-OLLAMA_NUM_CTX=262144
-OLLAMA_KEEP_ALIVE=-1
-OLLAMA_THINK=false
-OLLAMA_FLASH_ATTENTION=1
-OLLAMA_KV_CACHE_TYPE=q8_0
+LLM_PROVIDER=llamacpp
+LLAMACPP_BASE_URL=http://127.0.0.1:8080
+# Only if llama-server was started with --api-key:
+LLAMACPP_API_KEY=
+LLM_MODEL=qwen3.8-27b
+LOCAL_NUM_CTX=196608
+LOCAL_THINK=false
 ```
 
-Docker Compose automatically changes the internal URL to `http://ollama:11434`.
+Docker Compose points the backend at `http://llama:8080` automatically.
 OpenRouter and other OpenAI-compatible providers remain available from the
 dashboard provider selector or through `LLM_PROVIDER=openrouter` /
 `LLM_PROVIDER=openai_compatible` and `LLM_API_BASE`.
@@ -182,16 +180,16 @@ You can also override models per specialized agent role using the following env 
 
 #### 🎨 Model Selection in the Web UI
 When creating or editing sub-agents on the visual canvas dashboard:
-* For Ollama, the model dropdown discovers installed models through `/api/tags`.
-* The Ollama panel shows connectivity, server version, installed/running models, and pull progress.
-* Chat text is rendered incrementally as Ollama emits NDJSON chunks; cancellation preserves the partial response.
+* For the local server, the model dropdown shows the model llama-server serves (`/v1/models`).
+* The llama.cpp panel shows connectivity, build, the served model and its context window.
+* Chat text is rendered incrementally from the server's SSE stream; cancellation preserves the partial response.
 * If a model is not listed, or you prefer to specify a custom model name manually, select **"Custom model..."** from the dropdown menu and type the exact model identifier directly in the input field.
 
 ### 💬 Telegram Integration
 1. Create a bot via [@BotFather](https://t.me/BotFather) on Telegram and retrieve the token (`TELEGRAM_BOT_TOKEN`).
 2. Get your numeric Telegram chat ID via [@userinfobot](https://t.me/userinfobot) and set `TELEGRAM_CHAT_ID`.
 3. Start the bot on Telegram by typing `/start`.
-4. Voice messages are supported when local STT is enabled. Send a Telegram voice message and Jarvis will transcribe it locally, echo the recognized text, and process it like a normal command.
+4. Voice messages are supported when local STT is enabled. Send a Telegram voice message and Vexa will transcribe it locally, echo the recognized text, and process it like a normal command.
 
 ### 🎙️ Local Voice Assistant
 Hermes uses `faster-whisper` for free local speech-to-text. The web dashboard records audio with the browser `MediaRecorder` API and sends it to `/api/voice/transcribe`; Telegram voice notes use the same backend pipeline. Browsers expose microphones only in a secure context, so remote web voice input requires HTTPS; `http://localhost` also works for an SSH-tunnel connection.
@@ -258,7 +256,7 @@ If you wish to allow Hermes to manage your calendars:
 
 | Agent | Skills | Required Keys |
 |---|---|---|
-| 🏛️ **Jarvis (Main)** — root orchestrator | — | `OPENROUTER_API_KEY` |
+| 🏛️ **Vexa (Main)** — root orchestrator | — | `OPENROUTER_API_KEY` |
 | 🔍 **Search Agent** | Web search, weather, RSS | `SERPER_API_KEY` |
 | 💻 **Code Engineer** | Python sandbox (self-correcting) | — |
 | 📊 **Data Analyst** | pandas + matplotlib charts | — |
@@ -283,9 +281,9 @@ Hermes supports **any OpenAI-compatible API**:
 LLM_API_BASE=https://openrouter.ai/api/v1
 OPENROUTER_API_KEY=your_key
 
-# Ollama (local)
-LLM_API_BASE=http://host.docker.internal:11434/v1
-LLM_MODEL=llama3.1
+# llama.cpp (local, default)
+LLM_PROVIDER=llamacpp
+LLAMACPP_BASE_URL=http://host.docker.internal:8080
 
 # vLLM / LM Studio / LocalAI — same pattern
 LLM_API_BASE=http://localhost:8000/v1

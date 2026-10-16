@@ -86,7 +86,7 @@ body:
     attributes:
       label: LLM Provider configured
       description: Which LLM API base are you using?
-      placeholder: "e.g. OpenRouter / Ollama / vLLM"
+      placeholder: "e.g. llama.cpp / OpenRouter / vLLM"
 
   - type: checkboxes
     id: checklist

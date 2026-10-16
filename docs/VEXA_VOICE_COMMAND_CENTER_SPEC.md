@@ -147,7 +147,7 @@ up to three unheard turns in a row. It stops automatically when:
    and automatic gain control.
 2. Transcribe locally.
 3. Normalize wake word and punctuation, but preserve the original transcript.
-4. Send the text to the root `jarvis` orchestrator session with an opaque run ID.
+4. Send the text to the root Vexa orchestrator session (node ID `vexa`) with an opaque run ID.
 5. The orchestrator creates or updates a control-plane task.
 6. Specialist agents execute bounded steps.
 7. Validators run tests, lint, build and domain-specific checks.

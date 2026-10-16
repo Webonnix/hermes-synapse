@@ -1,6 +1,6 @@
-# 🏛️ Project Hermes (Jarvis): Unified Roadmap and Specification
+# 🏛️ Project Hermes (Vexa): Unified Roadmap and Specification
 
-This document consolidates the technical specification, user guide, business model, and marketing strategy for the **Hermes (Jarvis Agent Network)** system.
+This document consolidates the technical specification, user guide, business model, and marketing strategy for the **Hermes (Vexa Agent Network)** system.
 
 ---
 
@@ -74,7 +74,7 @@ Hermes is a low-code platform designed to configure and run managed networks of 
 
 ```mermaid
 graph TD
-    Root["🤖 Root Orchestrator: jarvis"] --> SubOrch["Sub-orchestrator: sports_orch"]
+    Root["🤖 Root Orchestrator: Vexa"] --> SubOrch["Sub-orchestrator: sports_orch"]
     Root --> Agent1["Sub-agent: research"]
     Root --> Agent2["Sub-agent: code"]
     SubOrch --> Agent3["Sub-agent: sports_analyst"]
@@ -94,7 +94,7 @@ graph TD
 ```
 
 ### 1. Node Types in the Graph
-1. **Root Orchestrator (`Root Orchestrator`)**: The entry point for user queries (ID: `jarvis`). Manages planning and child nodes delegation.
+1. **Root Orchestrator (`Root Orchestrator`)**: The entry point for user queries (node ID `vexa`). Manages planning and child nodes delegation.
 2. **Sub-orchestrators (`Sub-orchestrators`)**: Intermediate coordinators. When triggered, they run a local planning loop among their own child nodes.
 3. **Sub-agents (`Sub-agents`)**: Specialized executors running a dedicated system prompt. They execute tasks using configured skills.
 4. **Skills (`Skills`)**: Static sets of API functions that can be mapped to sub-agents or sub-orchestrators.
@@ -132,7 +132,7 @@ CREATE TABLE IF NOT EXISTS subagents (
 
 > [!NOTE]
 > System memory utilities `save_subagent_memory` and `get_subagent_memory` are always enabled for all sub-agents.
-> Orchestrator operations (`create_subagent`, `call_subagent`, `list_subagents`) are restricted to the root `jarvis` node.
+> Orchestrator operations (`create_subagent`, `call_subagent`, `list_subagents`) are restricted to the root Vexa node (ID `vexa`).
 
 ### 4. Core Algorithms & Security Logic
 
@@ -158,8 +158,8 @@ CREATE TABLE IF NOT EXISTS subagents (
     * `backgroundPosition = panOffset`
   * This preserves the illusion of an infinite canvas with zero boundaries.
 * **All-Draggable Nodes**:
-  * Every card on the canvas is draggable, including the root `JARVIS` node and static `Skill` cards.
-  * Skill positions are saved in `localStorage` (`jarvis_skill_positions`), and agent positions are synchronized via `/api/subagents/positions` to the database.
+  * Every card on the canvas is draggable, including the root **Vexa** node and static `Skill` cards.
+  * Skill positions are saved in `localStorage` (`vexa_skill_positions`), and agent positions are synchronized via `/api/subagents/positions` to the database.
 * **Connection Routing**:
   * Orchestrator output port (`node.x + 220, node.y + 50`) maps to agent input port (`node.x, node.y + 50`) to set the `parent_id` link.
   * Agent output port maps to skill input port to add the skill string to the agent's `skills` configuration.
@@ -170,9 +170,9 @@ CREATE TABLE IF NOT EXISTS subagents (
 
 You can create and manage specialized sub-agents through two main interfaces:
 
-### Method 1: Conversational Prompts via Jarvis Chat
+### Method 1: Conversational Prompts via Vexa Chat
 Simply ask the main orchestrator to configure and register a new agent:
-> *"Jarvis, create a sub-agent to help me analyze football matches. Make him a professional sports analyst using the deepseek model."*
+> *"Vexa, create a sub-agent to help me analyze football matches. Make it a professional sports analyst using the deepseek model."*
 
 ### Method 2: Visual Canvas (Sub-agents Factory)
 Go to the visual "Subagents" tab on the Web Dashboard:
@@ -188,7 +188,7 @@ Go to the visual "Subagents" tab on the Web Dashboard:
 
 Hermes is positioned at the intersection of visual ETL pipelines and multi-agent code frameworks:
 
-| Feature | Hermes (Jarvis) | n8n / Make | Flowise / LangFlow | AutoGen / CrewAI / LangGraph |
+| Feature | Hermes (Vexa) | n8n / Make | Flowise / LangFlow | AutoGen / CrewAI / LangGraph |
 | :--- | :--- | :--- | :--- | :--- |
 | **Execution Logic**| Non-deterministic (AI builds plan dynamically) | Deterministic (Hardcoded workflow logic) | Visual chains of LLM prompts | Code-defined agent graphs |
 | **User Interface** | Interactive SVG Canvas + isolated chats | Node-editor for API pipelines | Visual chain designer | CLI / API (No native dashboard) |

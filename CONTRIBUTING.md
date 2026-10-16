@@ -23,7 +23,7 @@ cd hermes-synapse
 
 ```bash
 cp .env.example .env
-# Minimum required: set OPENROUTER_API_KEY (or use Ollama for fully local dev)
+# Minimum required: set OPENROUTER_API_KEY (or run the local llama.cpp server for fully local dev)
 ```
 
 ### 3. Launch in Development Mode (Hot-Reload)
@@ -163,7 +163,7 @@ Before opening a PR, verify:
 
 Hermes enforces these principles to stay community-friendly:
 
-1. **No vendor lock-in** — any OpenAI-compatible LLM works (Ollama, vLLM, OpenRouter)
+1. **No vendor lock-in** — any OpenAI-compatible LLM works (llama.cpp, vLLM, OpenRouter)
 2. **Zero-friction local dev** — `docker compose up` with no cloud accounts required
 3. **Modular skills** — add/remove capabilities without touching core orchestration
 
