@@ -99,7 +99,7 @@ services:
   # agent-controlled `dev_exec` shell command inside a sandbox has no path to
   # the Docker API even if it tried.
   docker-proxy:
-    image: tecnativa/docker-socket-proxy:v0.4.2
+    image: tecnativa/docker-socket-proxy:v0.4.2@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
     container_name: hermes-docker-proxy
     restart: unless-stopped
     environment:
@@ -263,7 +263,7 @@ services:
   # provider_type=openai_compatible binding. Deliberately not a backend
   # dependency, same reasoning as xtts above.
   9router:
-    image: decolua/9router:latest
+    image: decolua/9router:0.5.75@sha256:7c893bc2c27ecea2ae337abd5eacfec9e5763091b3a3b7862fc0625b770bb156
     container_name: hermes-9router
     restart: unless-stopped
     environment:
@@ -322,7 +322,7 @@ services:
       - hermes-net
 
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.18.1@sha256:45f8e3ddc2570a4d029877e1b5ec1045c19b3852b4e22a55c7f43b05aea0ca89
     container_name: vexa-qdrant
     restart: unless-stopped
     ports:

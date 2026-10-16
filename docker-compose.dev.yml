@@ -49,7 +49,7 @@ services:
       - hermes-dev-net
 
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.18.1@sha256:45f8e3ddc2570a4d029877e1b5ec1045c19b3852b4e22a55c7f43b05aea0ca89
     container_name: hermes-qdrant-dev
     restart: unless-stopped
     ports:
