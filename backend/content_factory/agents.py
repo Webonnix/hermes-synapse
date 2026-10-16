@@ -26,6 +26,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from backend.tool_permissions import MAIN_AGENT_ID
+
 logger = logging.getLogger("hermes.content_factory.agents")
 
 ORCHESTRATOR_ID = "content_factory"
@@ -207,13 +209,13 @@ def seed_agents(*, force: bool = False) -> list[str]:
             system_prompt=spec.prompt,
             model=_model_for(prefers_external),
             agent_type=spec.agent_type,
-            parent_id="jarvis" if spec.agent_type == "sub-orchestrator" else ORCHESTRATOR_ID,
+            parent_id=MAIN_AGENT_ID if spec.agent_type == "sub-orchestrator" else ORCHESTRATOR_ID,
             skills=spec.skills,
             x=spec.position[0],
             y=spec.position[1],
             temperature=spec.temperature,
             role=spec.role,
-            model_provider=external_provider if prefers_external else "ollama",
+            model_provider=external_provider if prefers_external else "local",
             model_type="external" if prefers_external else "local",
             budget_usd_limit=spec.budget_usd_limit,
             budget_period="monthly",

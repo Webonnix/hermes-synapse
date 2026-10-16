@@ -190,7 +190,7 @@ function stubFetch(extra: (path: string, method: string) => unknown | undefined 
     }
     if (path.endsWith('/integrations/llm')) {
       return { ok: true, json: async () => ({
-        local: { id: 'local-llm', name: 'local-llm', api_base: 'http://hermes-ollama:11434',
+        local: { id: 'local-llm', name: 'local-llm', api_base: 'http://hermes-llama:8080',
           default_model: 'qwen3:8b', status: 'active', local: true },
         bindings: [],
       }) };
@@ -243,6 +243,46 @@ describe('ContentFactoryTab', () => {
     stubFetch();
     render(<ContentFactoryTab language="en" />);
     expect(await screen.findByLabelText('Select pipeline')).toBeInTheDocument();
+    expect(await screen.findByLabelText('Pipeline stages')).toBeInTheDocument();
+  });
+
+  it('keeps the pipeline wizard on its own tab, not inside the workbench', async () => {
+    // The wizard used to live in a corner panel of the mission-control screen,
+    // where four steps of production settings were unreadable.
+    stubFetch();
+    render(<ContentFactoryTab language="en" />);
+    const nav = screen.getByRole('navigation', { name: 'CONTENT FACTORY' });
+    await screen.findByLabelText('Pipeline stages');
+    expect(screen.queryByText('Pipeline wizard', { selector: 'span' })).not.toBeInTheDocument();
+
+    fireEvent.click(within(nav).getByRole('button', { name: 'Pipeline wizard' }));
+    expect(await screen.findByRole('button', { name: /AI NEWS SHORTS/i })).toBeInTheDocument();
+    expect(screen.getByLabelText('New pipeline name')).toBeInTheDocument();
+    // The workbench is a different view now, so it is gone from the DOM.
+    expect(screen.queryByLabelText('Pipeline stages')).not.toBeInTheDocument();
+  });
+
+  it('creates the pipeline from the wizard tab and returns to the workbench', async () => {
+    const { calls } = stubFetch((path, method) => {
+      if (path.includes('/templates/ai_news_shorts/instantiate') && method === 'POST') {
+        return { ok: true, json: async () => ({ pipeline, activation: undefined }) };
+      }
+      return undefined;
+    });
+    render(<ContentFactoryTab language="en" />);
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'CONTENT FACTORY' }))
+      .getByRole('button', { name: 'Pipeline wizard' }));
+
+    fireEvent.click(await screen.findByRole('button', { name: /AI NEWS SHORTS/i }));
+    fireEvent.change(screen.getByLabelText('New pipeline name'), { target: { value: 'Daily Robotics' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Create draft' }));
+
+    await waitFor(() => expect(calls.some((call) =>
+      call.startsWith('POST') && call.includes('/templates/ai_news_shorts/instantiate'))).toBe(true));
+    // The new pipeline is what the owner wanted, so they land back on it.
     expect(await screen.findByLabelText('Pipeline stages')).toBeInTheDocument();
   });
 

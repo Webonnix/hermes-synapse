@@ -119,8 +119,8 @@ export function SettingsPanel({ settings, language, busy, canEdit = true, onSave
       {fullAuto && (
         <div style={{
           display: 'flex', gap: 9, padding: '10px 14px', borderRadius: 10, fontSize: 11.5,
-          color: COLORS.amberSoft, background: 'rgba(69,45,10,0.5)',
-          border: '1px solid rgba(245,158,11,0.35)', lineHeight: 1.5,
+          color: COLORS.amberSoft, background: 'rgba(44,51,64,0.5)',
+          border: '1px solid rgba(246,184,74,0.35)', lineHeight: 1.5,
         }}>
           <ShieldAlert size={14} style={{ flexShrink: 0, marginTop: 1 }} />
           <span>{ru
@@ -131,7 +131,7 @@ export function SettingsPanel({ settings, language, busy, canEdit = true, onSave
       )}
 
       <div style={{ padding: '9px 13px', borderRadius: 9, fontSize: 10.5, lineHeight: 1.5,
-        color: COLORS.faint, background: 'rgba(14,116,144,0.08)', border: '1px solid rgba(34,211,238,0.18)' }}>
+        color: COLORS.faint, background: 'rgba(54,207,251,0.08)', border: '1px solid rgba(157,166,181,0.126)' }}>
         {ru
           ? 'Глобальные параметры применяются к новым pipeline из шаблонов. Лимиты воркера и обязательный прокси вступают в силу сразу; существующие pipeline сохраняют свою версию настроек.'
           : 'Global defaults apply to new template pipelines. Worker limits and the mandatory-proxy policy take effect immediately; existing pipelines retain their versioned settings.'}

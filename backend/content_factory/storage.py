@@ -56,6 +56,11 @@ from backend.content_factory.domain import ContentFactoryError, ErrorCode
 logger = logging.getLogger("hermes.content_factory.storage")
 
 ROOT_PREFIX = "content-factory"
+
+# Delegated Graph permissions the OneDrive backend needs. `offline_access` is
+# what makes a refresh token possible at all — without it the sign-in is good
+# for one hour and the store dies silently after that.
+ONEDRIVE_SCOPES = "offline_access Files.ReadWrite"
 _SAFE_SEGMENT = re.compile(r"[^A-Za-z0-9._-]+")
 
 # Asset type → the §44 folder it lives in.
@@ -435,6 +440,285 @@ class S3Storage(AssetStorage):
             return {"storage": self.name, "status": "error", "detail": type(exc).__name__}
 
 
+class OneDriveStorage(AssetStorage):
+    """Microsoft Graph, personal or work OneDrive.
+
+    Two things make it different from the other three, and both are handled
+    here rather than pushed onto the caller:
+
+    * **The credential is an OAuth refresh token, not a password.** Microsoft
+      issues short-lived access tokens (about an hour) and a rotating refresh
+      token; a token pasted into a settings field would stop working the same
+      day. So the Storage screen runs a device-code login once
+      (`integrations.start_onedrive_login`), the refresh token is what gets
+      stored, and this class exchanges it for an access token on demand and
+      writes the rotated one back. That is the same shape
+      `matrix_oauth.py` already uses for the Matrix account, for the same
+      reason.
+    * **There is no pre-signed *upload*, but there is a pre-signed download.**
+      An item's `@microsoft.graph.downloadUrl` is a direct, already-authorised,
+      short-lived URL — exactly what `presigned_get` is for, and better than a
+      sharing link, which is a *page* an uploader cannot fetch bytes from and
+      which needs share permissions the account may not have. Uploads go
+      through the backend's own signed endpoint, as with Nextcloud.
+    """
+
+    name = "onedrive"
+
+    _GRAPH = "https://graph.microsoft.com/v1.0"
+    # Above this, Graph rejects a simple content PUT and wants a session.
+    _SIMPLE_UPLOAD_LIMIT = 4 * 1024 * 1024
+
+    def __init__(
+        self,
+        *,
+        client_id: str,
+        refresh_token: str,
+        tenant: str = "consumers",
+        root: str = "",
+        timeout: float = 120.0,
+        on_token_refreshed: Optional[Any] = None,
+    ):
+        if not client_id:
+            raise ContentFactoryError(
+                ErrorCode.VALIDATION_FAILED,
+                "OneDrive needs the client id of an Entra app registration",
+                retryable=False,
+            )
+        if not refresh_token:
+            raise ContentFactoryError(
+                ErrorCode.PROVIDER_AUTH,
+                "OneDrive is not signed in — run the device-code login on the Storage screen",
+                retryable=False,
+            )
+        self.client_id = client_id
+        self.tenant = tenant or "consumers"
+        self._refresh_token = refresh_token
+        self.root = root.strip("/")
+        self.timeout = timeout
+        # Lets the caller persist a rotated refresh token. Without it the stored
+        # one goes stale the first time Microsoft rotates it and the next
+        # restart cannot sign in at all.
+        self._on_token_refreshed = on_token_refreshed
+        self._access_token = ""
+        self._access_expires_at = 0.0
+
+    # ── OAuth ────────────────────────────────────────────────────────────
+    def _token(self) -> str:
+        # 60s of slack so a request never races a token that is valid when
+        # checked and expired when Graph sees it.
+        if self._access_token and self._access_expires_at - 60 > time.time():
+            return self._access_token
+
+        import httpx
+
+        try:
+            response = httpx.post(
+                f"https://login.microsoftonline.com/{self.tenant}/oauth2/v2.0/token",
+                data={
+                    "client_id": self.client_id,
+                    "grant_type": "refresh_token",
+                    "refresh_token": self._refresh_token,
+                    "scope": ONEDRIVE_SCOPES,
+                },
+                timeout=30.0,
+            )
+        except Exception as exc:
+            raise _storage_error(exc) from exc
+        if response.status_code != 200:
+            raise ContentFactoryError(
+                ErrorCode.PROVIDER_AUTH,
+                "OneDrive refused the stored sign-in — sign in again on the Storage screen",
+                retryable=False,
+            )
+        body = response.json()
+        self._access_token = str(body.get("access_token") or "")
+        self._access_expires_at = time.time() + float(body.get("expires_in") or 3600)
+        rotated = str(body.get("refresh_token") or "")
+        if rotated and rotated != self._refresh_token:
+            self._refresh_token = rotated
+            if self._on_token_refreshed:
+                try:
+                    self._on_token_refreshed(rotated)
+                except Exception:
+                    logger.exception("Could not persist the rotated OneDrive refresh token")
+        if not self._access_token:
+            raise ContentFactoryError(
+                ErrorCode.PROVIDER_AUTH, "OneDrive returned no access token", retryable=False
+            )
+        return self._access_token
+
+    def _client(self):
+        import httpx
+
+        return httpx.Client(
+            timeout=self.timeout,
+            follow_redirects=True,
+            headers={"Authorization": f"Bearer {self._token()}"},
+        )
+
+    def _item_url(self, key: str, suffix: str = "") -> str:
+        """Graph addresses an item by path as `/me/drive/root:/a/b/c:` and then
+        appends the action, except for the bare item itself where the trailing
+        colon must go."""
+        path = "/".join(part for part in [self.root, key] if part)
+        encoded = quote(path)
+        return f"{self._GRAPH}/me/drive/root:/{encoded}:{suffix}" if suffix \
+            else f"{self._GRAPH}/me/drive/root:/{encoded}"
+
+    # ── AssetStorage ─────────────────────────────────────────────────────
+    def put(self, key: str, data: bytes, *, mime_type: str = "") -> StoredObject:
+        checksum = hashlib.sha256(data).hexdigest()
+        try:
+            with self._client() as client:
+                if len(data) <= self._SIMPLE_UPLOAD_LIMIT:
+                    response = client.put(
+                        self._item_url(key, "/content"),
+                        content=data,
+                        headers={"Content-Type": mime_type or "application/octet-stream"},
+                    )
+                    if response.status_code not in (200, 201):
+                        raise RuntimeError(f"PUT returned {response.status_code}")
+                else:
+                    self._upload_session(client, key, data, mime_type)
+        except Exception as exc:
+            raise _storage_error(exc) from exc
+        return StoredObject(key=key, size_bytes=len(data), checksum=checksum, mime_type=mime_type)
+
+    def _upload_session(self, client: Any, key: str, data: bytes, mime_type: str) -> None:
+        """Graph's resumable upload. Rendered video is routinely tens of
+        megabytes, so this is the normal path for a finished asset, not an
+        exotic one."""
+        response = client.post(
+            self._item_url(key, "/createUploadSession"),
+            json={"item": {"@microsoft.graph.conflictBehavior": "replace"}},
+        )
+        response.raise_for_status()
+        upload_url = str(response.json().get("uploadUrl") or "")
+        if not upload_url:
+            raise RuntimeError("createUploadSession returned no uploadUrl")
+
+        # Graph requires every chunk except the last to be a multiple of 320 KiB.
+        chunk_size = 10 * 320 * 1024
+        total = len(data)
+        for start in range(0, total, chunk_size):
+            chunk = data[start:start + chunk_size]
+            end = start + len(chunk) - 1
+            # No Authorization header: the session URL carries its own.
+            import httpx
+
+            chunk_response = httpx.put(
+                upload_url,
+                content=chunk,
+                headers={
+                    "Content-Length": str(len(chunk)),
+                    "Content-Range": f"bytes {start}-{end}/{total}",
+                    "Content-Type": mime_type or "application/octet-stream",
+                },
+                timeout=self.timeout,
+            )
+            if chunk_response.status_code not in (200, 201, 202):
+                raise RuntimeError(
+                    f"Upload chunk {start}-{end} returned {chunk_response.status_code}"
+                )
+
+    def get(self, key: str) -> bytes:
+        try:
+            with self._client() as client:
+                response = client.get(self._item_url(key, "/content"))
+                if response.status_code == 404:
+                    raise ContentFactoryError(
+                        ErrorCode.VALIDATION_FAILED, f"No such asset: {key}", retryable=False
+                    )
+                response.raise_for_status()
+                return response.content
+        except ContentFactoryError:
+            raise
+        except Exception as exc:
+            raise _storage_error(exc) from exc
+
+    def delete(self, key: str) -> None:
+        try:
+            with self._client() as client:
+                response = client.delete(self._item_url(key))
+                if response.status_code not in (200, 204, 404):
+                    raise RuntimeError(f"DELETE returned {response.status_code}")
+        except Exception as exc:
+            raise _storage_error(exc) from exc
+
+    def exists(self, key: str) -> bool:
+        try:
+            with self._client() as client:
+                return client.get(self._item_url(key)).status_code < 400
+        except Exception:
+            return False
+
+    def presigned_get(self, key: str, *, expires_in: int = 3600) -> str:
+        """Graph's own pre-authorised download URL. It is not cached: unlike a
+        Nextcloud share it is not an object that can be reused, it is a
+        signature Microsoft mints per request and expires on its own."""
+        try:
+            with self._client() as client:
+                response = client.get(self._item_url(key), params={"select": "id,@microsoft.graph.downloadUrl"})
+                if response.status_code == 404:
+                    raise ContentFactoryError(
+                        ErrorCode.VALIDATION_FAILED, f"No such asset: {key}", retryable=False
+                    )
+                response.raise_for_status()
+                url = str(response.json().get("@microsoft.graph.downloadUrl") or "")
+        except ContentFactoryError:
+            raise
+        except Exception as exc:
+            raise _storage_error(exc) from exc
+        if not url:
+            raise ContentFactoryError(
+                ErrorCode.PROVIDER_UNAVAILABLE,
+                "OneDrive returned no download URL for this asset",
+                retryable=False,
+            )
+        return url
+
+    def presigned_put(self, key: str, *, expires_in: int = 3600, mime_type: str = "") -> dict[str, Any]:
+        """Same proxied path as Nextcloud: Graph's upload session URL is
+        unauthenticated and long-lived, which is not something to hand to a
+        browser, and the pipeline writes server-side with `put()` anyway."""
+        expires_at = int(time.time()) + expires_in
+        signature = hmac.new(
+            _upload_secret(), f"{key}:{expires_at}".encode(), hashlib.sha256
+        ).hexdigest()
+        return {
+            "url": (
+                f"/api/v1/content-factory/assets/upload?key={quote(key)}"
+                f"&expires={expires_at}&signature={signature}"
+            ),
+            "method": "PUT",
+            "key": key,
+            "proxied": True,
+            "headers": {"Content-Type": mime_type or "application/octet-stream"},
+        }
+
+    def health(self) -> dict[str, Any]:
+        try:
+            with self._client() as client:
+                response = client.get(f"{self._GRAPH}/me/drive", params={"select": "id,name,owner,quota"})
+            if response.status_code >= 400:
+                return {"storage": self.name, "status": "error", "detail": f"HTTP {response.status_code}"}
+            body = response.json()
+            owner = ((body.get("owner") or {}).get("user") or {}).get("displayName", "")
+            quota = body.get("quota") or {}
+            return {
+                "storage": self.name,
+                "status": "connected",
+                "account": owner,
+                "root": self.root,
+                "remainingBytes": quota.get("remaining"),
+            }
+        except ContentFactoryError as exc:
+            return {"storage": self.name, "status": "error", "detail": exc.code}
+        except Exception as exc:
+            return {"storage": self.name, "status": "error", "detail": type(exc).__name__}
+
+
 class LocalStorage(AssetStorage):
     """Filesystem stand-in. Signed URLs point at the backend's own asset
     endpoint and carry an HMAC + expiry, so an unsigned or stale link is
@@ -596,6 +880,20 @@ def build_storage() -> AssetStorage:
             )
         except Exception:
             logger.exception("Nextcloud storage could not be initialized")
+            if require_remote:
+                raise
+
+    onedrive_client_id = os.environ.get("CONTENT_FACTORY_ONEDRIVE_CLIENT_ID", "").strip()
+    if onedrive_client_id:
+        try:
+            return OneDriveStorage(
+                client_id=onedrive_client_id,
+                refresh_token=_secret("CONTENT_FACTORY_ONEDRIVE_REFRESH_TOKEN"),
+                tenant=os.environ.get("CONTENT_FACTORY_ONEDRIVE_TENANT", "consumers").strip() or "consumers",
+                root=os.environ.get("CONTENT_FACTORY_ONEDRIVE_ROOT", "").strip(),
+            )
+        except Exception:
+            logger.exception("OneDrive storage could not be initialized")
             if require_remote:
                 raise
 

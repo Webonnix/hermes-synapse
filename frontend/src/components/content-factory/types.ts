@@ -412,7 +412,7 @@ export interface CFIntegrations {
 }
 
 export interface CFStorageConfig {
-  backend: 'env' | 'local' | 'nextcloud' | 's3';
+  backend: 'env' | 'local' | 'nextcloud' | 's3' | 'onedrive';
   nextcloud: {
     url: string;
     username: string;
@@ -422,6 +422,9 @@ export interface CFStorageConfig {
     shareDays: number;
   };
   s3: { bucket: string; endpoint: string; region: string; publicUrl: string };
+  /** `clientId` is an Entra app registration; the sign-in itself produces a
+   *  refresh token that lives in the secret store, so there is no password. */
+  onedrive: { clientId: string; tenant: string; root: string };
   local: { root: string };
   /** Where each credential comes from — never the credential itself (§89). */
   secrets: Record<string, 'env' | 'stored' | 'none'>;
@@ -470,6 +473,8 @@ export interface CFLLMBinding {
 export interface CFLLMEndpoints {
   local: CFLLMBinding;
   bindings: CFLLMBinding[];
+  /** Provider id LLM nodes use when they name none — `local-llm` or a binding id. */
+  default?: string;
 }
 
 export interface CFStorageUsage {

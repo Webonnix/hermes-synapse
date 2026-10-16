@@ -14,6 +14,7 @@ per-image price.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Optional
 
 import httpx
@@ -124,24 +125,31 @@ class StabilityImageProvider(ImageProvider):
 class OpenAIImageProvider(ImageProvider):
     usd_per_image = 0.04
 
+    def _api_base(self) -> str:
+        return str(self.config.get("apiBase") or "https://api.openai.com").rstrip("/")
+
+    def _payload(self, prompt: str, request: dict[str, Any]) -> dict[str, Any]:
+        """Split out so a sibling endpoint can change the request body without
+        re-implementing the response handling below."""
+        return {
+            "model": self.model or "gpt-image-1",
+            "prompt": prompt,
+            "size": request.get("size") or _openai_size(request),
+            "n": 1,
+        }
+
     async def execute(self, request: dict[str, Any]) -> ProviderResult:
         import base64
 
         prompt = str(request.get("prompt", "")).strip()
         if not prompt:
             raise ContentFactoryError(ErrorCode.VALIDATION_FAILED, "prompt is required", retryable=False)
-        size = request.get("size") or _openai_size(request)
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
-                    f"{self.config.get('apiBase', 'https://api.openai.com')}/v1/images/generations",
+                    f"{self._api_base()}/v1/images/generations",
                     headers={"Authorization": f"Bearer {self._api_key}"},
-                    json={
-                        "model": self.model or "gpt-image-1",
-                        "prompt": prompt,
-                        "size": size,
-                        "n": 1,
-                    },
+                    json=self._payload(prompt, request),
                 )
                 response.raise_for_status()
                 body = response.json()
@@ -169,6 +177,52 @@ class OpenAIImageProvider(ImageProvider):
             provider=self.id,
             model=self.model or "gpt-image-1",
         )
+
+
+class RouterImageProvider(OpenAIImageProvider):
+    """The same OpenAI image contract, served by the 9Router sidecar.
+
+    Worth its own entry rather than "point OpenAI Images at another base URL"
+    for two reasons. It authenticates with `ROUTER_API_KEY` — already stored,
+    so this provider configures itself the moment the sidecar has an upstream
+    account — and it must not send `size`: 9Router forwards the payload to
+    whichever vendor owns the model, and Gemini's image models reject the
+    parameter outright rather than ignoring it. Aspect ratio for those goes in
+    the prompt, which is what `_aspect_hint` appends.
+
+    The model is a full 9Router id — `gemini/gemini-3-pro-image-preview`
+    (Nano Banana Pro), `gemini/gemini-2.5-flash-image` — so which vendor
+    actually renders the image is a settings choice, not a code change.
+    """
+
+    # Rides whatever plan the connected upstream account has; a per-image price
+    # is set on the Integrations screen when that account is metered.
+    usd_per_image = 0.0
+
+    def _api_base(self) -> str:
+        configured = str(self.config.get("apiBase") or "").strip()
+        if configured:
+            return configured.rstrip("/")
+        return os.environ.get("ROUTER_API_BASE", "http://9router:20128").rstrip("/")
+
+    def _payload(self, prompt: str, request: dict[str, Any]) -> dict[str, Any]:
+        hint = _aspect_hint(request)
+        return {
+            "model": self.model or "gemini/gemini-2.5-flash-image",
+            "prompt": f"{prompt}\n\n{hint}" if hint else prompt,
+            "n": 1,
+        }
+
+
+def _aspect_hint(request: dict[str, Any]) -> str:
+    """Aspect ratio as words, for an endpoint that takes no size parameter."""
+    ratio = str(request.get("aspect_ratio") or "").strip()
+    if ratio in _ASPECT_RATIOS:
+        return f"Aspect ratio: {ratio}."
+    width, height = int(request.get("width", 0) or 0), int(request.get("height", 0) or 0)
+    if width and height:
+        return f"Aspect ratio: {width}:{height}."
+    return ""
 
 
 def _openai_size(request: dict[str, Any]) -> str:
@@ -244,6 +298,7 @@ _IMAGE_FACTORIES: dict[str, type[ImageProvider]] = {
     "stability": StabilityImageProvider,
     "openai-image": OpenAIImageProvider,
     "replicate-image": ReplicateImageProvider,
+    "router-image": RouterImageProvider,
 }
 
 

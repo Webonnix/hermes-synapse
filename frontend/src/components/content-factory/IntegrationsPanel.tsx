@@ -38,6 +38,7 @@ const CONNECT_HINT: Record<string, [string, string]> = {
 export function IntegrationsPanel({
   data, usage, providers, llm, language, busy, canEdit, onRefresh,
   onSaveProvider, onDeleteProvider, onTestProvider, onSetDefault, onCreateLlm, onDeleteLlm,
+  onUpdateLlm, onLoadLlmModels,
 }: {
   data: CFIntegrations | null;
   usage: CFStorageUsage | null;
@@ -53,6 +54,8 @@ export function IntegrationsPanel({
   onSetDefault: (category: string, providerId: string) => Promise<void>;
   onCreateLlm: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
   onDeleteLlm: (bindingId: string) => Promise<void>;
+  onUpdateLlm: (bindingId: string, defaultModel: string) => Promise<void>;
+  onLoadLlmModels: (bindingId: string) => Promise<string[]>;
 }) {
   const ru = language === 'ru';
   if (!data) {
@@ -117,7 +120,7 @@ export function IntegrationsPanel({
                     <span key={provider.id} style={{
                       display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 9px',
                       borderRadius: 8, fontSize: 11, color: COLORS.text,
-                      background: 'rgba(15,23,42,0.55)', border: `1px solid ${COLORS.line}`,
+                      background: 'rgba(20,24,32,0.55)', border: `1px solid ${COLORS.line}`,
                     }}>
                       {provider.isDefault && <span style={{ color: COLORS.cyanSoft }}>★</span>}
                       {provider.id}
@@ -229,6 +232,8 @@ export function IntegrationsPanel({
         onSetDefault={onSetDefault}
         onCreateLlm={onCreateLlm}
         onDeleteLlm={onDeleteLlm}
+        onUpdateLlm={onUpdateLlm}
+        onLoadLlmModels={onLoadLlmModels}
       />
     </div>
   );
@@ -239,7 +244,7 @@ function Banner({ tone, icon, children }: {
 }) {
   const color = { amber: COLORS.amberSoft, red: COLORS.redSoft, green: COLORS.greenSoft }[tone];
   const background = {
-    amber: 'rgba(69,45,10,0.5)', red: 'rgba(69,17,17,0.5)', green: 'rgba(11,52,29,0.45)',
+    amber: 'rgba(44,51,64,0.5)', red: 'rgba(69,17,17,0.5)', green: 'rgba(11,52,29,0.45)',
   }[tone];
   return (
     <div style={{

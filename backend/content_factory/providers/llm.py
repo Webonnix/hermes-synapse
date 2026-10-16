@@ -1,7 +1,7 @@
 """LLM providers (§24).
 
 Deliberately thin. HERMES already solved the hard parts of talking to a model —
-`llm_client.call_llm_normalized` handles transport retry, Ollama vs
+`llm_client.call_llm_normalized` handles transport retry, local llama.cpp vs
 OpenAI-compatible payloads, streaming, refusal/empty/tool-only classification
 and secret masking, and `NormalizedLLMResponse` is the single contract every
 call path in the app already returns. Re-implementing any of that here would
@@ -17,7 +17,7 @@ So this adapter does three things `llm_client` does not:
 3. resolves credentials from `provider_bindings` (governed, Valkey-stored)
    rather than reading environment keys directly.
 
-Providers are built from what is actually configured: the local Ollama model is
+Providers are built from what is actually configured: the local llama.cpp model is
 always present and free, each approved external binding becomes its own
 provider id, so an agent's `allowed_provider_ids` (§21 fallbacks) and a
 pipeline's fallback list speak the same vocabulary.
@@ -44,7 +44,7 @@ LOCAL_PROVIDER_ID = "local-llm"
 
 
 class LLMProvider(Provider):
-    """One OpenAI-compatible endpoint (which includes Ollama and 9router).
+    """One OpenAI-compatible endpoint (which includes the local llama.cpp server and 9router).
 
     `binding_id` is the `provider_bindings` row this provider draws credentials
     from; None means the local model, which needs none.
@@ -98,7 +98,20 @@ class LLMProvider(Provider):
         from backend.llm_client import call_llm_normalized
 
         api_base, api_key = self._credentials()
-        model = str(request.get("model") or self.model)
+        model = str(request.get("model") or self.model).strip()
+        if not model:
+            # An endpoint with no model name reaches the vendor as
+            # `"model": ""` and comes back as an opaque 400 several layers
+            # later. Say what is actually wrong, and say it before spending a
+            # request: the binding needs a default model, or the node needs to
+            # name one.
+            raise ContentFactoryError(
+                ErrorCode.PROVIDER_UNAVAILABLE,
+                f"Provider '{self.id}' has no model configured — set a default model for it "
+                f"(Content Factory → Настройки → Провайдеры) or name one on the node",
+                retryable=False,
+                details={"providerId": self.id},
+            )
         schema = request.get("output_schema") or {}
         messages = _build_messages(request, schema)
 
@@ -118,7 +131,7 @@ class LLMProvider(Provider):
             temperature=float(request.get("temperature", self.config.get("temperature", 0.4))),
             max_tokens=request.get("max_tokens") or self.config.get("max_tokens"),
             timeout=request.get("timeout"),
-            provider_options={"provider": "ollama" if self._local else ""},
+            provider_options={"provider": "llamacpp" if self._local else ""},
             extra_payload=extra_payload or None,
         )
 
@@ -156,6 +169,14 @@ class LLMProvider(Provider):
             api_base, _ = self._credentials()
         except ContentFactoryError as exc:
             return {"provider": self.id, "status": "error", "code": exc.code}
+        if not str(self.model or "").strip():
+            return {
+                "provider": self.id,
+                "status": "error",
+                "code": ErrorCode.PROVIDER_UNAVAILABLE,
+                "apiBase": api_base,
+                "detail": "no default model configured",
+            }
         return {"provider": self.id, "status": "connected", "apiBase": api_base, "model": self.model}
 
 
@@ -211,16 +232,12 @@ def build_llm_providers() -> list[Provider]:
     """Local model first, then every active `openai_compatible` binding."""
     providers: list[Provider] = []
 
-    api_base = (
-        os.environ.get("OLLAMA_BASE_URL")
-        or os.environ.get("LLM_API_BASE")
-        or "http://hermes-ollama:11434"
-    ).rstrip("/")
+    api_base = (os.environ.get("LLAMACPP_BASE_URL") or "http://hermes-llama:8080").rstrip("/")
     providers.append(
         LLMProvider(
             LOCAL_PROVIDER_ID,
             api_base=api_base,
-            model=os.environ.get("LLM_MODEL", "qwen3:8b"),
+            model=os.environ.get("LLM_MODEL", "qwen3.8-27b"),
             local=True,
         )
     )

@@ -15,23 +15,23 @@
 import type { CSSProperties, ReactNode } from 'react';
 
 export const COLORS = {
-  cyan: '#22d3ee',
-  cyanSoft: '#67e8f9',
-  violet: '#a78bfa',
-  green: '#22c55e',
-  greenSoft: '#4ade80',
-  amber: '#f59e0b',
-  amberSoft: '#fbbf24',
-  red: '#ef4444',
-  redSoft: '#f87171',
-  text: '#e2e8f0',
-  muted: '#94a3b8',
-  faint: '#64748b',
-  line: 'rgba(148,163,184,0.16)',
-  lineStrong: 'rgba(148,163,184,0.28)',
-  panel: 'rgba(13,20,38,0.72)',
-  panelSoft: 'rgba(15,23,42,0.5)',
-  inset: 'rgba(8,13,26,0.6)',
+  cyan: '#36cffb',
+  cyanSoft: '#5ee1ff',
+  violet: '#b197ff',
+  green: '#35d49a',
+  greenSoft: '#35d49a',
+  amber: '#f6b84a',
+  amberSoft: '#f6b84a',
+  red: '#f05d75',
+  redSoft: '#f05d75',
+  text: '#e4e8ed',
+  muted: '#99a2b1',
+  faint: '#6c7381',
+  line: 'rgba(153,162,177,0.16)',
+  lineStrong: 'rgba(153,162,177,0.28)',
+  panel: 'rgba(18,21,28,0.72)',
+  panelSoft: 'rgba(20,24,32,0.5)',
+  inset: 'rgba(11,13,19,0.6)',
 } as const;
 
 export const panelStyle: CSSProperties = {
@@ -53,7 +53,7 @@ export function Panel({ title, action, children, style, bodyStyle }: {
       {title !== undefined && (
         <header style={{
           display: 'flex', alignItems: 'center', gap: 10, padding: '11px 14px',
-          borderBottom: `1px solid ${COLORS.line}`, background: 'rgba(8,13,26,0.45)',
+          borderBottom: `1px solid ${COLORS.line}`, background: 'rgba(11,13,19,0.45)',
         }}>
           <h3 style={{
             margin: 0, fontSize: 11, fontWeight: 700, letterSpacing: 1.1,
@@ -126,7 +126,7 @@ export function ProgressBar({ percent, tone = COLORS.cyan, height = 5 }: {
   const clamped = Math.max(0, Math.min(100, percent));
   return (
     <div style={{
-      height, borderRadius: height / 2, background: 'rgba(148,163,184,0.16)', overflow: 'hidden',
+      height, borderRadius: height / 2, background: 'rgba(153,162,177,0.16)', overflow: 'hidden',
     }}>
       <div style={{
         width: `${clamped}%`, height: '100%', borderRadius: height / 2, background: tone,

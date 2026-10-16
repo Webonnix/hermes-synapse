@@ -136,7 +136,7 @@ def _valkey_get(key: str) -> str:
 
 # ── Asset storage ────────────────────────────────────────────────────────────
 
-STORAGE_BACKENDS = ("env", "local", "nextcloud", "s3")
+STORAGE_BACKENDS = ("env", "local", "nextcloud", "s3", "onedrive")
 
 STORAGE_DEFAULTS: dict[str, Any] = {
     # "env" means "keep following CONTENT_FACTORY_* as before" — the value a
@@ -151,6 +151,11 @@ STORAGE_DEFAULTS: dict[str, Any] = {
         "shareDays": 7,
     },
     "s3": {"bucket": "", "endpoint": "", "region": "", "publicUrl": ""},
+    # `clientId` is the one field the owner has to bring from outside: OneDrive
+    # has no password to type, only an app registration to sign in through. The
+    # refresh token that sign-in produces is a secret and lives in the secret
+    # store, never here.
+    "onedrive": {"clientId": "", "tenant": "consumers", "root": ""},
     "local": {"root": ""},
 }
 
@@ -160,6 +165,7 @@ STORAGE_SECRETS = {
     "nextcloudPassword": "CONTENT_FACTORY_NEXTCLOUD_PASSWORD",
     "s3AccessKey": "CONTENT_FACTORY_S3_ACCESS_KEY",
     "s3SecretKey": "CONTENT_FACTORY_S3_SECRET_KEY",
+    "onedriveRefreshToken": "CONTENT_FACTORY_ONEDRIVE_REFRESH_TOKEN",
 }
 
 
@@ -211,7 +217,7 @@ def save_storage_config(patch: dict[str, Any]) -> dict[str, Any]:
         )
     config["backend"] = backend
 
-    for section in ("nextcloud", "s3", "local"):
+    for section in ("nextcloud", "s3", "onedrive", "local"):
         values = patch.get(section)
         if not isinstance(values, dict):
             continue
@@ -311,6 +317,21 @@ def storage_from_config(config: dict[str, Any]):
             share_expire_days=int(section.get("shareDays") or 7),
             public_base_url=str(section.get("publicUrl") or ""),
         )
+    if backend == "onedrive":
+        section = config.get("onedrive") or {}
+        return storage_module.OneDriveStorage(
+            client_id=str(section.get("clientId") or "").strip()
+            or os.environ.get("CONTENT_FACTORY_ONEDRIVE_CLIENT_ID", "").strip(),
+            refresh_token=str(section.get("refreshToken") or "")
+            or read_secret(STORAGE_SECRETS["onedriveRefreshToken"]),
+            tenant=str(section.get("tenant") or "consumers").strip() or "consumers",
+            root=str(section.get("root") or ""),
+            # Microsoft rotates the refresh token on most exchanges; persisting
+            # the new one is what keeps the store alive across restarts.
+            on_token_refreshed=lambda token: write_secret(
+                STORAGE_SECRETS["onedriveRefreshToken"], token
+            ),
+        )
     if backend == "s3":
         section = config.get("s3") or {}
         return storage_module.S3Storage(
@@ -323,6 +344,139 @@ def storage_from_config(config: dict[str, Any]):
         )
     root = str((config.get("local") or {}).get("root") or "").strip()
     return storage_module.LocalStorage(root or storage_module.default_local_root())
+
+
+# ── OneDrive sign-in ─────────────────────────────────────────────────────────
+#
+# Device code rather than a redirect: the dashboard has no fixed public HTTPS
+# origin Microsoft would accept as a redirect URI on every deployment, and the
+# owner signing in is already sitting in front of the machine. The same reason
+# matrix_oauth.py chose it, and the same failure it prevents — a pasted token
+# that expires within the hour (see [[matrix_mas_device_login]]).
+
+# The pending device code is itself a bearer-equivalent for the length of the
+# flow, so it is stored under a secret name like every other credential here.
+_ONEDRIVE_DEVICE_CODE_SECRET = "CONTENT_FACTORY_ONEDRIVE_DEVICE_CODE"
+
+
+def _onedrive_client_id() -> str:
+    config = get_storage_config()
+    return (
+        str((config.get("onedrive") or {}).get("clientId") or "").strip()
+        or os.environ.get("CONTENT_FACTORY_ONEDRIVE_CLIENT_ID", "").strip()
+    )
+
+
+def _onedrive_tenant() -> str:
+    config = get_storage_config()
+    return str((config.get("onedrive") or {}).get("tenant") or "consumers").strip() or "consumers"
+
+
+def start_onedrive_login() -> dict[str, Any]:
+    """Ask Microsoft for a device code. Returns what the owner has to do next:
+    open `verificationUri` and type `userCode`."""
+    import httpx
+
+    from backend.content_factory.storage import ONEDRIVE_SCOPES
+
+    client_id = _onedrive_client_id()
+    if not client_id:
+        raise ContentFactoryError(
+            ErrorCode.VALIDATION_FAILED,
+            "Сначала укажите Client ID приложения Entra и сохраните настройки",
+            retryable=False,
+        )
+    try:
+        response = httpx.post(
+            f"https://login.microsoftonline.com/{_onedrive_tenant()}/oauth2/v2.0/devicecode",
+            data={"client_id": client_id, "scope": ONEDRIVE_SCOPES},
+            timeout=30.0,
+        )
+    except Exception as exc:
+        raise ContentFactoryError(
+            ErrorCode.PROVIDER_UNAVAILABLE, "Microsoft недоступен", retryable=True
+        ) from exc
+    if response.status_code != 200:
+        raise ContentFactoryError(
+            ErrorCode.VALIDATION_FAILED,
+            f"Microsoft отклонил Client ID: {response.text[:200]}",
+            retryable=False,
+        )
+    body = response.json()
+    # The device code itself is a bearer-equivalent for the duration of the
+    # flow, so it goes to the secret store rather than into the settings JSON.
+    write_secret(_ONEDRIVE_DEVICE_CODE_SECRET, str(body.get("device_code") or ""))
+    return {
+        "userCode": body.get("user_code"),
+        "verificationUri": body.get("verification_uri"),
+        "expiresIn": body.get("expires_in"),
+        "interval": body.get("interval", 5),
+    }
+
+
+def finish_onedrive_login() -> dict[str, Any]:
+    """Exchange the pending device code for tokens. Called on a timer by the UI
+    while the owner completes the sign-in in their browser.
+
+    `authorization_pending` is the normal answer until they do, so it is
+    reported as a status rather than raised — a polling caller must be able to
+    tell "not yet" from "this failed".
+    """
+    import httpx
+
+    device_code = read_secret(_ONEDRIVE_DEVICE_CODE_SECRET)
+    if not device_code:
+        raise ContentFactoryError(
+            ErrorCode.VALIDATION_FAILED, "Вход не начат", retryable=False
+        )
+    try:
+        response = httpx.post(
+            f"https://login.microsoftonline.com/{_onedrive_tenant()}/oauth2/v2.0/token",
+            data={
+                "client_id": _onedrive_client_id(),
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                "device_code": device_code,
+            },
+            timeout=30.0,
+        )
+    except Exception as exc:
+        raise ContentFactoryError(
+            ErrorCode.PROVIDER_UNAVAILABLE, "Microsoft недоступен", retryable=True
+        ) from exc
+
+    body = response.json() if response.content else {}
+    if response.status_code == 200:
+        refresh_token = str(body.get("refresh_token") or "")
+        if not refresh_token:
+            raise ContentFactoryError(
+                ErrorCode.PROVIDER_AUTH,
+                "Microsoft не выдал refresh token — в приложении Entra не разрешён offline_access",
+                retryable=False,
+            )
+        write_secret(STORAGE_SECRETS["onedriveRefreshToken"], refresh_token)
+        clear_secret(_ONEDRIVE_DEVICE_CODE_SECRET)
+        reset_storage()
+        return {"status": "connected"}
+
+    error = str(body.get("error") or "")
+    if error in {"authorization_pending", "slow_down"}:
+        return {"status": "pending", "slowDown": error == "slow_down"}
+    clear_secret(_ONEDRIVE_DEVICE_CODE_SECRET)
+    if error == "expired_token":
+        return {"status": "expired"}
+    raise ContentFactoryError(
+        ErrorCode.PROVIDER_AUTH,
+        str(body.get("error_description") or error or "Microsoft отклонил вход")[:300],
+        retryable=False,
+    )
+
+
+def onedrive_sign_out() -> None:
+    """Forget the stored sign-in. The app registration stays; only this
+    deployment's access to the drive goes away."""
+    clear_secret(STORAGE_SECRETS["onedriveRefreshToken"])
+    clear_secret(_ONEDRIVE_DEVICE_CODE_SECRET)
+    reset_storage()
 
 
 def test_storage_config(patch: Optional[dict[str, Any]] = None) -> dict[str, Any]:
@@ -339,7 +493,7 @@ def test_storage_config(patch: Optional[dict[str, Any]] = None) -> dict[str, Any
 
         return storage_module.get_storage().health()
     config["backend"] = backend
-    for section in ("nextcloud", "s3", "local"):
+    for section in ("nextcloud", "s3", "onedrive", "local"):
         values = patch.get(section)
         if isinstance(values, dict):
             config[section] = {**config[section], **values}
@@ -410,6 +564,12 @@ class ProviderSpec:
     # Option → the env var that used to carry it, so a deployment that priced a
     # vendor in `.env` keeps that price until somebody overrides it here.
     option_env: dict[str, str] = field(default_factory=dict)
+    # True when `secret_name` is a credential this provider borrows rather than
+    # owns — ROUTER_API_KEY is the AI Router's key, shared with agent routing
+    # and the tier chain. Disconnecting the provider must then forget the
+    # provider, not the key: clearing it here would silently take down
+    # everything else that routes through the same sidecar.
+    shared_secret: bool = False
 
 
 _API_KEY_FIELD = ProviderField("apiKey", ("API-ключ", "API key"), "secret", required=True)
@@ -433,6 +593,21 @@ CATALOG: tuple[ProviderSpec, ...] = (
         docs="https://replicate.com/account/api-tokens", model_env="REPLICATE_IMAGE_VERSION",
         hint=("В поле модели — версия модели Replicate", "The model field takes a Replicate version id"),
         fields=(_API_KEY_FIELD, _MODEL_FIELD,
+                ProviderField("usdPerImage", ("Цена за изображение, $", "USD per image"), "number")),
+    ),
+    ProviderSpec(
+        "router-image", "IMAGE", ("9Router (изображения)", "9Router (images)"), "ROUTER_API_KEY",
+        docs="https://router.webonnix.net", model_env="ROUTER_IMAGE_MODEL",
+        default_model="gemini/gemini-2.5-flash-image", shared_secret=True,
+        hint=("Картинки через уже подключённые в 9Router аккаунты: "
+              "gemini/gemini-3-pro-image-preview (Nano Banana Pro), gemini/gemini-2.5-flash-image. "
+              "Ключ берётся из «Настройки → API-ключи → AI Router».",
+              "Images through the accounts already connected in 9Router: "
+              "gemini/gemini-3-pro-image-preview (Nano Banana Pro), gemini/gemini-2.5-flash-image. "
+              "The key comes from Settings → API keys → AI Router."),
+        fields=(_MODEL_FIELD,
+                ProviderField("apiBase", ("Адрес 9Router", "9Router base URL"),
+                              placeholder="http://9router:20128"),
                 ProviderField("usdPerImage", ("Цена за изображение, $", "USD per image"), "number")),
     ),
     ProviderSpec(
@@ -641,7 +816,11 @@ def save_media_provider(provider_id: str, patch: dict[str, Any]) -> dict[str, An
     entry["options"] = options
     entry.setdefault("enabled", True)
 
-    if "apiKey" in patch:
+    # A borrowed key is read-only from here for the same reason it is not
+    # cleared on delete: this screen is not where the AI Router's own key is
+    # managed (Настройки → API-ключи is), and letting it be overwritten from
+    # two places is how the two silently disagree.
+    if "apiKey" in patch and not spec.shared_secret:
         value = patch["apiKey"]
         if value is None:
             clear_secret(spec.secret_name)
@@ -664,15 +843,21 @@ def save_media_provider(provider_id: str, patch: dict[str, Any]) -> dict[str, An
 
 def delete_media_provider(provider_id: str) -> None:
     """Forget the key and the configuration. An env-provided key survives this
-    (it is not ours to delete) and the row stays in the catalog as connectable."""
+    (it is not ours to delete) and the row stays in the catalog as connectable.
+
+    A `shared_secret` provider keeps its key too: it never owned it. Clearing
+    ROUTER_API_KEY because somebody disconnected image generation would take the
+    agent fallback chain down with it.
+    """
     spec = CATALOG_BY_ID.get(provider_id)
     if spec is None:
         raise ContentFactoryError(
             ErrorCode.VALIDATION_FAILED, f"Unknown provider: {provider_id}", retryable=False
         )
-    clear_secret(spec.secret_name)
-    for secret_name in spec.extra_secrets.values():
-        clear_secret(secret_name)
+    if not spec.shared_secret:
+        clear_secret(spec.secret_name)
+        for secret_name in spec.extra_secrets.values():
+            clear_secret(secret_name)
     document = get_provider_document()
     document["providers"].pop(provider_id, None)
     for category, current in list(document["defaults"].items()):
@@ -683,16 +868,37 @@ def delete_media_provider(provider_id: str) -> None:
 
 
 def set_category_default(category: str, provider_id: str) -> dict[str, Any]:
-    """Which provider a node of this type gets when it does not name one."""
+    """Which provider a node of this type gets when it does not name one.
+
+    Two kinds of id are valid, because two kinds of provider exist. Media
+    vendors come from `CATALOG` — a fixed list this module owns. Language
+    models do not: `local-llm` plus one provider per approved
+    `provider_bindings` row, whose ids are generated at binding time. Checking
+    only `CATALOG` (which is what this did) silently made "use the external
+    model by default" unreachable — the LLM category could never be pointed at
+    anything but whatever `_load_llm` happened to register first, i.e. always
+    the local model. So an id that is not in the catalog is accepted when the
+    live registry has it under the same category.
+    """
     document = get_provider_document()
     if provider_id:
         spec = CATALOG_BY_ID.get(provider_id)
-        if spec is None or spec.category != category:
+        if spec is not None and spec.category != category:
             raise ContentFactoryError(
                 ErrorCode.VALIDATION_FAILED,
                 f"{provider_id} is not a {category} provider",
                 retryable=False,
             )
+        if spec is None:
+            from backend.content_factory.providers.registry import get_registry
+
+            provider = get_registry().get(provider_id)
+            if provider is None or provider.category != category:
+                raise ContentFactoryError(
+                    ErrorCode.VALIDATION_FAILED,
+                    f"{provider_id} is not a {category} provider",
+                    retryable=False,
+                )
         document["defaults"][category] = provider_id
     else:
         document["defaults"].pop(category, None)
@@ -749,9 +955,9 @@ def list_llm_endpoints() -> dict[str, Any]:
         "id": LOCAL_PROVIDER_ID,
         "name": "local-llm",
         "api_base": (
-            os.environ.get("OLLAMA_BASE_URL") or os.environ.get("LLM_API_BASE") or "http://hermes-ollama:11434"
+            os.environ.get("LLAMACPP_BASE_URL") or "http://hermes-llama:8080"
         ).rstrip("/"),
-        "default_model": os.environ.get("LLM_MODEL", "qwen3:8b"),
+        "default_model": os.environ.get("LLM_MODEL", "qwen3.8-27b"),
         "status": "active",
         "local": True,
     }
@@ -786,33 +992,87 @@ def create_llm_endpoint(
         from backend.provider_governance import create_binding_proposal
 
         proposal = create_binding_proposal(
-            name, "openai_compatible", api_base, api_key, cost_per_1m_input, cost_per_1m_output
+            name, "openai_compatible", api_base, api_key, cost_per_1m_input, cost_per_1m_output,
+            default_model=str(default_model or "").strip(),
         )
     except ValueError as exc:
         raise ContentFactoryError(ErrorCode.VALIDATION_FAILED, str(exc), retryable=False) from exc
 
-    model = str(default_model or "").strip()
-    if model:
-        _set_binding_model(proposal["id"], model)
-        proposal = {**proposal, "default_model": model}
+    reload_registry()
     return proposal
 
 
-def _set_binding_model(binding_id: str, model: str) -> None:
-    """`default_model` is what `build_llm_providers` reads for a binding; the
-    governance module owns the row, so this writes only that one column."""
-    import sqlite3
+async def list_llm_endpoint_models(binding_id: str) -> dict[str, Any]:
+    """`GET {api_base}/models` on an approved binding, as the OpenAI-compatible
+    contract defines it — which is what 9Router, OpenRouter, DeepSeek, vLLM and
+    llama.cpp all answer.
 
-    from backend.database import DB_PATH
+    Never raises for an endpoint that simply does not answer: the caller is a
+    picker, and "I could not list them" has to degrade to typing the name by
+    hand rather than to an error dialog over a settings screen.
+    """
+    from backend.provider_governance import resolve_binding_credentials
 
-    with sqlite3.connect(DB_PATH, timeout=10) as connection:
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(provider_bindings)")}
-        if "default_model" not in columns:
-            connection.execute("ALTER TABLE provider_bindings ADD COLUMN default_model TEXT")
-        connection.execute(
-            "UPDATE provider_bindings SET default_model = ? WHERE id = ?", (model, binding_id)
+    resolved = resolve_binding_credentials(binding_id)
+    if not resolved:
+        raise ContentFactoryError(
+            ErrorCode.PROVIDER_AUTH,
+            "Провайдер не активен — модели недоступны",
+            retryable=False,
+            details={"providerId": binding_id},
         )
+    api_base, api_key = resolved
+
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            response = await client.get(
+                f"{api_base.rstrip('/')}/models",
+                headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
+            )
+    except httpx.HTTPError as exc:
+        logger.warning("Model list for binding %s failed: %s", binding_id, exc)
+        return {"models": [], "error": "endpoint unreachable"}
+
+    if response.status_code != 200:
+        detail = "invalid API key" if response.status_code in (401, 403) else f"HTTP {response.status_code}"
+        return {"models": [], "error": f"GET /models failed: {detail}"}
+
+    try:
+        entries = response.json().get("data") or []
+    except ValueError:
+        return {"models": [], "error": "endpoint returned a non-JSON model list"}
+
+    models: list[str] = []
+    for entry in entries:
+        model_id = entry.get("id") if isinstance(entry, dict) else None
+        if model_id and model_id not in models:
+            models.append(str(model_id))
+    models.sort()
+    return {"models": models, "error": None}
+
+
+def set_llm_endpoint_model(binding_id: str, model: str) -> dict[str, Any]:
+    """Change which model an already-approved endpoint answers with.
+
+    Separate from creation because the two are separate in practice: a binding
+    can arrive from anywhere (POST /api/router/bind-self, the agent admin form,
+    an older build that had no model field at all) and then needs a model named
+    before Content Factory can route a node to it.
+    """
+    from backend.provider_governance import update_binding_model
+
+    try:
+        binding = update_binding_model(binding_id, model)
+    except KeyError as exc:
+        raise ContentFactoryError(
+            ErrorCode.VALIDATION_FAILED, "Провайдер не найден", retryable=False
+        ) from exc
+    except ValueError as exc:
+        raise ContentFactoryError(ErrorCode.VALIDATION_FAILED, str(exc), retryable=False) from exc
     reload_registry()
+    return binding
 
 
 def delete_llm_endpoint(binding_id: str) -> None:
@@ -824,6 +1084,15 @@ def delete_llm_endpoint(binding_id: str) -> None:
         raise ContentFactoryError(
             ErrorCode.VALIDATION_FAILED, "Провайдер не найден", retryable=False
         ) from exc
+    # Same cleanup delete_provider does for a media vendor: a default naming a
+    # binding that no longer exists is ignored at load time anyway, but leaving
+    # it stored means the screen keeps reporting a default that cannot answer.
+    document = get_provider_document()
+    if any(current == binding_id for current in document["defaults"].values()):
+        for category, current in list(document["defaults"].items()):
+            if current == binding_id:
+                document["defaults"].pop(category)
+        _save_document(PROVIDER_SETTING_KEY, document)
     reload_registry()
 
 

@@ -25,6 +25,7 @@ type Draft = {
   backend: CFStorageConfig['backend'];
   nextcloud: CFStorageConfig['nextcloud'];
   s3: CFStorageConfig['s3'];
+  onedrive: CFStorageConfig['onedrive'];
   local: CFStorageConfig['local'];
   nextcloudPassword: string;
   s3AccessKey: string;
@@ -40,6 +41,9 @@ type Props = {
   onSave: (patch: Record<string, unknown>) => Promise<void>;
   onTest: (patch: Record<string, unknown>) => Promise<Record<string, unknown>>;
   onClearSecret: (field: string) => Promise<void>;
+  onOneDriveLogin: () => Promise<Record<string, unknown>>;
+  onOneDrivePoll: () => Promise<Record<string, unknown>>;
+  onOneDriveSignOut: () => Promise<void>;
 };
 
 const BACKEND_LABEL: Record<string, [string, string]> = {
@@ -47,6 +51,7 @@ const BACKEND_LABEL: Record<string, [string, string]> = {
   local: ['Локальный диск', 'Local disk'],
   nextcloud: ['Nextcloud', 'Nextcloud'],
   s3: ['S3 / MinIO / R2', 'S3 / MinIO / R2'],
+  onedrive: ['OneDrive', 'OneDrive'],
 };
 
 const BACKEND_HINT: Record<string, [string, string]> = {
@@ -68,6 +73,12 @@ const BACKEND_HINT: Record<string, [string, string]> = {
     'Любой S3-совместимый endpoint: AWS, MinIO, Backblaze B2, Cloudflare R2.',
     'Any S3-compatible endpoint: AWS, MinIO, Backblaze B2, Cloudflare R2.',
   ],
+  onedrive: [
+    'Личный или рабочий OneDrive через Microsoft Graph. Пароль не нужен: вход один раз по коду, '
+    + 'дальше работает refresh token. Ссылки для площадок — временные прямые адреса Graph.',
+    'Personal or work OneDrive over Microsoft Graph. No password: one device-code sign-in, then a '
+    + 'refresh token. Platform links are Graph\'s own short-lived direct URLs.',
+  ],
 };
 
 function toDraft(config: CFStorageConfig): Draft {
@@ -75,6 +86,7 @@ function toDraft(config: CFStorageConfig): Draft {
     backend: config.backend,
     nextcloud: { ...config.nextcloud },
     s3: { ...config.s3 },
+    onedrive: { ...(config.onedrive ?? { clientId: '', tenant: 'consumers', root: '' }) },
     local: { ...config.local },
     nextcloudPassword: '',
     s3AccessKey: '',
@@ -84,6 +96,7 @@ function toDraft(config: CFStorageConfig): Draft {
 
 export function StoragePanel({
   config, usage, language, busy, canEdit = true, onSave, onTest, onClearSecret,
+  onOneDriveLogin, onOneDrivePoll, onOneDriveSignOut,
 }: Props) {
   const ru = language === 'ru';
   const [draft, setDraft] = useState<Draft | null>(config ? toDraft(config) : null);
@@ -106,6 +119,7 @@ export function StoragePanel({
       backend: draft.backend,
       nextcloud: draft.nextcloud,
       s3: draft.s3,
+      onedrive: draft.onedrive,
       local: draft.local,
     };
     // An empty secret box means "keep what is stored" — sending "" would be
@@ -186,7 +200,7 @@ export function StoragePanel({
                   style={{
                     padding: '8px 12px', borderRadius: 9, fontSize: 12, cursor: canEdit ? 'pointer' : 'default',
                     color: selected ? COLORS.cyanSoft : COLORS.muted,
-                    background: selected ? 'rgba(34,211,238,0.10)' : COLORS.panelSoft,
+                    background: selected ? 'rgba(54,207,251,0.10)' : COLORS.panelSoft,
                     border: `1px solid ${selected ? COLORS.cyan : COLORS.line}`,
                   }}
                 >
@@ -293,6 +307,47 @@ export function StoragePanel({
             </>
           )}
 
+          {draft.backend === 'onedrive' && (
+            <>
+              <Field label="Client ID"
+                hint={ru
+                  ? 'Регистрация приложения в Entra (portal.azure.com → App registrations), тип «Public client», '
+                    + 'разрешения Files.ReadWrite и offline_access. Секрет приложения не нужен.'
+                  : 'An Entra app registration (portal.azure.com → App registrations), public-client type, '
+                    + 'with Files.ReadWrite and offline_access. No client secret needed.'}>
+                <input style={inputStyle} value={draft.onedrive.clientId} disabled={!canEdit}
+                  onChange={(event) => set({ onedrive: { ...draft.onedrive, clientId: event.target.value } })} />
+              </Field>
+              <Field label={ru ? 'Тип аккаунта' : 'Account type'}
+                hint={ru
+                  ? 'consumers — личный OneDrive, organizations — рабочий, common — оба.'
+                  : 'consumers is a personal OneDrive, organizations a work one, common allows both.'}>
+                <select style={inputStyle} value={draft.onedrive.tenant} disabled={!canEdit}
+                  onChange={(event) => set({ onedrive: { ...draft.onedrive, tenant: event.target.value } })}>
+                  <option value="consumers">consumers</option>
+                  <option value="organizations">organizations</option>
+                  <option value="common">common</option>
+                </select>
+              </Field>
+              <Field label={ru ? 'Папка' : 'Folder'}
+                hint={ru ? 'Необязательно: папка внутри диска.' : 'Optional: a folder inside the drive.'}>
+                <input style={inputStyle} value={draft.onedrive.root} disabled={!canEdit}
+                  onChange={(event) => set({ onedrive: { ...draft.onedrive, root: event.target.value } })} />
+              </Field>
+              <OneDriveSignIn
+                ru={ru}
+                canEdit={canEdit}
+                busy={busy}
+                dirty={dirty}
+                signedIn={config.secrets.onedriveRefreshToken === 'stored'
+                  || config.secrets.onedriveRefreshToken === 'env'}
+                onLogin={onOneDriveLogin}
+                onPoll={onOneDrivePoll}
+                onSignOut={onOneDriveSignOut}
+              />
+            </>
+          )}
+
           {draft.backend === 'local' && (
             <Field label={ru ? 'Каталог на диске' : 'Directory on disk'}
               hint={ru ? 'Пусто — каталог по умолчанию внутри контейнера.' : 'Empty uses the default inside the container.'}>
@@ -368,6 +423,109 @@ export function StoragePanel({
   );
 }
 
+/** The OneDrive sign-in, which is a small state machine rather than a field:
+ *  ask Microsoft for a code, show it to the owner, poll until they have typed
+ *  it into their browser. Polling stops on any terminal answer — connected,
+ *  expired, or an error — so a forgotten tab does not keep hitting Microsoft. */
+function OneDriveSignIn({ ru, canEdit, busy, dirty, signedIn, onLogin, onPoll, onSignOut }: {
+  ru: boolean;
+  canEdit: boolean;
+  busy?: boolean;
+  dirty: boolean;
+  signedIn: boolean;
+  onLogin: () => Promise<Record<string, unknown>>;
+  onPoll: () => Promise<Record<string, unknown>>;
+  onSignOut: () => Promise<void>;
+}) {
+  const [code, setCode] = useState('');
+  const [uri, setUri] = useState('');
+  const [state, setState] = useState<'idle' | 'waiting' | 'done' | 'error'>('idle');
+  const [message, setMessage] = useState('');
+
+  useEffect(() => {
+    if (state !== 'waiting') return undefined;
+    const timer = setInterval(async () => {
+      try {
+        const result = await onPoll();
+        const status = String(result.status ?? '');
+        if (status === 'connected') {
+          setState('done');
+          setMessage(ru ? 'OneDrive подключён.' : 'OneDrive connected.');
+        } else if (status === 'expired') {
+          setState('error');
+          setMessage(ru ? 'Код истёк — начните вход заново.' : 'The code expired — start again.');
+        }
+      } catch (error) {
+        setState('error');
+        setMessage(error instanceof Error ? error.message : String(error));
+      }
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [state, onPoll, ru]);
+
+  const start = async () => {
+    setState('idle');
+    setMessage('');
+    try {
+      const result = await onLogin();
+      setCode(String(result.userCode ?? ''));
+      setUri(String(result.verificationUri ?? ''));
+      setState('waiting');
+    } catch (error) {
+      setState('error');
+      setMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  return (
+    <div style={{
+      borderRadius: 10, border: `1px solid ${COLORS.line}`, background: COLORS.panelSoft,
+      padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap' }}>
+        <strong style={{ fontSize: 12, color: COLORS.text }}>
+          {ru ? 'Вход в аккаунт' : 'Account sign-in'}
+        </strong>
+        <Chip tone={signedIn ? 'green' : 'muted'}>
+          {signedIn ? (ru ? 'выполнен' : 'signed in') : (ru ? 'не выполнен' : 'signed out')}
+        </Chip>
+        <span style={{ flex: 1 }} />
+        <button type="button" className="btn-ghost" style={{ fontSize: 11.5 }}
+          disabled={!canEdit || busy || state === 'waiting'} onClick={() => void start()}>
+          {signedIn ? (ru ? 'Войти заново' : 'Sign in again') : (ru ? 'Войти' : 'Sign in')}
+        </button>
+        {signedIn && (
+          <button type="button" className="btn-ghost" style={{ fontSize: 11.5, color: COLORS.redSoft }}
+            disabled={!canEdit || busy} onClick={() => void onSignOut()}>
+            {ru ? 'Выйти' : 'Sign out'}
+          </button>
+        )}
+      </div>
+      {dirty && (
+        <span style={{ fontSize: 11, color: COLORS.amberSoft }}>
+          {ru
+            ? 'Сначала сохраните Client ID — вход использует сохранённое значение, а не поле выше.'
+            : 'Save the client id first — the sign-in uses the stored value, not the field above.'}
+        </span>
+      )}
+      {state === 'waiting' && (
+        <div style={{ fontSize: 11.5, color: COLORS.muted, lineHeight: 1.6 }}>
+          {ru ? 'Откройте ' : 'Open '}
+          <a href={uri} target="_blank" rel="noreferrer" style={{ color: COLORS.cyanSoft }}>{uri}</a>
+          {ru ? ' и введите код ' : ' and enter the code '}
+          <code style={{ fontSize: 13, color: COLORS.text, letterSpacing: 1 }}>{code}</code>
+          {ru ? '. Страница обновится сама.' : '. This panel updates itself.'}
+        </div>
+      )}
+      {message && (
+        <span style={{ fontSize: 11.5, color: state === 'error' ? COLORS.redSoft : COLORS.greenSoft }}>
+          {message}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function SecretField({ label, hint, source, value, disabled, ru, onChange, onClear }: {
   label: string;
   hint?: string;
@@ -437,7 +595,7 @@ function Banner({ tone, icon, children }: {
 }) {
   const color = { amber: COLORS.amberSoft, red: COLORS.redSoft, green: COLORS.greenSoft }[tone];
   const background = {
-    amber: 'rgba(69,45,10,0.5)', red: 'rgba(69,17,17,0.5)', green: 'rgba(11,52,29,0.45)',
+    amber: 'rgba(44,51,64,0.5)', red: 'rgba(69,17,17,0.5)', green: 'rgba(11,52,29,0.45)',
   }[tone];
   return (
     <div style={{

@@ -18,7 +18,7 @@
  *   not a second way around it.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import {
   Brain, Check, KeyRound, Plus, Star, Trash2, Zap,
 } from 'lucide-react';
@@ -37,6 +37,8 @@ type Props = {
   onSetDefault: (category: string, providerId: string) => Promise<void>;
   onCreateLlm: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
   onDeleteLlm: (bindingId: string) => Promise<void>;
+  onUpdateLlm: (bindingId: string, defaultModel: string) => Promise<void>;
+  onLoadLlmModels: (bindingId: string) => Promise<string[]>;
 };
 
 const CATEGORY_LABEL: Record<string, [string, string]> = {
@@ -49,7 +51,7 @@ const CATEGORY_ORDER = ['IMAGE', 'VIDEO', 'VOICE'];
 
 export function ProvidersPanel({
   providers, llm, language, busy, canEdit = true,
-  onSave, onDelete, onTest, onSetDefault, onCreateLlm, onDeleteLlm,
+  onSave, onDelete, onTest, onSetDefault, onCreateLlm, onDeleteLlm, onUpdateLlm, onLoadLlmModels,
 }: Props) {
   const ru = language === 'ru';
 
@@ -105,6 +107,9 @@ export function ProvidersPanel({
         canEdit={canEdit}
         onCreate={onCreateLlm}
         onDelete={onDeleteLlm}
+        onSetDefault={onSetDefault}
+        onUpdateModel={onUpdateLlm}
+        onLoadModels={onLoadLlmModels}
       />
     </div>
   );
@@ -286,13 +291,18 @@ function ProviderCard({ provider, ru, busy, canEdit, onSave, onDelete, onTest, o
   );
 }
 
-function LlmEndpoints({ llm, ru, busy, canEdit, onCreate, onDelete }: {
+function LlmEndpoints({
+  llm, ru, busy, canEdit, onCreate, onDelete, onSetDefault, onUpdateModel, onLoadModels,
+}: {
   llm: CFLLMEndpoints | null;
   ru: boolean;
   busy?: boolean;
   canEdit: boolean;
   onCreate: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
   onDelete: (bindingId: string) => Promise<void>;
+  onSetDefault: (category: string, providerId: string) => Promise<void>;
+  onUpdateModel: (bindingId: string, defaultModel: string) => Promise<void>;
+  onLoadModels: (bindingId: string) => Promise<string[]>;
 }) {
   const [form, setForm] = useState({ name: '', apiBase: '', apiKey: '', defaultModel: '' });
   const [notice, setNotice] = useState('');
@@ -315,8 +325,8 @@ function LlmEndpoints({ llm, ru, busy, canEdit, onCreate, onDelete }: {
     >
       <p style={{ margin: '0 0 12px', fontSize: 11, color: COLORS.faint, lineHeight: 1.55 }}>
         {ru
-          ? 'Любой OpenAI-совместимый endpoint: 9Router, DeepSeek, OpenAI, vLLM. Новый провайдер требует подтверждения владельца — ключ до этого момента хранится с ограниченным сроком жизни.'
-          : 'Any OpenAI-compatible endpoint: 9Router, DeepSeek, OpenAI, vLLM. A new one needs owner approval; until then its key is stored with a short expiry.'}
+          ? 'Любой OpenAI-совместимый endpoint: 9Router, DeepSeek, OpenAI, vLLM. Новый провайдер требует подтверждения владельца — ключ до этого момента хранится с ограниченным сроком жизни. Звёздочкой отмечена модель, которой отвечают текстовые ноды, когда не выбрана своя.'
+          : 'Any OpenAI-compatible endpoint: 9Router, DeepSeek, OpenAI, vLLM. A new one needs owner approval; until then its key is stored with a short expiry. The star marks the model text nodes use when they name none.'}
       </p>
 
       {llm && (
@@ -326,6 +336,9 @@ function LlmEndpoints({ llm, ru, busy, canEdit, onCreate, onDelete }: {
             detail={`${llm.local.api_base} · ${llm.local.default_model}`}
             status={ru ? 'локальная' : 'local'}
             tone="cyan"
+            isDefault={!llm.default || llm.default === llm.local.id}
+            onMakeDefault={canEdit ? () => onSetDefault('LLM', llm.local.id) : undefined}
+            ru={ru}
           />
           {llm.bindings.map((binding) => (
             <EndpointRow
@@ -335,8 +348,31 @@ function LlmEndpoints({ llm, ru, busy, canEdit, onCreate, onDelete }: {
               status={binding.status}
               tone={binding.status === 'active' ? 'green' : binding.status === 'awaiting_approval' ? 'amber' : 'muted'}
               onDelete={canEdit ? () => onDelete(binding.id) : undefined}
+              isDefault={llm.default === binding.id}
+              // Only an active binding can be the default: an unapproved one
+              // would leave every text node pointing at something nothing may
+              // call yet.
+              onMakeDefault={canEdit && binding.status === 'active'
+                ? () => onSetDefault('LLM', binding.id) : undefined}
+              modelEditor={canEdit && binding.status === 'active' ? (
+                <ModelPicker
+                  ru={ru}
+                  busy={busy}
+                  value={binding.default_model || ''}
+                  onLoad={() => onLoadModels(binding.id)}
+                  onSave={(model) => onUpdateModel(binding.id, model)}
+                />
+              ) : undefined}
+              ru={ru}
             />
           ))}
+          {llm.bindings.some((binding) => binding.status === 'active' && !binding.default_model) && (
+            <p style={{ margin: '8px 0 0', fontSize: 10.5, color: COLORS.amberSoft, lineHeight: 1.5 }}>
+              {ru
+                ? 'У активного провайдера не выбрана модель — нода, направленная на него, остановится с ошибкой. Выберите модель ниже.'
+                : 'An active provider has no model — a node routed to it stops with an error. Pick a model below.'}
+            </p>
+          )}
         </div>
       )}
 
@@ -379,31 +415,112 @@ function LlmEndpoints({ llm, ru, busy, canEdit, onCreate, onDelete }: {
   );
 }
 
-function EndpointRow({ name, detail, status, tone, onDelete }: {
+function EndpointRow({
+  name, detail, status, tone, onDelete, isDefault, onMakeDefault, modelEditor, ru,
+}: {
   name: string;
   detail: string;
   status: string;
   tone: 'cyan' | 'green' | 'amber' | 'muted';
   onDelete?: () => Promise<void>;
+  isDefault?: boolean;
+  onMakeDefault?: () => Promise<void>;
+  modelEditor?: ReactNode;
+  ru?: boolean;
 }) {
   return (
-    <div style={{
-      display: 'flex', alignItems: 'center', gap: 9, padding: '8px 0',
-      borderTop: `1px solid ${COLORS.line}`,
-    }}>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 12, color: COLORS.text }}>{name}</div>
-        <div style={{ fontSize: 10, color: COLORS.faint, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          {detail}
+    <div style={{ padding: '8px 0', borderTop: `1px solid ${COLORS.line}` }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 12, color: COLORS.text, display: 'flex', alignItems: 'center', gap: 6 }}>
+            {name}
+            {isDefault && (
+              <span title={ru ? 'По умолчанию для текстовых нод' : 'Default for text nodes'}
+                style={{ display: 'inline-flex', color: COLORS.amberSoft }}>
+                <Star size={11} />
+              </span>
+            )}
+          </div>
+          <div style={{ fontSize: 10, color: COLORS.faint, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {detail}
+          </div>
         </div>
+        <Chip tone={tone}>{status}</Chip>
+        {onMakeDefault && !isDefault && (
+          <button type="button" className="btn-ghost" style={{ fontSize: 10.5 }}
+            onClick={() => void onMakeDefault()}>
+            <Star size={12} /> {ru ? 'По умолчанию' : 'Make default'}
+          </button>
+        )}
+        {onDelete && (
+          <button type="button" className="btn-ghost" style={{ fontSize: 10.5, color: COLORS.redSoft }}
+            onClick={() => void onDelete()}>
+            <Trash2 size={12} />
+          </button>
+        )}
       </div>
-      <Chip tone={tone}>{status}</Chip>
-      {onDelete && (
-        <button type="button" className="btn-ghost" style={{ fontSize: 10.5, color: COLORS.redSoft }}
-          onClick={() => void onDelete()}>
-          <Trash2 size={12} />
-        </button>
-      )}
+      {modelEditor && <div style={{ marginTop: 6 }}>{modelEditor}</div>}
+    </div>
+  );
+}
+
+/** Model field for one endpoint: a text input until the endpoint's own
+ * `GET /models` answers, then a list to pick from. It stays a text input when
+ * that call fails, because an endpoint that cannot list its models is still
+ * perfectly able to serve one you name. */
+function ModelPicker({ value, ru, busy, onLoad, onSave }: {
+  value: string;
+  ru: boolean;
+  busy?: boolean;
+  onLoad: () => Promise<string[]>;
+  onSave: (model: string) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState(value);
+  const [models, setModels] = useState<string[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [note, setNote] = useState('');
+
+  useEffect(() => { setDraft(value); }, [value]);
+
+  const load = async () => {
+    setLoading(true);
+    setNote('');
+    try {
+      const list = await onLoad();
+      setModels(list);
+      if (list.length === 0) {
+        setNote(ru ? 'Endpoint не отдал список — впишите имя модели вручную.'
+          : 'The endpoint did not list any — type the model name.');
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+      <div style={{ flex: '1 1 220px' }}>
+        <Field label={ru ? 'Модель по умолчанию' : 'Default model'}>
+          {models && models.length > 0 ? (
+            <select style={inputStyle} value={draft} onChange={(event) => setDraft(event.target.value)}>
+              <option value="">{ru ? '— не выбрана —' : '— none —'}</option>
+              {models.map((model) => <option key={model} value={model}>{model}</option>)}
+            </select>
+          ) : (
+            <input style={inputStyle} value={draft} placeholder="ag/gemini-3.7-flash-high"
+              onChange={(event) => setDraft(event.target.value)} />
+          )}
+        </Field>
+      </div>
+      <button type="button" className="btn-ghost" style={{ fontSize: 11 }}
+        disabled={loading || busy} onClick={() => void load()}>
+        {loading ? (ru ? 'Загрузка…' : 'Loading…') : (ru ? 'Список моделей' : 'List models')}
+      </button>
+      <button type="button" className="btn-primary" style={{ fontSize: 11 }}
+        disabled={busy || draft === value} onClick={() => void onSave(draft)}>
+        {ru ? 'Сохранить' : 'Save'}
+      </button>
+      {note && <span style={{ fontSize: 10.5, color: COLORS.faint }}>{note}</span>}
     </div>
   );
 }

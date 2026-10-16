@@ -799,6 +799,35 @@ async def test_storage_config(request: Request, payload: dict[str, Any] = Body(d
         raise _handle(exc) from exc
 
 
+@router.post("/storage/onedrive/login")
+async def start_onedrive_login(request: Request) -> dict[str, Any]:
+    """Begin the OneDrive device-code sign-in. The response is the code and URL
+    the owner takes to their browser; nothing is stored until they finish."""
+    permissions.require(request, permissions.CF_SETTINGS_EDIT)
+    try:
+        return await asyncio.to_thread(integrations_store.start_onedrive_login)
+    except ContentFactoryError as exc:
+        raise _handle(exc) from exc
+
+
+@router.post("/storage/onedrive/poll")
+async def poll_onedrive_login(request: Request) -> dict[str, Any]:
+    """Has the owner finished signing in yet? `pending` until they have, which
+    is a status rather than an error — the UI polls this on a timer."""
+    permissions.require(request, permissions.CF_SETTINGS_EDIT)
+    try:
+        return await asyncio.to_thread(integrations_store.finish_onedrive_login)
+    except ContentFactoryError as exc:
+        raise _handle(exc) from exc
+
+
+@router.post("/storage/onedrive/sign-out")
+async def sign_out_onedrive(request: Request) -> dict[str, Any]:
+    permissions.require(request, permissions.CF_SETTINGS_EDIT)
+    await asyncio.to_thread(integrations_store.onedrive_sign_out)
+    return {"status": "signed_out"}
+
+
 @router.get("/integrations/providers")
 async def integration_providers(request: Request) -> dict[str, Any]:
     """The catalog of connectable media providers — connected or not — with the
@@ -859,9 +888,10 @@ async def set_category_default(
 @router.get("/integrations/llm")
 async def llm_endpoints(request: Request) -> dict[str, Any]:
     """The local model plus every external OpenAI-compatible endpoint and its
-    approval state."""
+    approval state, and which of them LLM nodes use when they name none."""
     permissions.require(request, permissions.CF_VIEW)
-    return await asyncio.to_thread(integrations_store.list_llm_endpoints)
+    endpoints = await asyncio.to_thread(integrations_store.list_llm_endpoints)
+    return {**endpoints, "default": integrations_store.category_defaults().get("LLM", "")}
 
 
 @router.post("/integrations/llm")
@@ -891,6 +921,37 @@ async def create_llm_endpoint(request: Request, payload: dict[str, Any] = Body(.
         "approvalRequired": proposal.get("status") != "active",
         "taskId": proposal.get("control_task_id"),
     }
+
+
+@router.put("/integrations/llm/{binding_id}")
+async def update_llm_endpoint(
+    request: Request, binding_id: str, payload: dict[str, Any] = Body(...)
+) -> dict[str, Any]:
+    """Name the model an already-approved endpoint answers with.
+
+    R0, not R3: the endpoint and its key were approved when the binding was
+    created, and this changes neither.
+    """
+    permissions.require(request, permissions.CF_SETTINGS_EDIT)
+    try:
+        binding = await asyncio.to_thread(
+            integrations_store.set_llm_endpoint_model, binding_id, str(payload.get("defaultModel") or "")
+        )
+    except ContentFactoryError as exc:
+        raise _handle(exc) from exc
+    return {"binding": binding}
+
+
+@router.get("/integrations/llm/{binding_id}/models")
+async def llm_endpoint_models(request: Request, binding_id: str) -> dict[str, Any]:
+    """What this endpoint says it can serve, so the model field is a list to
+    pick from rather than a string to mistype. An endpoint that does not answer
+    `GET /models` returns an empty list and the UI stays a free-text field."""
+    permissions.require(request, permissions.CF_VIEW)
+    try:
+        return await integrations_store.list_llm_endpoint_models(binding_id)
+    except ContentFactoryError as exc:
+        raise _handle(exc) from exc
 
 
 @router.delete("/integrations/llm/{binding_id}")

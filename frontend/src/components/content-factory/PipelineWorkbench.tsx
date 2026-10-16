@@ -1,13 +1,12 @@
 import { useMemo, useState } from 'react';
 import {
   Activity, Bot, Check, Clock3, FileText, Globe2, Image as ImageIcon, Mic2,
-  Pause, Play, Plus, Rocket, Scissors, Upload, Video,
+  Pause, Play, Plus, Rocket, Scissors, Upload, Video, WandSparkles,
 } from 'lucide-react';
 import type {
   CFActivityItem, CFAgentDetail, CFAgentRow, CFAsset, CFChannel, CFEdge, CFNode, CFPipeline, CFQueue, CFRun,
-  CFPipelineCreateRequest, CFProviderRow, CFSettings, CFStats, CFTemplate, CFTraceEntry, CFValidation,
+  CFStats, CFTraceEntry, CFValidation,
 } from './types';
-import { PipelineWizard } from './PipelineWizard';
 import './pipeline-workbench.css';
 import './pipeline-workbench-activity.css';
 
@@ -23,15 +22,12 @@ type Props = {
   validation: CFValidation | null;
   agents: CFAgentRow[];
   agentDetail: CFAgentDetail | null;
-  templates: CFTemplate[];
   // Control-centre panels, each measured by the backend rather than guessed
   // from whatever happens to be loaded on screen (dashboard.py).
   queue: CFQueue | null;
   activity: CFActivityItem[];
   stats: CFStats | null;
   channels: CFChannel[];
-  providers: CFProviderRow[];
-  settings: CFSettings | null;
   assets: CFAsset[];
   logs: { at: string | null; nodeId: string; text: string; level?: string }[];
   busy: boolean;
@@ -40,7 +36,8 @@ type Props = {
   onStart: (dryRun: boolean, topic: string) => void;
   onPause: () => void;
   onActivate: () => void;
-  onTemplate: (template: CFTemplate, request: CFPipelineCreateRequest) => Promise<void>;
+  /** Pipeline creation lives on its own tab; the workbench only points at it. */
+  onOpenWizard: () => void;
   onAgent: (agentId: string) => void;
   onAsset: (assetId: string) => void;
   onOpenAgents?: () => void;
@@ -86,8 +83,8 @@ function MiniChart({ stats, empty }: { stats: CFStats | null; empty: string }) {
 export function PipelineWorkbench(props: Props) {
   const {
     language, pipelines, pipeline, nodes, run, trace, validation, agents, agentDetail,
-    templates, queue, activity, stats, channels, providers, settings, assets, logs: runLogs, busy,
-    onPipeline, onRun, onStart, onPause, onActivate, onTemplate, onAgent, onAsset,
+    queue, activity, stats, channels, assets, logs: runLogs, busy,
+    onPipeline, onRun, onStart, onPause, onActivate, onOpenWizard, onAgent, onAsset,
     onOpenAgents, onConfigureChannel,
   } = props;
   const ru = language === 'ru';
@@ -141,11 +138,17 @@ export function PipelineWorkbench(props: Props) {
                 </>
               ) : pipeline ? <button disabled={busy || !!validation?.errors?.length} onClick={onActivate}><Check size={12} />{ru ? 'Активировать' : 'Activate'}</button> : null}
               <button className="accent" disabled={busy || !pipeline || !topic.trim()} onClick={() => onStart(true, topic.trim())}><Plus size={12} />{ru ? 'Тестовый прогон' : 'Test run'}</button>
+              <button onClick={onOpenWizard}><WandSparkles size={12} />{ru ? 'Мастер pipeline' : 'Pipeline wizard'}</button>
             </div>
           </header>
 
           {!pipeline ? (
-            <div className="cfw-empty">{ru ? 'Создайте pipeline из шаблона в нижней панели.' : 'Create a pipeline from a template below.'}</div>
+            <div className="cfw-empty">
+              <p>{ru ? 'Пайплайнов пока нет.' : 'No pipelines yet.'}</p>
+              <button className="cfw-inline-action" onClick={onOpenWizard}>
+                <WandSparkles size={12} />{ru ? 'Открыть мастер pipeline' : 'Open the pipeline wizard'}
+              </button>
+            </div>
           ) : (
             <>
               <div className="cfw-stages" aria-label={ru ? 'Этапы пайплайна' : 'Pipeline stages'}>
@@ -270,11 +273,6 @@ export function PipelineWorkbench(props: Props) {
                   : (ru ? 'Метрики загружаются' : 'Loading metrics')}</p>
               </article>}
             </div>
-          </div>
-
-          <div className="cfw-panel cfw-create cfw-create-wizard">
-            <PipelineWizard language={language} templates={templates} channels={channels}
-              providers={providers} settings={settings} busy={busy} onCreate={onTemplate} />
           </div>
         </section>
       </div>

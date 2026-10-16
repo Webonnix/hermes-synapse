@@ -1,11 +1,11 @@
 .cfw-activity em {
-  color: #8abbd5;
+  color: #36cffb;
   font-size: 8px;
   font-style: normal;
 }
 
 .cfw-activity i {
-  color: #ff607e;
+  color: #f05d75;
   font-size: 7px;
   font-style: normal;
 }
@@ -14,10 +14,10 @@
   width: 180px;
   min-width: 120px;
   padding: 7px 9px;
-  border: 1px solid rgba(48, 119, 168, 0.3);
+  border: 1px solid rgba(157, 166, 181, 0.21);
   border-radius: 5px;
-  background: rgba(5, 24, 40, 0.8);
-  color: #c7e3f2;
+  background: rgba(19, 22, 30, 0.8);
+  color: #dadee5;
   font-size: 9px;
 }
 
@@ -28,16 +28,16 @@ button.cfw-stage {
 
 button.cfw-stage:hover,
 button.cfw-stage.is-selected {
-  border-color: #31baff;
+  border-color: #9da6b5b2;
   transform: translateY(-2px);
-  box-shadow: 0 0 18px rgba(30, 164, 255, 0.22);
+  box-shadow: 0 0 18px rgba(59, 130, 246, 0.11);
 }
 
 .cfw-agent-tabs {
   display: flex;
   gap: 20px;
   padding: 8px 4px;
-  color: #68879b;
+  color: #7b8391;
   font-size: 9px;
 }
 
@@ -46,24 +46,24 @@ button.cfw-stage.is-selected {
   border: 0;
   border-bottom: 1px solid transparent;
   background: transparent;
-  color: #68879b;
+  color: #7b8391;
   font-size: 9px;
   cursor: pointer;
 }
 
 .cfw-agent-tabs button.active {
-  border-color: #3acfff;
-  color: #3acfff;
+  border-color: #9da6b5b2;
+  color: #36cffb;
 }
 
 .cfw-inline-action,
 .cfw-create-action,
 .cfw-fix button {
   padding: 7px 10px;
-  border: 1px solid rgba(36, 203, 255, 0.45);
+  border: 1px solid rgba(157, 166, 181, 0.315);
   border-radius: 5px;
-  background: rgba(18, 94, 184, 0.16);
-  color: #5ecfff;
+  background: rgba(59, 130, 246, 0.16);
+  color: #36cffb;
   font-size: 9px;
   cursor: pointer;
 }
@@ -74,8 +74,8 @@ button.cfw-stage.is-selected {
 }
 
 .cfw-template-list button.selected {
-  border-color: rgba(36, 203, 255, 0.7);
-  background: rgba(18, 94, 184, 0.2);
+  border-color: rgba(157, 166, 181, 0.49);
+  background: rgba(59, 130, 246, 0.2);
 }
 
 .cfw-fix {
@@ -87,9 +87,9 @@ button.cfw-stage.is-selected {
 .cfw-fix select {
   width: 100%;
   padding: 6px;
-  border: 1px solid rgba(48, 119, 168, 0.3);
+  border: 1px solid rgba(157, 166, 181, 0.21);
   border-radius: 4px;
-  background: #061522;
-  color: #bcd3df;
+  background: #11141b;
+  color: #cacfd8;
   font-size: 8px;
 }

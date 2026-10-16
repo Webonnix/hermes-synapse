@@ -18,16 +18,18 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   AlertTriangle, BadgeCheck, BarChart3, Clock, Coins, Eye, Factory, FileVideo, Heart, Layers,
-  MessageCircle, Network, Play, Plug, Plus, RefreshCw, Share2, ShieldCheck, Wallet, X,
+  MessageCircle, Network, Play, Plug, Plus, RefreshCw, Share2, ShieldCheck, Wallet, WandSparkles, X,
 } from 'lucide-react';
 import { PipelineWorkbench } from './content-factory/PipelineWorkbench';
+import { PipelineWizard } from './content-factory/PipelineWizard';
 import { IntegrationsPanel } from './content-factory/IntegrationsPanel';
 import { SettingsPanel } from './content-factory/SettingsPanel';
 import { StoragePanel } from './content-factory/StoragePanel';
 import type {
   CFActivityItem, CFAgentDetail, CFAgentRow, CFAnalyticsOverview, CFAsset, CFChannel, CFContentItem,
   CFEdge, CFEvent, CFIntegrations, CFLLMEndpoints, CFLiveRun, CFMediaProvider, CFNode, CFOverview,
-  CFPipeline, CFProviderRow, CFQueue, CFRun, CFSettings, CFStats, CFStorageConfig, CFStorageUsage,
+  CFPipeline, CFPipelineCreateRequest, CFProviderRow, CFQueue, CFRun, CFSettings, CFStats,
+  CFStorageConfig, CFStorageUsage,
   CFTemplate, CFTraceEntry, CFValidation,
 } from './content-factory/types';
 
@@ -37,12 +39,13 @@ type Props = {
   onOpenAgents?: () => void;
 };
 
-type View = 'pipelines' | 'queue' | 'analytics' | 'storage' | 'channels' | 'integrations' | 'settings';
+type View = 'pipelines' | 'wizard' | 'queue' | 'analytics' | 'storage' | 'channels' | 'integrations' | 'settings';
 
 const COPY = {
   ru: {
     title: 'CONTENT FACTORY', subtitle: 'Автономное производство и публикация контента',
-    overview: 'Обзор', pipelines: 'Пайплайны', queue: 'Очередь', analytics: 'Аналитика', channels: 'Аккаунты',
+    overview: 'Обзор', pipelines: 'Пайплайны', wizard: 'Мастер pipeline',
+    queue: 'Очередь', analytics: 'Аналитика', channels: 'Аккаунты',
     agents: 'Агенты и модели', refresh: 'Обновить',
     activePipelines: 'Активных пайплайнов', processing: 'В работе', review: 'Ждут проверки',
     scheduled: 'Запланировано', publishedToday: 'Опубликовано сегодня', failed: 'Ошибок',
@@ -81,10 +84,16 @@ const COPY = {
     storageTitle: 'Хранилище ассетов',
     noAssets: 'Ассетов пока нет — они появятся после первого прогона.',
     settingsSaved: 'Настройки сохранены.',
+    wizardSubtitle: 'Соберите новый pipeline из шаблона: контент, надёжность, публикация.',
+    wizardTemplates: 'Доступно шаблонов', wizardChannels: 'Подключено аккаунтов',
+    wizardPipelines: 'Уже создано pipelines',
+    wizardNoTemplates: 'Шаблоны не загрузились — без них мастер не может создать pipeline.',
+    wizardBackToPipelines: 'К пайплайнам',
   },
   en: {
     title: 'CONTENT FACTORY', subtitle: 'Autonomous content production and publishing',
-    overview: 'Overview', pipelines: 'Pipelines', queue: 'Queue', analytics: 'Analytics', channels: 'Accounts',
+    overview: 'Overview', pipelines: 'Pipelines', wizard: 'Pipeline wizard',
+    queue: 'Queue', analytics: 'Analytics', channels: 'Accounts',
     agents: 'Agents & models', refresh: 'Refresh',
     activePipelines: 'Active pipelines', processing: 'Processing', review: 'Review required',
     scheduled: 'Scheduled', publishedToday: 'Published today', failed: 'Failed',
@@ -123,12 +132,17 @@ const COPY = {
     storageTitle: 'Asset storage',
     noAssets: 'No assets yet — they appear after the first run.',
     settingsSaved: 'Settings saved.',
+    wizardSubtitle: 'Build a new pipeline from a template: content, reliability, publishing.',
+    wizardTemplates: 'Templates available', wizardChannels: 'Accounts connected',
+    wizardPipelines: 'Pipelines already created',
+    wizardNoTemplates: 'No templates loaded — the wizard cannot create a pipeline without one.',
+    wizardBackToPipelines: 'Back to pipelines',
   },
 } as const;
 
 const RUN_STATUS_COLOR: Record<string, string> = {
-  QUEUED: '#94a3b8', RUNNING: '#22d3ee', WAITING: '#38bdf8', WAITING_APPROVAL: '#a78bfa',
-  COMPLETED: '#22c55e', PARTIALLY_COMPLETED: '#f59e0b', FAILED: '#ef4444', CANCELLED: '#64748b',
+  QUEUED: '#99a2b1', RUNNING: '#36cffb', WAITING: '#36cffb', WAITING_APPROVAL: '#b197ff',
+  COMPLETED: '#35d49a', PARTIALLY_COMPLETED: '#f6b84a', FAILED: '#f05d75', CANCELLED: '#6c7381',
 };
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -179,19 +193,19 @@ function Kpi({ icon, label, value, tone }: {
   return (
     <div style={{
       flex: '1 1 150px', minWidth: 150, padding: '14px 16px', borderRadius: 12,
-      background: 'rgba(15,23,42,0.62)', border: '1px solid rgba(148,163,184,0.16)',
+      background: 'rgba(20,24,32,0.62)', border: '1px solid rgba(153,162,177,0.16)',
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#94a3b8', fontSize: 11,
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#99a2b1', fontSize: 11,
         textTransform: 'uppercase', letterSpacing: 0.6 }}>
         {icon}<span>{label}</span>
       </div>
-      <div style={{ marginTop: 8, fontSize: 24, fontWeight: 700, color: tone ?? '#e2e8f0' }}>{value}</div>
+      <div style={{ marginTop: 8, fontSize: 24, fontWeight: 700, color: tone ?? '#e4e8ed' }}>{value}</div>
     </div>
   );
 }
 
 function StatusPill({ status }: { status: string }) {
-  const color = RUN_STATUS_COLOR[status] ?? '#94a3b8';
+  const color = RUN_STATUS_COLOR[status] ?? '#99a2b1';
   return (
     <span style={{
       display: 'inline-block', padding: '2px 8px', borderRadius: 999, fontSize: 10,
@@ -217,9 +231,9 @@ function AnalyticsPanel({ data, label, empty }: {
     ? points.map((point, index) => `${(index / (points.length - 1)) * 100},${42 - (point.views / max) * 36}`).join(' ')
     : '';
   return (
-    <aside style={{ padding: 14, borderRadius: 12, background: 'linear-gradient(145deg, rgba(7,25,43,.9), rgba(8,15,30,.78))',
-      border: '1px solid rgba(34,211,238,.2)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 7, color: '#bae6fd', fontSize: 11,
+    <aside style={{ padding: 14, borderRadius: 12, background: 'linear-gradient(145deg, rgba(20,24,32,.9), rgba(13,15,21,.78))',
+      border: '1px solid rgba(157,166,181,0.14)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, color: '#dbdfe6', fontSize: 11,
         fontWeight: 700, letterSpacing: .7, textTransform: 'uppercase' }}>
         <BarChart3 size={13} />{label.statistics}<span style={{ flex: 1 }} />7D
       </div>
@@ -230,18 +244,18 @@ function AnalyticsPanel({ data, label, empty }: {
           [label.engagement, `${Number(data?.engagementRate ?? 0).toFixed(1)}%`, <Share2 size={12} />]
           ].map(([name, value, icon]) => (
           <div key={String(name)}>
-            <div style={{ display: 'flex', gap: 5, alignItems: 'center', color: '#64748b', fontSize: 10 }}>{icon}{name}</div>
-            <div style={{ color: '#e2e8f0', fontSize: 20, fontWeight: 700, marginTop: 3 }}>{value}</div>
+            <div style={{ display: 'flex', gap: 5, alignItems: 'center', color: '#6c7381', fontSize: 10 }}>{icon}{name}</div>
+            <div style={{ color: '#e4e8ed', fontSize: 20, fontWeight: 700, marginTop: 3 }}>{value}</div>
           </div>
         ))}
       </div>
       {polyline ? (
         <svg viewBox="0 0 100 46" preserveAspectRatio="none" style={{ width: '100%', height: 90, marginTop: 10 }}>
-          <defs><linearGradient id="cf-chart" x1="0" y1="0" x2="1" y2="0"><stop stopColor="#6366f1"/><stop offset="1" stopColor="#22d3ee"/></linearGradient></defs>
-          {[10, 22, 34, 46].map((y) => <line key={y} x1="0" x2="100" y1={y} y2={y} stroke="rgba(148,163,184,.1)" strokeWidth=".5" />)}
+          <defs><linearGradient id="cf-chart" x1="0" y1="0" x2="1" y2="0"><stop stopColor="#7c5cfc"/><stop offset="1" stopColor="#36cffb"/></linearGradient></defs>
+          {[10, 22, 34, 46].map((y) => <line key={y} x1="0" x2="100" y1={y} y2={y} stroke="rgba(153,162,177,.1)" strokeWidth=".5" />)}
           <polyline points={polyline} fill="none" stroke="url(#cf-chart)" strokeWidth="1.6" vectorEffect="non-scaling-stroke" />
         </svg>
-      ) : <p style={{ color: '#64748b', fontSize: 11, lineHeight: 1.4, margin: '18px 0 4px' }}>{empty}</p>}
+      ) : <p style={{ color: '#6c7381', fontSize: 11, lineHeight: 1.4, margin: '18px 0 4px' }}>{empty}</p>}
     </aside>
   );
 }
@@ -433,7 +447,7 @@ export function ContentFactoryTab({ language, lastEvent, onOpenAgents }: Props) 
   }, [t.loadFailed]);
 
   useEffect(() => {
-    if (view === 'pipelines') void loadPipelines();
+    if (view === 'pipelines' || view === 'wizard') void loadPipelines();
     if (view === 'queue') void loadQueue();
     if (view === 'channels') void loadChannels();
     if (view === 'analytics') void loadAnalytics();
@@ -449,6 +463,16 @@ export function ContentFactoryTab({ language, lastEvent, onOpenAgents }: Props) 
     void loadChannels();
     void loadSettings();
   }, [view, loadAgents, loadOverview, loadControlCentre, loadChannels, loadSettings]);
+
+  // The wizard needs its own inputs: templates come with loadPipelines above,
+  // the provider chain from /providers, and accounts + defaults decide what it
+  // is allowed to offer (activation without a connected channel is refused).
+  useEffect(() => {
+    if (view !== 'wizard') return;
+    void loadAgents();
+    void loadChannels();
+    void loadSettings();
+  }, [view, loadAgents, loadChannels, loadSettings]);
 
   useEffect(() => {
     if (view === 'pipelines' && !selectedPipeline && pipelines[0]) void openPipeline(pipelines[0].id);
@@ -484,6 +508,34 @@ export function ContentFactoryTab({ language, lastEvent, onOpenAgents }: Props) 
     }
   }, []);
 
+  /**
+   * Pipeline creation (the wizard tab). A blocked activation is an error the
+   * owner must see: the backend created the draft but refused to make it live,
+   * and saying nothing would look like a successful launch.
+   */
+  const createPipeline = useCallback(async (template: CFTemplate, request: CFPipelineCreateRequest) => {
+    await act(async () => {
+      const result = await api<{
+        pipeline: CFPipeline;
+        activation?: { status: 'ACTIVE' | 'BLOCKED'; error?: { code: string; message: string } };
+      }>(`/templates/${template.id}/instantiate`, {
+        method: 'POST', body: JSON.stringify({
+          name: request.name, options: request.options, activate: request.activate,
+        }),
+      });
+      await loadPipelines();
+      await openPipeline(result.pipeline.id);
+      // The new pipeline is what the owner asked for, so hand them the
+      // workbench that now has it selected.
+      setView('pipelines');
+      if (result.activation?.status === 'BLOCKED') {
+        const blocked = new Error(result.activation.error?.message || 'Pipeline activation was blocked') as Error & { code?: string };
+        blocked.code = result.activation.error?.code;
+        throw blocked;
+      }
+    });
+  }, [act, loadPipelines, openPipeline]);
+
   const graph = useMemo(() => {
     const version = selectedPipeline?.version;
     if (!version) return { nodes: [] as CFNode[], edges: [] as CFEdge[] };
@@ -498,15 +550,18 @@ export function ContentFactoryTab({ language, lastEvent, onOpenAgents }: Props) 
   return (
     <div style={{ padding: '20px 24px', height: '100%', overflowY: 'auto' }}>
       <header style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 18 }}>
-        <Factory size={22} color="#22d3ee" />
+        <Factory size={22} color="#36cffb" />
         <div style={{ flex: 1 }}>
-          <h2 style={{ margin: 0, fontSize: 18, letterSpacing: 1.2, color: '#e2e8f0' }}>{t.title}</h2>
-          <p style={{ margin: '2px 0 0', fontSize: 12, color: '#64748b' }}>{t.subtitle}</p>
+          <h2 style={{ margin: 0, fontSize: 18, letterSpacing: 1.2, color: '#e4e8ed' }}>{t.title}</h2>
+          <p style={{ margin: '2px 0 0', fontSize: 12, color: '#6c7381' }}>{t.subtitle}</p>
         </div>
         <button
           onClick={() => act(async () => {
             if (view === 'pipelines') {
               await Promise.all([loadPipelines(), loadControlCentre(), loadOverview()]);
+            }
+            if (view === 'wizard') {
+              await Promise.all([loadPipelines(), loadChannels(), loadAgents(), loadSettings()]);
             }
             if (view === 'queue') await loadQueue();
             if (view === 'channels') await loadChannels();
@@ -524,7 +579,7 @@ export function ContentFactoryTab({ language, lastEvent, onOpenAgents }: Props) 
 
       <nav aria-label={t.title} style={{ display: 'flex', gap: 6, marginBottom: 18, flexWrap: 'wrap' }}>
         {([
-          ['pipelines', t.pipelines], ['queue', t.queue], ['analytics', t.analytics],
+          ['pipelines', t.pipelines], ['wizard', t.wizard], ['queue', t.queue], ['analytics', t.analytics],
           ['storage', t.storage], ['channels', t.channels],
           ['integrations', t.integrations], ['settings', t.settingsTab],
         ] as [View, string][]).map(([key, label]) => (
@@ -533,9 +588,9 @@ export function ContentFactoryTab({ language, lastEvent, onOpenAgents }: Props) 
             onClick={() => setView(key)}
             style={{
               padding: '7px 14px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer',
-              border: `1px solid ${view === key ? 'rgba(34,211,238,0.55)' : 'rgba(148,163,184,0.2)'}`,
-              background: view === key ? 'rgba(34,211,238,0.12)' : 'rgba(15,23,42,0.5)',
-              color: view === key ? '#67e8f9' : '#94a3b8',
+              border: `1px solid ${view === key ? 'rgba(54,207,251,0.55)' : 'rgba(153,162,177,0.2)'}`,
+              background: view === key ? 'rgba(54,207,251,0.12)' : 'rgba(20,24,32,0.5)',
+              color: view === key ? '#5ee1ff' : '#99a2b1',
             }}
           >{label}</button>
         ))}
@@ -544,16 +599,16 @@ export function ContentFactoryTab({ language, lastEvent, onOpenAgents }: Props) 
       {error && (
         <div role="alert" style={{
           marginBottom: 14, padding: '10px 14px', borderRadius: 10, fontSize: 12,
-          background: 'rgba(69,17,17,0.6)', border: '1px solid rgba(239,68,68,0.4)', color: '#fca5a5',
+          background: 'rgba(69,17,17,0.6)', border: '1px solid rgba(240,93,117,0.4)', color: '#f05d75',
         }}>
           <AlertTriangle size={13} style={{ verticalAlign: -2, marginRight: 6 }} />{error}
         </div>
       )}
 
-      {mockActive && (view === 'pipelines' || view === 'integrations') && (
+      {mockActive && (view === 'pipelines' || view === 'wizard' || view === 'integrations') && (
         <div style={{
           marginBottom: 14, padding: '10px 14px', borderRadius: 10, fontSize: 12,
-          background: 'rgba(69,45,10,0.55)', border: '1px solid rgba(245,158,11,0.4)', color: '#fbbf24',
+          background: 'rgba(44,51,64,0.55)', border: '1px solid rgba(246,184,74,0.4)', color: '#f6b84a',
         }}>
           <ShieldCheck size={13} style={{ verticalAlign: -2, marginRight: 6 }} />{t.mockWarning}
         </div>
@@ -561,9 +616,9 @@ export function ContentFactoryTab({ language, lastEvent, onOpenAgents }: Props) 
 
       {view === 'analytics' && (
         <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 300px), 1fr))', gap: 16 }}>
-          <div style={{ padding: 18, borderRadius: 12, background: 'rgba(8,15,30,.7)', border: '1px solid rgba(148,163,184,.14)' }}>
-            <h3 style={{ color: '#e2e8f0', fontSize: 15, margin: '0 0 6px' }}>{t.statistics}</h3>
-            <p style={{ color: '#64748b', fontSize: 11, margin: '0 0 18px' }}>{analytics?.publications ?? 0} publications · 7 days</p>
+          <div style={{ padding: 18, borderRadius: 12, background: 'rgba(13,15,21,.7)', border: '1px solid rgba(153,162,177,.14)' }}>
+            <h3 style={{ color: '#e4e8ed', fontSize: 15, margin: '0 0 6px' }}>{t.statistics}</h3>
+            <p style={{ color: '#6c7381', fontSize: 11, margin: '0 0 18px' }}>{analytics?.publications ?? 0} publications · 7 days</p>
             <button className="btn-primary" disabled={busy} onClick={() => act(
               () => api('/analytics/refresh', { method: 'POST', body: '{}' }),
               async () => { await loadAnalytics(); await loadChannels(); },
@@ -579,13 +634,13 @@ export function ContentFactoryTab({ language, lastEvent, onOpenAgents }: Props) 
         <>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>
           <Kpi icon={<Layers size={13} />} label={t.activePipelines} value={overview?.activePipelines ?? 0} />
-          <Kpi icon={<Play size={13} />} label={t.processing} value={overview?.processing ?? 0} tone="#67e8f9" />
-          <Kpi icon={<BadgeCheck size={13} />} label={t.review} value={overview?.reviewRequired ?? 0} tone="#c4b5fd" />
+          <Kpi icon={<Play size={13} />} label={t.processing} value={overview?.processing ?? 0} tone="#5ee1ff" />
+          <Kpi icon={<BadgeCheck size={13} />} label={t.review} value={overview?.reviewRequired ?? 0} tone="#b197ff" />
           <Kpi icon={<Clock size={13} />} label={t.scheduled} value={overview?.scheduled ?? 0} />
           <Kpi icon={<FileVideo size={13} />} label={t.publishedToday} value={overview?.publishedToday ?? 0}
-            tone="#4ade80" />
+            tone="#35d49a" />
           <Kpi icon={<AlertTriangle size={13} />} label={t.failed} value={overview?.failed ?? 0}
-            tone={(overview?.failed ?? 0) > 0 ? '#f87171' : undefined} />
+            tone={(overview?.failed ?? 0) > 0 ? '#f05d75' : undefined} />
           <Kpi icon={<Coins size={13} />} label={t.costToday} value={money(overview?.costToday)} />
           <Kpi icon={<Wallet size={13} />} label={t.costMonth} value={money(overview?.costMonth)} />
         </div>
@@ -601,13 +656,10 @@ export function ContentFactoryTab({ language, lastEvent, onOpenAgents }: Props) 
           validation={validation}
           agents={agents}
           agentDetail={agentDetail}
-          templates={templates}
           queue={queue}
           activity={activity}
           stats={stats}
           channels={channels}
-          providers={providers}
-          settings={settings}
           assets={(live?.assets ?? []) as CFAsset[]}
           logs={live?.logs ?? []}
           busy={busy}
@@ -652,37 +704,53 @@ export function ContentFactoryTab({ language, lastEvent, onOpenAgents }: Props) 
               async () => { await loadPipelines(); await openPipeline(selectedPipeline.id); },
             );
           }}
-          onTemplate={async (template, request) => {
-            await act(async () => {
-              const result = await api<{
-                pipeline: CFPipeline;
-                activation?: { status: 'ACTIVE' | 'BLOCKED'; error?: { code: string; message: string } };
-              }>(`/templates/${template.id}/instantiate`, {
-                method: 'POST', body: JSON.stringify({
-                  name: request.name, options: request.options, activate: request.activate,
-                }),
-              });
-              await loadPipelines();
-              await openPipeline(result.pipeline.id);
-              if (result.activation?.status === 'BLOCKED') {
-                const blocked = new Error(result.activation.error?.message || 'Pipeline activation was blocked') as Error & { code?: string };
-                blocked.code = result.activation.error?.code;
-                throw blocked;
-              }
-            });
-          }}
+          onOpenWizard={() => setView('wizard')}
         />
         </>
       )}
 
 
+      {view === 'wizard' && (
+        <section className="cf-wizard-page">
+          <div className="cf-wizard-intro">
+            <div>
+              <h3><WandSparkles size={15} />{t.wizard}</h3>
+              <p>{t.wizardSubtitle}</p>
+            </div>
+            <button className="btn-ghost" onClick={() => setView('pipelines')}>{t.wizardBackToPipelines}</button>
+          </div>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>
+            <Kpi icon={<Layers size={13} />} label={t.wizardTemplates} value={templates.length} />
+            <Kpi icon={<Plug size={13} />} label={t.wizardChannels}
+              value={channels.filter((channel) => channel.status === 'CONNECTED').length}
+              tone={channels.some((channel) => channel.status === 'CONNECTED') ? '#35d49a' : undefined} />
+            <Kpi icon={<Network size={13} />} label={t.wizardPipelines} value={pipelines.length} />
+          </div>
+          {templates.length === 0 ? (
+            <p style={{ color: '#f6b84a', fontSize: 12 }}>{t.wizardNoTemplates}</p>
+          ) : (
+            <div className="cfw-panel cf-wizard-card">
+              <PipelineWizard
+                language={language}
+                templates={templates}
+                channels={channels}
+                providers={providers}
+                settings={settings}
+                busy={busy}
+                onCreate={createPipeline}
+              />
+            </div>
+          )}
+        </section>
+      )}
+
       {view === 'queue' && (
         <section>
-          {content.length === 0 && <p style={{ color: '#64748b', fontSize: 12 }}>{t.contentEmpty}</p>}
+          {content.length === 0 && <p style={{ color: '#6c7381', fontSize: 12 }}>{t.contentEmpty}</p>}
           {content.length > 0 && (
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
               <thead>
-                <tr style={{ color: '#64748b', textAlign: 'left' }}>
+                <tr style={{ color: '#6c7381', textAlign: 'left' }}>
                   <th style={{ padding: '8px' }}>{t.title_}</th>
                   <th style={{ padding: '8px' }}>{t.status}</th>
                   <th style={{ padding: '8px' }}>{t.quality}</th>
@@ -692,14 +760,14 @@ export function ContentFactoryTab({ language, lastEvent, onOpenAgents }: Props) 
               </thead>
               <tbody>
                 {content.map((item) => (
-                  <tr key={item.id} style={{ borderTop: '1px solid rgba(148,163,184,0.1)' }}>
-                    <td style={{ padding: '9px 8px', color: '#e2e8f0' }}>{item.title || item.id}</td>
+                  <tr key={item.id} style={{ borderTop: '1px solid rgba(153,162,177,0.1)' }}>
+                    <td style={{ padding: '9px 8px', color: '#e4e8ed' }}>{item.title || item.id}</td>
                     <td style={{ padding: '9px 8px' }}><StatusPill status={item.status} /></td>
-                    <td style={{ padding: '9px 8px', color: '#94a3b8' }}>
+                    <td style={{ padding: '9px 8px', color: '#99a2b1' }}>
                       {item.quality_score != null ? item.quality_score.toFixed(2) : '—'}
                     </td>
-                    <td style={{ padding: '9px 8px', color: '#94a3b8' }}>{money(item.cost)}</td>
-                    <td style={{ padding: '9px 8px', color: '#64748b' }}>{shortTime(item.created_at)}</td>
+                    <td style={{ padding: '9px 8px', color: '#99a2b1' }}>{money(item.cost)}</td>
+                    <td style={{ padding: '9px 8px', color: '#6c7381' }}>{shortTime(item.created_at)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -715,8 +783,8 @@ export function ContentFactoryTab({ language, lastEvent, onOpenAgents }: Props) 
               style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Plus size={13} />{t.connectAccount}</button>
           </div>
           {channelEditor && (
-            <div style={{ padding: 16, marginBottom: 14, borderRadius: 12, background: 'rgba(7,25,43,.85)', border: '1px solid rgba(34,211,238,.28)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', marginBottom: 12 }}><strong style={{ color: '#e2e8f0', fontSize: 13 }}>{channelEditor === 'new' ? t.connectAccount : t.editConnection}</strong><span style={{ flex: 1 }} /><button className="btn-ghost" onClick={() => setChannelEditor(null)}><X size={13} /></button></div>
+            <div style={{ padding: 16, marginBottom: 14, borderRadius: 12, background: 'rgba(20,24,32,.85)', border: '1px solid rgba(157,166,181,0.196)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', marginBottom: 12 }}><strong style={{ color: '#e4e8ed', fontSize: 13 }}>{channelEditor === 'new' ? t.connectAccount : t.editConnection}</strong><span style={{ flex: 1 }} /><button className="btn-ghost" onClick={() => setChannelEditor(null)}><X size={13} /></button></div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 10 }}>
                 <select value={channelForm.platform} disabled={channelEditor !== 'new'} onChange={(event) => setChannelForm({ ...channelForm, platform: event.target.value })} style={{ padding: 9, borderRadius: 7 }}><option>YOUTUBE</option><option>TIKTOK</option></select>
                 <input aria-label={t.account} placeholder={t.account} value={channelForm.accountName} disabled={channelEditor !== 'new'} onChange={(event) => setChannelForm({ ...channelForm, accountName: event.target.value })} />
@@ -735,21 +803,21 @@ export function ContentFactoryTab({ language, lastEvent, onOpenAgents }: Props) 
               })} style={{ marginTop: 12 }}>{t.save}</button>
             </div>
           )}
-          {channels.length === 0 && <p style={{ color: '#64748b', fontSize: 12 }}>{t.channelsEmpty}</p>}
+          {channels.length === 0 && <p style={{ color: '#6c7381', fontSize: 12 }}>{t.channelsEmpty}</p>}
           {channels.map((channel) => (
             <div key={channel.id} style={{
               display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8, padding: '12px 14px',
-              borderRadius: 10, background: 'rgba(15,23,42,0.6)', border: '1px solid rgba(148,163,184,0.16)',
+              borderRadius: 10, background: 'rgba(20,24,32,0.6)', border: '1px solid rgba(153,162,177,0.16)',
             }}>
-              <Plug size={15} color="#22d3ee" />
+              <Plug size={15} color="#36cffb" />
               <div style={{ flex: 1 }}>
-                <div style={{ color: '#e2e8f0', fontSize: 13 }}>{channel.account_name}</div>
-                <div style={{ color: '#64748b', fontSize: 11 }}>{channel.platform} · {channel.proxy_enabled ? `${t.proxy}: ${channel.proxy_host}` : `${t.proxy}: —`} · {t.statistics}: {shortTime(channel.analytics_updated_at)}</div>
+                <div style={{ color: '#e4e8ed', fontSize: 13 }}>{channel.account_name}</div>
+                <div style={{ color: '#6c7381', fontSize: 11 }}>{channel.platform} · {channel.proxy_enabled ? `${t.proxy}: ${channel.proxy_host}` : `${t.proxy}: —`} · {t.statistics}: {shortTime(channel.analytics_updated_at)}</div>
               </div>
               <StatusPill status={channel.status} />
               <button className="btn-ghost" onClick={() => { setChannelEditor(channel.id); setChannelForm({ platform: channel.platform, accountName: channel.account_name, refreshToken: '', clientId: '', clientSecret: '', proxyUrl: '' }); }}><Network size={13} /> {t.editConnection}</button>
               {channel.last_error && (
-                <span style={{ color: '#f87171', fontSize: 11 }}>{channel.last_error}</span>
+                <span style={{ color: '#f05d75', fontSize: 11 }}>{channel.last_error}</span>
               )}
             </div>
           ))}
@@ -778,6 +846,17 @@ export function ContentFactoryTab({ language, lastEvent, onOpenAgents }: Props) 
               () => api('/storage/config', { method: 'PUT', body: JSON.stringify({ [field]: null }) }),
               loadIntegrations,
             );
+          }}
+          onOneDriveLogin={() => api<Record<string, unknown>>('/storage/onedrive/login', { method: 'POST' })}
+          onOneDrivePoll={async () => {
+            const result = await api<Record<string, unknown>>('/storage/onedrive/poll', { method: 'POST' });
+            // Only a finished sign-in changes anything worth reloading; the
+            // "still pending" answer arrives every five seconds.
+            if (result.status === 'connected') await loadIntegrations();
+            return result;
+          }}
+          onOneDriveSignOut={async () => {
+            await act(() => api('/storage/onedrive/sign-out', { method: 'POST' }), loadIntegrations);
           }}
         />
       )}
@@ -828,6 +907,27 @@ export function ContentFactoryTab({ language, lastEvent, onOpenAgents }: Props) 
               () => api(`/integrations/llm/${encodeURIComponent(bindingId)}`, { method: 'DELETE' }),
               loadIntegrations,
             );
+          }}
+          onUpdateLlm={async (bindingId, defaultModel) => {
+            await act(
+              () => api(`/integrations/llm/${encodeURIComponent(bindingId)}`, {
+                method: 'PUT', body: JSON.stringify({ defaultModel }),
+              }),
+              loadIntegrations,
+            );
+          }}
+          onLoadLlmModels={async (bindingId) => {
+            // Deliberately not routed through `act`: a picker that cannot list
+            // its options must degrade to a text field, not raise a banner over
+            // the settings screen.
+            try {
+              const result = await api<{ models?: string[] }>(
+                `/integrations/llm/${encodeURIComponent(bindingId)}/models`,
+              );
+              return result.models ?? [];
+            } catch {
+              return [];
+            }
           }}
         />
       )}
