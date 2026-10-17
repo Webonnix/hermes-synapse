@@ -83,3 +83,26 @@ def test_list_documents():
     titles = [d["title"] for d in docs]
     assert "Document One" in titles
     assert "Document Two" in titles
+
+
+def test_private_sources_need_an_explicit_filter_and_agent_filter_scopes_them():
+    rag.index_document("owner-doc", "Owner", "кодовый замок сейфа", source="manual")
+    rag.index_document("learned-a", "Agent A note", "кодовый подход A", source="agent_learning",
+                       extra_payload={"agent_id": "a"})
+    rag.index_document("learned-b", "Agent B note", "кодовый подход B", source="agent_learning",
+                       extra_payload={"agent_id": "b"})
+
+    generic = rag.search_memory("кодовый", limit=5, threshold=0.1)
+    assert {hit["doc_id"] for hit in generic} == {"owner-doc"}
+
+    scoped = rag.search_memory("кодовый", limit=5, threshold=0.1,
+                               source_filter="agent_learning", agent_filter="a")
+    assert [hit["doc_id"] for hit in scoped] == ["learned-a"]
+    assert scoped[0]["agent_id"] == "a"
+
+
+def test_extra_payload_cannot_override_core_fields():
+    rag.index_document("doc-1", "Title", "кодовый текст", source="manual",
+                       extra_payload={"doc_id": "spoofed", "source": "obsidian"})
+    hit = rag.search_memory("кодовый", limit=1, threshold=0.1)[0]
+    assert hit["doc_id"] == "doc-1" and hit["source"] == "manual"

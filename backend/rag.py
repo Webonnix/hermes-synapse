@@ -1,7 +1,7 @@
 import os
 import uuid
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from fastembed import TextEmbedding
@@ -11,6 +11,8 @@ logger = logging.getLogger("hermes.rag")
 QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
 COLLECTION_NAME = "hermes_memory"
+# Excluded from searches that do not name them in source_filter.
+PRIVATE_SOURCES = frozenset({"agent_learning"})
 
 # Lazy-loaded embedding model and Qdrant client
 _embedding_model = None
@@ -72,7 +74,8 @@ def chunk_text(text: str, chunk_size: int = 600, overlap: int = 150) -> List[str
     return chunks
 
 def raw_index_document(doc_id: str, title: str, text: str,
-                      source: str = "manual", note_path: str = "") -> bool:
+                      source: str = "manual", note_path: str = "",
+                      extra_payload: Optional[Dict[str, Any]] = None) -> bool:
     """Chunks the text, generates embeddings, and uploads them to Qdrant.
     
     Args:
@@ -81,6 +84,8 @@ def raw_index_document(doc_id: str, title: str, text: str,
         text:      Raw document text to embed.
         source:    Origin tag: 'obsidian' | 'upload' | 'manual'.
         note_path: Vault-relative path for Obsidian notes (e.g. 'Daily/2026-06-23.md').
+        extra_payload: Additional payload fields stored on every chunk (e.g. agent_id
+                   for agent_learning items). Cannot override the core fields.
     """
     try:
         client = get_qdrant_client()
@@ -106,6 +111,7 @@ def raw_index_document(doc_id: str, title: str, text: str,
                     id=point_id,
                     vector=vector.tolist(),
                     payload={
+                        **(extra_payload or {}),
                         "doc_id": doc_id,
                         "title": title,
                         "chunk_index": i,
@@ -127,11 +133,17 @@ def raw_index_document(doc_id: str, title: str, text: str,
         return False
 
 def raw_search_memory(query: str, limit: int = 3, threshold: float = 0.7,
-                      source_filter: str = "") -> List[Dict[str, Any]]:
+                      source_filter: str = "", agent_filter: str = "") -> List[Dict[str, Any]]:
     """Searches memory for relevant chunks and returns list of hits above the threshold.
     
     Args:
         source_filter: If set, only return results from this source ('obsidian', 'upload', 'manual').
+        agent_filter:  If set, only return chunks whose payload agent_id matches.
+
+    Sources in PRIVATE_SOURCES are returned only when asked for by name: an
+    agent's learned notes belong to that agent (backend/agent_learning.py), and
+    leaking them into every generic auto-RAG lookup would grow every agent's
+    context with every learning run.
     """
     try:
         client = get_qdrant_client()
@@ -142,18 +154,8 @@ def raw_search_memory(query: str, limit: int = 3, threshold: float = 0.7,
         
         logger.info(f"Searching memory for query: '{query}' (source_filter={source_filter or 'all'})...")
         
-        # Build optional source filter
-        query_filter = None
-        if source_filter:
-            query_filter = models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="source",
-                        match=models.MatchValue(value=source_filter)
-                    )
-                ]
-            )
-        
+        query_filter = _search_filter(source_filter, agent_filter)
+
         res = client.query_points(
             collection_name=COLLECTION_NAME,
             query=query_vector,
@@ -172,12 +174,29 @@ def raw_search_memory(query: str, limit: int = 3, threshold: float = 0.7,
                 "content": hit.payload.get("content"),
                 "source": hit.payload.get("source", "manual"),
                 "note_path": hit.payload.get("note_path", ""),
+                "agent_id": hit.payload.get("agent_id", ""),
+                "item_id": hit.payload.get("item_id", ""),
             })
         logger.info(f"Found {len(results)} search results.")
         return results
     except Exception as e:
         logger.error(f"Error searching vector DB: {e}")
         return []
+
+def _search_filter(source_filter: str = "", agent_filter: str = ""):
+    must = []
+    must_not = []
+    if source_filter:
+        must.append(models.FieldCondition(key="source", match=models.MatchValue(value=source_filter)))
+    else:
+        must_not.extend(
+            models.FieldCondition(key="source", match=models.MatchValue(value=private))
+            for private in sorted(PRIVATE_SOURCES)
+        )
+    if agent_filter:
+        must.append(models.FieldCondition(key="agent_id", match=models.MatchValue(value=agent_filter)))
+    return models.Filter(must=must or None, must_not=must_not or None)
+
 
 def raw_delete_document(doc_id: str) -> bool:
     """Deletes all vector points associated with a document ID."""
@@ -255,14 +274,17 @@ def init_rag():
     get_memory_engine().init_memory()
 
 def index_document(doc_id: str, title: str, text: str,
-                   source: str = "manual", note_path: str = "") -> bool:
+                   source: str = "manual", note_path: str = "",
+                   extra_payload: Optional[Dict[str, Any]] = None) -> bool:
     from backend.memory import get_memory_engine
-    return get_memory_engine().index_document(doc_id, title, text, source, note_path)
+    return get_memory_engine().index_document(doc_id, title, text, source, note_path,
+                                              extra_payload=extra_payload)
 
 def search_memory(query: str, limit: int = 3, threshold: float = 0.7,
-                  source_filter: str = "") -> List[Dict[str, Any]]:
+                  source_filter: str = "", agent_filter: str = "") -> List[Dict[str, Any]]:
     from backend.memory import get_memory_engine
-    return get_memory_engine().search_memory(query, limit, threshold, source_filter)
+    return get_memory_engine().search_memory(query, limit, threshold, source_filter,
+                                             agent_filter=agent_filter)
 
 def delete_document(doc_id: str) -> bool:
     from backend.memory import get_memory_engine

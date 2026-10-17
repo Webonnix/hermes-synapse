@@ -22,13 +22,14 @@ class MemoryEngine(ABC):
 
     @abstractmethod
     def index_document(self, doc_id: str, title: str, text: str,
-                       source: str = "manual", note_path: str = "") -> bool:
+                       source: str = "manual", note_path: str = "",
+                       extra_payload: Optional[Dict[str, Any]] = None) -> bool:
         """Index a document into the memory store."""
         pass
 
     @abstractmethod
     def search_memory(self, query: str, limit: int = 3, threshold: float = 0.7,
-                      source_filter: str = "") -> List[Dict[str, Any]]:
+                      source_filter: str = "", agent_filter: str = "") -> List[Dict[str, Any]]:
         """Search memory for relevant chunks."""
         pass
 
@@ -55,14 +56,15 @@ class QdrantMemoryEngine(MemoryEngine):
         raw_init_rag()
 
     def index_document(self, doc_id: str, title: str, text: str,
-                       source: str = "manual", note_path: str = "") -> bool:
+                       source: str = "manual", note_path: str = "",
+                       extra_payload: Optional[Dict[str, Any]] = None) -> bool:
         from backend.rag import raw_index_document
-        return raw_index_document(doc_id, title, text, source, note_path)
+        return raw_index_document(doc_id, title, text, source, note_path, extra_payload)
 
     def search_memory(self, query: str, limit: int = 3, threshold: float = 0.7,
-                      source_filter: str = "") -> List[Dict[str, Any]]:
+                      source_filter: str = "", agent_filter: str = "") -> List[Dict[str, Any]]:
         from backend.rag import raw_search_memory
-        return raw_search_memory(query, limit, threshold, source_filter)
+        return raw_search_memory(query, limit, threshold, source_filter, agent_filter)
 
     def delete_document(self, doc_id: str) -> bool:
         from backend.rag import raw_delete_document
@@ -99,11 +101,18 @@ class SQLiteGraphMemoryEngine(MemoryEngine):
         self._qdrant_engine.init_memory()
 
     def index_document(self, doc_id: str, title: str, text: str,
-                       source: str = "manual", note_path: str = "") -> bool:
+                       source: str = "manual", note_path: str = "",
+                       extra_payload: Optional[Dict[str, Any]] = None) -> bool:
         # 1. Index flat vectors first
-        success = self._qdrant_engine.index_document(doc_id, title, text, source, note_path)
+        success = self._qdrant_engine.index_document(doc_id, title, text, source, note_path,
+                                                     extra_payload=extra_payload)
         if not success:
             return False
+        from backend.rag import PRIVATE_SOURCES
+        if source in PRIVATE_SOURCES:
+            # The shared graph has no owner field: entities from one agent's
+            # learned notes would surface in every generic lookup.
+            return True
 
         # 2. Clear old graph elements for this document to avoid duplicates on re-index
         from backend.database import db_clear_graph, db_save_graph_node, db_save_graph_edge
@@ -133,9 +142,10 @@ class SQLiteGraphMemoryEngine(MemoryEngine):
         return True
 
     def search_memory(self, query: str, limit: int = 3, threshold: float = 0.7,
-                      source_filter: str = "") -> List[Dict[str, Any]]:
+                      source_filter: str = "", agent_filter: str = "") -> List[Dict[str, Any]]:
         # 1. Fetch flat vector results
-        vector_results = self._qdrant_engine.search_memory(query, limit, threshold, source_filter)
+        vector_results = self._qdrant_engine.search_memory(query, limit, threshold, source_filter,
+                                                           agent_filter=agent_filter)
         if not vector_results:
             return []
 
