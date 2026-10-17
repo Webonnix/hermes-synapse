@@ -1608,6 +1608,67 @@ TOOLS_SCHEMA = [
             }
         }
     },
+    # DevSecOps audits (backend/security_audit.py): read-only, report-only.
+    {
+        "type": "function",
+        "function": {
+            "name": "security_audit_lockfiles",
+            "description": (
+                "Проверяет зависимости из uv.lock и package-lock.json по базе уязвимостей OSV.dev: "
+                "пакет, версия, ID уязвимости, исправленные версии. Только чтение; наружу уходят лишь имена и версии пакетов."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Необязательный подкаталог рабочего каталога проекта; по умолчанию — весь проект."}},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "security_audit_images",
+            "description": (
+                "Аудит Dockerfile и docker-compose: образы без digest и с :latest, запуск от root, ADD по URL, "
+                "curl|sh, privileged, docker.sock, host-namespace, литеральные секреты в environment. Только чтение."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Необязательный подкаталог рабочего каталога проекта; по умолчанию — весь проект."}},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "security_scan_secrets",
+            "description": (
+                "Ищет секреты в файлах проекта. Возвращает только файл, строку, правило и отпечаток — "
+                "значение секрета никогда не выводится. Для .env проверяет права доступа. Только чтение."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Необязательный подкаталог рабочего каталога проекта; по умолчанию — весь проект."}},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "security_audit_ci",
+            "description": (
+                "Аудит CI-пайплайнов (.github/.gitea workflows): actions без закрепления по SHA, pull_request_target, "
+                "подстановка данных события в run:, широкие permissions. Только чтение."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Необязательный подкаталог рабочего каталога проекта; по умолчанию — весь проект."}},
+                "required": []
+            }
+        }
+    },
     {
         "type": "function",
         "function": {
@@ -3218,6 +3279,11 @@ def list_tools(query: str = "") -> str:
     }, ensure_ascii=False)
 
 
+_SECURITY_AUDIT_TOOLS = {
+    "security_audit_lockfiles", "security_audit_images", "security_scan_secrets", "security_audit_ci",
+}
+
+
 def execute_tool(name: str, arguments: Dict[str, Any], chat_id: str = "default") -> str:
     # Arguments can contain personal data or credentials. The Control Plane stores
     # a redacted form; application logs only need the selected tool name.
@@ -3368,6 +3434,10 @@ def execute_tool(name: str, arguments: Dict[str, Any], chat_id: str = "default")
             aspect_ratio=arguments.get("aspect_ratio", "1:1"),
             style_preset=arguments.get("style_preset", ""),
         )
+
+    elif name.startswith("security_") and name in _SECURITY_AUDIT_TOOLS:
+        from backend.security_audit import run_tool as _run_security_audit
+        return _run_security_audit(name, arguments)
 
     elif name == "web_search":
         return web_search(

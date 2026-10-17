@@ -45,6 +45,14 @@ TOOL_RISKS = {
     "get_github_summary": "R1",
     "get_rss_digest": "R1",
     "web_search": "R1",
+    # DevSecOps audits: read the read-only workspace mount and report; nothing
+    # is written or executed. Local scans are R0 like list_dev_runs; the
+    # lockfile audit sends package names/versions to OSV.dev, so R1 alongside
+    # web_search.
+    "security_audit_images": "R0",
+    "security_scan_secrets": "R0",
+    "security_audit_ci": "R0",
+    "security_audit_lockfiles": "R1",
     "list_subagents": "R0",
     "get_subagent_memory": "R0",
     "search_obsidian": "R0",

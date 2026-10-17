@@ -108,6 +108,21 @@ DISCIPLINES: Dict[str, Dict[str, Any]] = {
             "shortcut around an error; fix the actual cause."
         ),
     },
+    "security": {
+        "label_ru": "Безопасность (DevSecOps)",
+        "label_en": "Security (DevSecOps)",
+        "keywords_ru": ["уязвим", "безопасност", "секрет", "cve", "аудит безопасн",
+                        "цепочк поставок", "харденинг", "sbom", "пентест", "утечк"],
+        "keywords_en": ["security", "vulnerab", "cve", "secret", "supply chain",
+                        "sbom", "hardening", "pentest", "owasp", "advisory"],
+        "briefing": (
+            "This is a SECURITY job. Every finding names the exact package version, file "
+            "and line, or advisory id it rests on, and is ranked by exploitability in this "
+            "deployment rather than raw CVSS. Give the minimal fix and its rollback for "
+            "each. Never print a secret value. Report and propose; do not change "
+            "production or widen any permission to make a check pass."
+        ),
+    },
     "automation": {
         "label_ru": "Автоматизация и интеграции",
         "label_en": "Automation & integrations",

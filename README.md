@@ -265,6 +265,7 @@ If you wish to allow Hermes to manage your calendars:
 | 📅 **Daily Planner** | Google Calendar + Todoist | `TODOIST_API_TOKEN` + Google OAuth |
 | 🖥️ **Sys Ops** | System stats + shell exec | — |
 | ⚽ **Football Analyst** | Match results, tactics, standings | `SERPER_API_KEY` |
+| 🛡️ **DevSecOps Engineer** | Read-only audits: lockfiles (OSV), images, secrets, CI | — |
 
 > All agents start without error even if their API keys are missing — they return a clear message explaining what needs to be configured.
 

@@ -309,6 +309,18 @@ TOOL_INTENT_BUNDLES: Dict[str, Dict[str, List[str]]] = {
             "web_search", "browser_read",
         ],
     },
+    "security": {
+        "keywords": [
+            "уязвим", "cve", "vulnerab", "секрет", "secret", "lockfile", "зависимост",
+            "dependenc", "supply chain", "цепочк поставок", "харден", "hardening",
+            "безопасност", "security", "аудит", "audit", "sbom", "digest", "образ",
+            "pipeline", "workflow", "ci/cd", "act_runner",
+        ],
+        "tools": [
+            "security_audit_lockfiles", "security_audit_images",
+            "security_scan_secrets", "security_audit_ci", "web_search",
+        ],
+    },
     "agents": {
         "keywords": [
             "агент", "agent", "сабагент", "subagent", "делегируй", "delegate",
@@ -2972,6 +2984,11 @@ class VexaAgent:
             "git_dev": ["git_status", "git_diff", "git_commit", "git_push"],
             "image_generation": ["generate_image"],
             "browser_automation": ["browser_read", "browser_task"],
+            # Read-only, report-only (backend/security_audit.py).
+            "security_audit": [
+                "security_audit_lockfiles", "security_audit_images",
+                "security_scan_secrets", "security_audit_ci",
+            ],
         }
 
         skills_str = subagent.get("skills", "")
