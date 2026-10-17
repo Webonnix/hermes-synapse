@@ -210,7 +210,15 @@ async def sync_vault_to_rag(max_notes: int = 500) -> Dict[str, Any]:
     skipped = 0
     errors = 0
 
+    from backend.agent_learning import VAULT_FOLDER as _LEARNING_FOLDER
+
     for note_path in notes[:max_notes]:
+        if note_path.startswith(_LEARNING_FOLDER + "/"):
+            # Agents' learning digests are indexed item-by-item with their
+            # agent_id by backend/agent_learning.py; a second copy here would
+            # put one agent's notes into every agent's auto-RAG context.
+            skipped += 1
+            continue
         try:
             content = await read_note(note_path)
             if not content or len(content.strip()) < 10:

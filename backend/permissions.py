@@ -88,6 +88,11 @@ VOICE_PROVIDERS_MANAGE = "voice.providers.manage"
 # a real person in the business's name, so it is its own grant, not inbox.reply.
 PHONE_MANAGE = "phone.manage"
 PHONE_CALL = "phone.call"
+# Agent self-development (backend/agent_learning.py). Managing tracks spends
+# model time and opens egress to new topics; approving a quarantined item puts
+# web-derived text into an agent's context. Both are owner-only by default.
+AGENTS_LEARNING_VIEW = "agents.learning.view"
+AGENTS_LEARNING_MANAGE = "agents.learning.manage"
 
 ALL_PERMISSIONS: tuple = (
     CLIENTS_VIEW, CLIENTS_CREATE, CLIENTS_EDIT, CLIENTS_ARCHIVE,
@@ -106,6 +111,7 @@ ALL_PERMISSIONS: tuple = (
     CF_PUBLISH, CF_CHANNELS_MANAGE, CF_SETTINGS_EDIT,
     INBOX_VIEW, INBOX_REPLY, INBOX_RULES_EDIT, VOICE_PROVIDERS_MANAGE,
     PHONE_MANAGE, PHONE_CALL,
+    AGENTS_LEARNING_VIEW, AGENTS_LEARNING_MANAGE,
 )
 
 OWNER_ROLE = "owner"

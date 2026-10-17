@@ -2896,6 +2896,19 @@ class VexaAgent:
         project_memory = _project_memory_context(user_message)
         if project_memory:
             user_content = f"{user_content}\n\n{project_memory}"
+        # This agent's own learned notes (backend/agent_learning.py). Scoped to
+        # its id and bounded in size; other agents never see them, and the
+        # generic auto-RAG above excludes them (rag.PRIVATE_SOURCES). Not gated
+        # on auto_rag: that switch is about the shared document index, and
+        # with it off an agent would keep learning and never use any of it.
+        # Skipped on a live phone call: time to first word is that path's main
+        # metric, and an embedding lookup per spoken turn is not worth it there.
+        from backend import phone_context as _learning_phone_context
+        if _learning_phone_context.current() is None:
+            from backend.agent_learning import context_for_agent
+            learned = context_for_agent(subagent["id"], user_message)
+            if learned:
+                user_content = f"{user_content}{learned}"
         
         # Build payload with subagent prompt + chat history + current message
         from datetime import datetime

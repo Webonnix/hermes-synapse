@@ -383,6 +383,13 @@ async def lifespan(app: FastAPI):
         from backend import smm_posts
         smm_scheduler_task = crash_visibility.spawn(smm_posts.scheduler_loop(), "smm_posts.scheduler_loop")
 
+    # Agent self-development: each agent's learning track runs on its cadence,
+    # inside the quiet window (AGENT_LEARNING_WINDOW), one run at a time — it
+    # uses the same model as live chat. See backend/agent_learning.py.
+    if os.getenv("AGENT_LEARNING_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
+        from backend import agent_learning
+        crash_visibility.spawn(agent_learning.scheduler_loop(), "agent_learning.scheduler_loop")
+
     # Proactively probe every active messenger channel's stored credential so a
     # dead Matrix/Telegram/Discord/Slack/email token surfaces as a visible
     # "Ошибка" in the dashboard within minutes, not whenever someone happens to
@@ -733,6 +740,15 @@ try:
     app.include_router(inbox_router)
 except Exception:
     logger.exception("Inbox API not mounted")
+
+
+# AGENT SELF-DEVELOPMENT: learning tracks, runs and learned items
+# (backend/agent_learning_api.py).
+try:
+    from backend.agent_learning_api import router as agent_learning_router
+    app.include_router(agent_learning_router)
+except Exception:
+    logger.exception("Agent learning API not mounted")
 
 
 # TELEPHONY: lines, numbers, speech services, calls, provider webhooks and media

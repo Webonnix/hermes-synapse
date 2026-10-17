@@ -269,6 +269,18 @@ If you wish to allow Hermes to manage your calendars:
 
 > All agents start without error even if their API keys are missing — they return a clear message explaining what needs to be configured.
 
+### 📚 Agent self-development
+
+Specialists (web, code, analytics, research, sysops, DevSecOps) each have a
+learning track: on a schedule — nightly window, one run at a time — they read
+release feeds and search results for their field, distil a few sourced,
+actionable notes with one tool-less LLM call, and store them in Qdrant (visible
+only to that agent) and in Obsidian under `Hermes/Learning/<agent>/`. Those
+notes are then offered to the agent, labelled as reference data, when a turn is
+relevant. Web text is untrusted: suspicious items are quarantined until the
+owner approves them. API: `/api/agent-learning/*`; contract in
+`docs/CONTRACTS.md`.
+
 ---
 
 ## ⚙️ Configuration
