@@ -3,6 +3,7 @@ import type { FormEvent, ReactNode } from 'react';
 import { Activity, CheckCircle2, ChevronRight, CreditCard, Edit3, ExternalLink, FolderKanban, KeyRound, Layers, Mic, Plus, RefreshCw, Send, Server, Shuffle, Trash2, Users, X, Zap } from 'lucide-react';
 import { BotAccessTab } from './BotAccessTab';
 import { BillingTab } from './BillingTab';
+import { AgentLearningPanel } from './AgentLearningPanel';
 import { VoiceProvidersPanel } from './smm/dialogs/VoiceProvidersPanel';
 import { RouteTargetsPanel } from './smm/dialogs/RouteTargetsPanel';
 import type {
@@ -1300,6 +1301,8 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
                 {telegramNotice && <div style={{ color: 'var(--success)', fontSize: '0.85rem', marginTop: 8 }}>{telegramNotice}</div>}
               </div>
             )}
+
+            {selected && <AgentLearningPanel agentId={selected.id} />}
 
             {error && <div style={{ color: 'var(--danger)', fontSize: '0.85rem' }}>{error}</div>}
 
