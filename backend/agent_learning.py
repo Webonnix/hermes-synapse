@@ -68,6 +68,10 @@ ITEM_TTL_DAYS = int(os.getenv("AGENT_LEARNING_ITEM_TTL_DAYS", "180"))
 SOURCE_REVISIT_DAYS = int(os.getenv("AGENT_LEARNING_SOURCE_REVISIT_DAYS", "90"))
 MAX_INPUT_CHARS = int(os.getenv("AGENT_LEARNING_MAX_INPUT_CHARS", "36000"))
 MAX_OUTPUT_TOKENS = int(os.getenv("AGENT_LEARNING_MAX_OUTPUT_TOKENS", "1500"))
+# A failed run comes back after this many hours (at most the cadence), not a
+# week later: the usual cause is transient — a model busy or misconfigured for
+# one night. Only once; a second failure in a row falls back to the cadence.
+FAILED_RETRY_HOURS = 20
 FETCH_LIMIT_BYTES = 256 * 1024
 FETCH_TIMEOUT_SECONDS = 15.0
 PER_SOURCE_CHARS = 6000
@@ -984,7 +988,11 @@ async def distill(agent: Dict[str, Any], track: Dict[str, Any], sources: List[Di
         temperature=0.2,
         max_tokens=MAX_OUTPUT_TOKENS,
         tools=None,
-        provider_options={"provider": llm["provider"]},
+        # Reasoning off: on the local Qwen it otherwise follows the chat's
+        # LOCAL_THINK and can spend the whole output budget before the JSON
+        # (prod, 2026-10-17: "distillation failed: empty"). Only the llama.cpp
+        # path reads "think"; a cloud provider never sees the switch.
+        provider_options={"provider": llm["provider"], "think": False},
         extra_payload={"response_format": {"type": "json_object"}},
     )
     usage = {
@@ -1219,7 +1227,10 @@ def _finish_run(run_id: str, **fields: Any) -> None:
 def _reschedule(track: Dict[str, Any], status: str) -> None:
     # From *now*, not from the previous slot: a backend down for a week runs
     # each track once on return, not seven times back to back.
-    next_run = _now() + timedelta(hours=track["cadence_hours"])
+    hours = track["cadence_hours"]
+    if status == "failed" and track.get("last_status") != "failed":
+        hours = min(hours, FAILED_RETRY_HOURS)
+    next_run = _now() + timedelta(hours=hours)
     with _connect() as connection:
         connection.execute(
             "UPDATE agent_learning_tracks SET next_run_at = ?, last_run_at = ?, last_status = ? WHERE id = ?",
@@ -1253,6 +1264,7 @@ async def run_track(track_id: str, trigger: str = "schedule") -> Dict[str, Any]:
             _reschedule(track, "skipped")
             return {"id": run_id, "status": "skipped"}
 
+        sources: List[Dict[str, str]] = []
         try:
             await _retry_pending_note(agent, track)
             sources = await collect_sources(track)
@@ -1290,7 +1302,8 @@ async def run_track(track_id: str, trigger: str = "schedule") -> Dict[str, Any]:
             raise
         except Exception as exc:
             logger.exception("Learning run %s failed", track_id)
-            _finish_run(run_id, status="failed", error=f"{type(exc).__name__}: {str(exc)[:200]}")
+            _finish_run(run_id, status="failed", sources_count=len(sources),
+                        error=f"{type(exc).__name__}: {str(exc)[:200]}")
             _reschedule(track, "failed")
             return {"id": run_id, "status": "failed"}
 

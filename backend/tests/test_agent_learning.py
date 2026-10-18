@@ -342,6 +342,72 @@ def test_failed_distillation_does_not_burn_sources(run_env, monkeypatch):
     assert not agent_learning._seen_recently("devsecops", "https://example.com/docker-cve")
 
 
+def test_local_distillation_switches_reasoning_off(run_env, monkeypatch):
+    # Prod 2026-10-17: with LOCAL_THINK on, Qwen spent the whole output budget
+    # on reasoning and llm_client classed the reply "empty". The learner asks
+    # for one JSON object, so the local call must not inherit the chat setting.
+    from backend import llamacpp_client
+
+    _track()
+    monkeypatch.setenv("LOCAL_THINK", "true")
+    seen = []
+
+    async def fake_chat(self, *, model, messages, think=None, extra_payload=None, **kwargs):
+        template = llamacpp_client.think_template_kwargs(think)
+        seen.append(template)
+        if template.get("enable_thinking"):
+            return llamacpp_client.LlamaCppChatResult(model=model, thinking="Let me think... " * 200,
+                                                      done_reason="length", completion_tokens=1500)
+        items = [_raw("Docker runtime CVE", "docker escape fixed in 28.1", ["s1"])]
+        return llamacpp_client.LlamaCppChatResult(model=model, content=json.dumps({"items": items}),
+                                                  done_reason="stop", completion_tokens=300)
+
+    from backend import llm_client
+
+    # run_env stubs the whole LLM call; this test needs the real normalizer.
+    monkeypatch.setattr("backend.llm_client.call_llm_normalized", llm_client._call_llm_normalized)
+    monkeypatch.setattr(llamacpp_client.LlamaCppClient, "chat", fake_chat)
+    result = asyncio.run(agent_learning.run_track("devsecops:test"))
+
+    assert result["status"] == "ok", agent_learning.list_runs("devsecops:test")[0]["error"]
+    assert seen and seen[0]["enable_thinking"] is False
+
+
+def test_cloud_distillation_gets_no_local_reasoning_switch(run_env, monkeypatch):
+    _track()
+    monkeypatch.setattr(agent_learning, "_resolve_llm", lambda agent: {
+        "api_base": "https://api.example.com/v1", "api_key": "k", "provider": "openai_compatible",
+        "model": "gpt-x", "provider_id": "p1",
+    })
+    asyncio.run(agent_learning.run_track("devsecops:test"))
+    call = run_env["llm"][0]
+    assert "chat_template_kwargs" not in (call.get("extra_payload") or {})
+    assert call["extra_payload"]["response_format"] == {"type": "json_object"}
+
+
+def test_failed_run_records_collected_sources_and_retries_next_night(run_env, monkeypatch):
+    _track(cadence_hours=168)
+
+    async def empty_llm(**kwargs):
+        return SimpleNamespace(is_success=False, status="empty", content="", model="m",
+                               usage=SimpleNamespace(input_tokens=0, output_tokens=0))
+
+    monkeypatch.setattr("backend.llm_client.call_llm_normalized", empty_llm)
+    before = datetime.now(timezone.utc)
+    asyncio.run(agent_learning.run_track("devsecops:test"))
+
+    run = agent_learning.list_runs("devsecops:test")[0]
+    assert run["status"] == "failed" and run["sources_count"] == 2
+    next_run = datetime.fromisoformat(agent_learning.get_track("devsecops:test")["next_run_at"])
+    assert next_run <= before + timedelta(hours=agent_learning.FAILED_RETRY_HOURS) + timedelta(seconds=5)
+
+    # A second failure in a row falls back to the cadence: a model that is
+    # broken for good is not hammered every night.
+    asyncio.run(agent_learning.run_track("devsecops:test"))
+    next_run = datetime.fromisoformat(agent_learning.get_track("devsecops:test")["next_run_at"])
+    assert next_run >= before + timedelta(hours=168) - timedelta(seconds=5)
+
+
 def test_obsidian_down_marks_note_pending_and_next_run_retries(run_env, monkeypatch):
     _track()
 
