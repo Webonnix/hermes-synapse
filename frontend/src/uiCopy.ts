@@ -14,6 +14,7 @@ const ru: Record<string, string> = {
   "Resend code": "Отправить код повторно",
   "Error sending code.": "Не удалось отправить код. Повторите попытку или войдите по паролю.",
   "Error connecting to backend.": "Нет соединения с сервером. Проверьте подключение и повторите попытку.",
+  "Access session expired. Reload the page to sign in again.": "Сессия доступа Cloudflare истекла. Перезагрузите страницу, чтобы войти снова.",
   "Invalid access code.": "Неверный или истёкший код. Проверьте код и попробуйте снова.",
   "Error verifying code.": "Не удалось проверить код. Повторите попытку.",
   "Invalid username or password.": "Неверное имя пользователя или пароль.",

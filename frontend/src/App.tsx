@@ -78,6 +78,7 @@ import type { DevRunEvent } from './types';
 const ContentFactoryTab = lazy(() => import('./components/ContentFactoryTab').then(module => ({ default: module.ContentFactoryTab })));
 const SMMFactoryTab = lazy(() => import('./components/SMMFactoryTab').then(module => ({ default: module.SMMFactoryTab })));
 import type { CFEvent } from './components/content-factory/types';
+import { authEndpointFetch, authErrorMessage } from './accessSession';
 
 // Initialize global fetch interceptor
 initFetchInterceptor();
@@ -1186,7 +1187,7 @@ export default function App() {
     setAuthStatus('sending');
     setAuthError('');
     try {
-      const res = await fetch('/api/auth/request-code', {
+      const res = await authEndpointFetch('/api/auth/request-code', {
         method: 'POST'
       });
       const data = await res.json();
@@ -1199,7 +1200,7 @@ export default function App() {
       }
     } catch (err) {
       setAuthStatus('error');
-      setAuthError(copy('Error connecting to backend.'));
+      setAuthError(copy(authErrorMessage(err, 'Error connecting to backend.')));
     }
   };
 
@@ -1209,7 +1210,7 @@ export default function App() {
     setAuthStatus('verifying');
     setAuthError('');
     try {
-      const res = await fetch('/api/auth/verify-code', {
+      const res = await authEndpointFetch('/api/auth/verify-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code })
@@ -1227,7 +1228,7 @@ export default function App() {
       }
     } catch (err) {
       setAuthStatus('error');
-      setAuthError(copy('Error verifying code.'));
+      setAuthError(copy(authErrorMessage(err, 'Error verifying code.')));
     }
   }, [authStatus, copy]);
 
@@ -1242,7 +1243,7 @@ export default function App() {
     setPwStatus('submitting');
     setPwError('');
     try {
-      const res = await fetch('/api/auth/login', {
+      const res = await authEndpointFetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: pwUsername.trim(), password: pwPassword })
@@ -1259,7 +1260,7 @@ export default function App() {
       }
     } catch (err) {
       setPwStatus('error');
-      setPwError(copy('Error connecting to backend.'));
+      setPwError(copy(authErrorMessage(err, 'Error connecting to backend.')));
     }
   };
 
