@@ -1308,11 +1308,49 @@ _LLM_OVERRIDE: contextvars.ContextVar[Optional[Dict[str, str]]] = contextvars.Co
     "hermes_llm_override", default=None,
 )
 
+# The chat's own settings (backend/chat_settings.py) for one turn: system
+# prompt, sampling, reasoning, incognito. A ContextVar for the same reason as
+# _LLM_OVERRIDE — the agent is a shared singleton, so one chat's temperature or
+# reasoning switch must not leak into another conversation running at once.
+_CHAT_SETTINGS: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar(
+    "hermes_chat_settings", default=None,
+)
+
+
+# The @mentioned agent for one turn (VexaAgent.respond's agent_override). A
+# ContextVar like the two above, so _respond's signature stays as it is and a
+# delegated child turn can be cleared of it the same way.
+_AGENT_OVERRIDE: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "hermes_agent_override", default=None,
+)
+
+
+def _chat_setting(field: str) -> Any:
+    settings = _CHAT_SETTINGS.get()
+    return settings.get(field) if settings else None
+
+
+def _chat_system_addendum() -> str:
+    """The chat's own instructions, appended after the agent's system prompt.
+
+    Appended rather than substituted: the agent's prompt carries the tool,
+    safety and addressing rules every turn depends on."""
+    prompt = _chat_setting("system_prompt")
+    if not prompt:
+        return ""
+    return f"\n\n[Инструкции этого чата от владельца]:\n{prompt}"
+
+
+def _chat_extra_payload() -> Optional[Dict[str, Any]]:
+    top_p = _chat_setting("top_p")
+    return {"top_p": top_p} if top_p is not None else None
+
 # What a reply keeps in messages.run_meta, so its stats survive a page reload.
 _PERSISTED_RUN_META_KEYS = (
     "status", "model", "provider", "finish_reason", "latency_ms",
     "generation_ms", "decode_ms", "prompt_ms",
     "input_tokens", "output_tokens", "tool_iterations",
+    "agent_id", "agent_name",
 )
 
 
@@ -1398,6 +1436,41 @@ class VexaAgent:
     @provider.setter
     def provider(self, value: str) -> None:
         self._provider = value
+
+    # The chat's settings (see _CHAT_SETTINGS) win for the turn they apply to;
+    # outside a turn these read the configured values exactly as before.
+    @property
+    def temperature(self) -> float:
+        value = _chat_setting("temperature")
+        return float(value) if value is not None else self._temperature
+
+    @temperature.setter
+    def temperature(self, value: float) -> None:
+        self._temperature = value
+
+    @property
+    def max_tokens(self) -> int:
+        """Answer length for plain turns. Tool turns keep tool_max_tokens: a
+        short cap there truncates the tool call itself, not the prose."""
+        value = _chat_setting("max_tokens")
+        return int(value) if value else self._max_tokens
+
+    @max_tokens.setter
+    def max_tokens(self, value: int) -> None:
+        self._max_tokens = value
+
+    @property
+    def local_think(self) -> Any:
+        mode = _chat_setting("think")
+        if mode == "on":
+            return True
+        if mode == "off":
+            return False
+        return self._local_think
+
+    @local_think.setter
+    def local_think(self, value: Any) -> None:
+        self._local_think = value
 
     # The same four values as the dashboard has them configured, ignoring any
     # per-turn choice. Read these wherever the *configured local* endpoint is
@@ -1666,9 +1739,15 @@ class VexaAgent:
         stream_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
         images: Optional[List[str]] = None,
         llm_override: Optional[Dict[str, str]] = None,
+        agent_override: Optional[str] = None,
     ) -> str:
         """Run one agent turn, optionally against a model other than the
         configured default.
+
+        ``agent_override`` routes this one turn to another agent inside the same
+        chat (the chat UI's @mention) instead of the agent the session is bound
+        to; "vexa" means the main assistant. The reply's run metadata names the
+        agent that answered, so the UI can label it.
 
         ``llm_override`` comes from backend/chat_models.resolve_chat_model — it
         is always a catalogue entry the server itself resolved, never an
@@ -1684,7 +1763,19 @@ class VexaAgent:
         sent to 9Router (HTTP 404) or vice versa."""
         from backend.llm_client import track_turn_usage
 
+        # One primary-key read, done inline like the turn's other small SQLite
+        # writes (db.save_message); a malformed result means "no settings".
+        from backend import chat_settings
+        try:
+            settings = chat_settings.get_settings(session_id)
+        except Exception:
+            logger.exception("Could not read chat settings for session %s", session_id)
+            settings = None
+        if not isinstance(settings, dict):
+            settings = None
         token = _LLM_OVERRIDE.set(llm_override or None)
+        settings_token = _CHAT_SETTINGS.set(settings)
+        agent_token = _AGENT_OVERRIDE.set(agent_override or None)
         # Paths that never write run metadata (the orchestrator-agent branch)
         # would otherwise hand main.py the previous turn's numbers.
         self.last_run_metadata.pop(session_id, None)
@@ -1692,10 +1783,44 @@ class VexaAgent:
         try:
             with track_turn_usage() as turn_usage:
                 response_text = await self._respond(user_message, session_id, stream_callback, images)
+            if agent_override:
+                self._label_answering_agent(session_id, agent_override)
             self._fill_run_stats(session_id, turn_usage, int((time.time() - started_at) * 1000))
+            if agent_override:
+                # _fill_run_stats only writes when the turn made LLM calls; the
+                # label has to survive a reload either way.
+                self._persist_run_meta(session_id)
             return response_text
         finally:
+            _AGENT_OVERRIDE.reset(agent_token)
+            _CHAT_SETTINGS.reset(settings_token)
             _LLM_OVERRIDE.reset(token)
+
+    def _persist_run_meta(self, session_id: str) -> None:
+        from backend.database import update_message_meta
+
+        meta = self.last_run_metadata.get(session_id) or {}
+        try:
+            update_message_meta(
+                self.last_saved_ids.get(session_id, {}).get("assistant"),
+                {key: meta[key] for key in _PERSISTED_RUN_META_KEYS if meta.get(key) is not None},
+            )
+        except Exception:
+            logger.exception("Could not save run metadata for session %s", session_id)
+
+    def _label_answering_agent(self, session_id: str, agent_id: str) -> None:
+        """Record which agent answered an @mention turn in the reply's run meta."""
+        from backend.database import get_subagent
+
+        try:
+            subagent = get_subagent(agent_id) if agent_id != "vexa" else None
+        except Exception:
+            logger.exception("Could not look up agent %s", agent_id)
+            subagent = None
+        meta = dict(self.last_run_metadata.get(session_id) or {})
+        meta["agent_id"] = agent_id
+        meta["agent_name"] = (subagent or {}).get("name") or ("Vexa" if agent_id == "vexa" else agent_id)
+        self.last_run_metadata[session_id] = meta
 
     def _fill_run_stats(self, session_id: str, turn_usage: Any, latency_ms: int) -> None:
         """Complete the reply's generation stats from the turn tracker.
@@ -1752,7 +1877,12 @@ class VexaAgent:
 
         # Check if this session is a registered custom subagent
         from backend.database import get_subagent, get_session_agent_id
-        target_agent_id = get_session_agent_id(session_id) or session_id
+        # Read once and cleared: the turn's own agent is decided here, and a
+        # delegation further down (tools.call_subagent → respond) must resolve
+        # its child from its own session, not inherit this mention.
+        agent_override = _AGENT_OVERRIDE.get()
+        _AGENT_OVERRIDE.set(None)
+        target_agent_id = agent_override or get_session_agent_id(session_id) or session_id
         subagent = get_subagent(target_agent_id)
         if subagent:
             if not subagent.get("is_enabled", True):
@@ -1927,7 +2057,8 @@ class VexaAgent:
         )
 
         saved_memory_facts: List[Dict[str, str]] = []
-        if self.memory_enabled and self.memory_auto_save:
+        # An incognito chat leaves nothing behind, long-term memory included.
+        if self.memory_enabled and self.memory_auto_save and not _chat_setting("ephemeral"):
             saved_memory_facts = _extract_memory_facts(user_message)
             if saved_memory_facts:
                 from backend import database as db
@@ -2158,6 +2289,7 @@ class VexaAgent:
         system_prompt = FAST_SYSTEM_PROMPT if self.fast_mode else self.system_prompt
         system_info += _local_model_system_hint(self.model, self.api_base, self.local_think)
         system_info += _address_directive()
+        system_info += _chat_system_addendum()
         messages = [{"role": "system", "content": system_prompt + system_info}]
         for msg in history:
             messages.append(msg)
@@ -2320,6 +2452,7 @@ class VexaAgent:
                         max_retries=0 if tool_executed else None,
                         client=client,
                         stream_callback=stream_callback,
+                        extra_payload=_chat_extra_payload(),
                     )
                     _call_started = time.perf_counter()
                     if self.provider == LOCAL_PROVIDER:
@@ -2945,6 +3078,7 @@ class VexaAgent:
         phone_call = _phone_context.current()
         if phone_call is not None:
             system_info += _phone_context.voice_directive(phone_call)
+        system_info += _chat_system_addendum()
         messages = [{"role": "system", "content": system_prompt + system_info}]
         for msg in history:
             messages.append({"role": msg["role"], "content": msg["content"]})

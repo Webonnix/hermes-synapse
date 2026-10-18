@@ -269,6 +269,15 @@ async def lifespan(app: FastAPI):
     from backend.price_monitor import price_monitor
     price_monitor.start()
 
+    # Incognito chats must not outlive the process that served them.
+    try:
+        from backend import chat_settings
+        purged = await asyncio.to_thread(chat_settings.purge_ephemeral_sessions)
+        if purged:
+            logger.info("Purged %d incognito chat(s) left from the previous run", purged)
+    except Exception:
+        logger.exception("Could not purge incognito chats at startup")
+
     # Durable dev-runs worker: resumes unfinished runs after restart.
     dev_runs_worker_task = None
     if os.getenv("DEV_RUNS_WORKER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
@@ -3923,8 +3932,21 @@ async def get_history_sessions():
             s: created_at_map[s] for s in created_at_map if s not in last_time_map
         })
 
+        # Incognito chats (backend/chat_settings.py) never appear in the list:
+        # the only window onto one is the tab that opened it.
+        from backend import chat_settings
+        try:
+            ephemeral_ids = set(chat_settings.ephemeral_session_ids())
+        except Exception:
+            logger.exception("Could not read incognito chats")
+            ephemeral_ids = set()
+
         # Filter out subagents, and keep only "dashboard" and custom sessions
-        user_sessions = [s for s in sessions if s not in subagent_ids and s != "dashboard" and not s.startswith("archive_")]
+        user_sessions = [
+            s for s in sessions
+            if s not in subagent_ids and s != "dashboard" and not s.startswith("archive_")
+            and s not in ephemeral_ids
+        ]
         user_sessions.sort(key=lambda s: last_time_map.get(s) or "", reverse=True)
 
         sessions_response = []
@@ -3992,8 +4014,10 @@ async def get_history_api(chat_id: str, limit: int = 40):
 @app.delete("/api/history/{chat_id}")
 async def delete_history_api(chat_id: str):
     from backend.database import clear_chat_history, delete_session_title
+    from backend import chat_settings
     clear_chat_history(chat_id)
     delete_session_title(chat_id)
+    chat_settings.delete_settings(chat_id)
     # Also clear from agent's in-memory last costs or messages if needed
     if chat_id in agent_instance.last_costs:
         agent_instance.last_costs[chat_id] = 0.0
@@ -4027,33 +4051,130 @@ async def archive_history_session(session_id: str):
         logger.exception(f"Failed to archive session {session_id}: {e}")
         return {"status": "error", "message": "Failed to archive session. Check server logs."}
 
+class ForkSessionPayload(BaseModel):
+    # Branch from this message: it and everything before it is copied, nothing
+    # after. Omitted, the whole conversation is copied, as before.
+    up_to_message_id: Optional[int] = None
+    title: Optional[str] = Field(default=None, max_length=200)
+
+
 @app.post("/api/history/{session_id}/fork")
-async def fork_history_session(session_id: str):
-    """Forks a session by duplicating its messages to a new session_id."""
-    from backend.database import DB_PATH, get_session_title, save_session_title
+async def fork_history_session(session_id: str, payload: Optional[ForkSessionPayload] = None):
+    """Forks a session by duplicating its messages to a new session_id.
+
+    The branch keeps the source chat's agent, project and chat settings, so it
+    continues the same conversation rather than starting a differently
+    configured one; only the messages after the branch point are left out."""
+    from backend.database import (
+        DB_PATH, get_session_agent_id, get_session_project_id, get_session_title,
+        save_session_metadata,
+    )
+    from backend import chat_settings
     import sqlite3
     import time
+    payload = payload or ForkSessionPayload()
     new_session_id = f"{session_id}_fork_{int(time.time())}"
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO messages (session_id, role, content, cost_usd) 
-            SELECT ?, role, content, cost_usd FROM messages WHERE session_id = ? ORDER BY id ASC
-        """, (new_session_id, session_id))
+        if payload.up_to_message_id is not None:
+            cursor.execute(
+                "SELECT 1 FROM messages WHERE session_id = ? AND id = ?",
+                (session_id, payload.up_to_message_id),
+            )
+            if cursor.fetchone() is None:
+                conn.close()
+                raise HTTPException(status_code=404, detail="Message not found in this session.")
+            cursor.execute("""
+                INSERT INTO messages (session_id, role, content, cost_usd, run_meta)
+                SELECT ?, role, content, cost_usd, run_meta FROM messages
+                WHERE session_id = ? AND id <= ? ORDER BY id ASC
+            """, (new_session_id, session_id, payload.up_to_message_id))
+        else:
+            cursor.execute("""
+                INSERT INTO messages (session_id, role, content, cost_usd, run_meta)
+                SELECT ?, role, content, cost_usd, run_meta FROM messages WHERE session_id = ? ORDER BY id ASC
+            """, (new_session_id, session_id))
         conn.commit()
         conn.close()
-        
-        # Fork custom title metadata
-        old_title = get_session_title(session_id)
-        if not old_title:
-            old_title = session_id
-        save_session_title(new_session_id, f"Fork of {old_title}")
-        
+
+        old_title = get_session_title(session_id) or session_id
+        save_session_metadata(
+            new_session_id,
+            (payload.title or "").strip() or f"Fork of {old_title}",
+            agent_id=get_session_agent_id(session_id),
+            project_id=get_session_project_id(session_id),
+        )
+        chat_settings.copy_settings(session_id, new_session_id)
+
         return {"status": "success", "new_session_id": new_session_id}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception(f"Failed to fork session {session_id}: {e}")
         return {"status": "error", "message": "Failed to fork session. Check server logs."}
+
+
+class ArenaContender(BaseModel):
+    model: str = ""
+    model_source: str = ""
+
+
+class ArenaPayload(BaseModel):
+    prompt: str
+    contenders: List[ArenaContender]
+    system_prompt: str = Field(default="", max_length=8000)
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    max_tokens: int = Field(default=2048, ge=1, le=16384)
+
+
+@app.post("/api/chat/arena")
+async def chat_arena_api(payload: ArenaPayload):
+    """Same prompt to two models, answers side by side (see backend/chat_arena.py)."""
+    from backend import chat_arena
+    contenders = [c.model_dump() for c in payload.contenders]
+    error = chat_arena.validate_request(payload.prompt, contenders)
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    results = await chat_arena.run_arena(
+        payload.prompt,
+        contenders,
+        local_base_url=agent_instance.local_base_url,
+        api_key=agent_instance.api_key,
+        default_llm={
+            "api_base": agent_instance.api_base, "api_key": agent_instance.api_key,
+            "model": agent_instance.model, "provider": agent_instance.provider,
+        },
+        system_prompt=payload.system_prompt,
+        temperature=payload.temperature,
+        max_tokens=payload.max_tokens,
+    )
+    return {"results": results}
+
+
+class ChatSettingsPayload(BaseModel):
+    system_prompt: str = ""
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    max_tokens: Optional[int] = None
+    think: Optional[str] = None
+    ephemeral: bool = False
+
+
+@app.get("/api/history/{session_id}/settings")
+async def get_chat_settings_api(session_id: str):
+    from backend import chat_settings
+    return await asyncio.to_thread(chat_settings.get_settings, session_id)
+
+
+@app.put("/api/history/{session_id}/settings")
+async def put_chat_settings_api(session_id: str, payload: ChatSettingsPayload):
+    from backend import chat_settings
+    try:
+        return await asyncio.to_thread(chat_settings.save_settings, session_id, payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
 
 class RenameSessionPayload(BaseModel):
     title: str
@@ -5121,6 +5242,21 @@ async def delete_calendar_event_api(event_id: str, request: Request):
     return {"status": "success", "id": event_id}
 
 
+def _resolve_turn_agent(raw: Any) -> Optional[str]:
+    """The @mentioned agent for one chat turn, or None for the session's own."""
+    agent_id = str(raw or "").strip()[:128]
+    if not agent_id:
+        return None
+    if agent_id == "vexa":
+        return agent_id
+    from backend.database import get_subagent
+    try:
+        return agent_id if get_subagent(agent_id) else None
+    except Exception:
+        logger.exception("Could not resolve @mentioned agent %s", agent_id)
+        return None
+
+
 @app.websocket("/api/ws")
 async def websocket_endpoint(websocket: WebSocket):
     offered_protocols = [
@@ -5230,6 +5366,11 @@ async def websocket_endpoint(websocket: WebSocket):
                         local_base_url=agent_instance.local_base_url,
                         api_key=agent_instance.api_key,
                     )
+                    # Per-turn agent from the chat UI's @mention: this one turn
+                    # goes to that agent inside the same chat. Only a known agent
+                    # id is honoured; anything else falls back to the session's
+                    # own agent rather than failing the turn.
+                    agent_override = _resolve_turn_agent(msg.get("agent_id"))
                     # Write-ahead: the turn is durable BEFORE any provider work
                     # starts, so a crash mid-turn leaves a record instead of a guess.
                     from backend import run_journal
@@ -5280,6 +5421,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             session_id=chat_id,
                             stream_callback=emit_stream_chunk,
                             llm_override=llm_override,
+                            agent_override=agent_override,
                         )
                     except asyncio.CancelledError:
                         await manager.send_run_event(run_id, chat_id, {
@@ -5320,6 +5462,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         "input_tokens": run_meta.get("input_tokens"),
                         "output_tokens": run_meta.get("output_tokens"),
                         "tool_iterations": run_meta.get("tool_iterations"),
+                        # Set only for an @mention turn: who answered it.
+                        "agent_id": run_meta.get("agent_id"),
+                        "agent_name": run_meta.get("agent_name"),
                     }
 
                     # The terminal frame carries the FULL answer, so replaying it
