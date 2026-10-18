@@ -93,7 +93,7 @@ function TempSlider({ value, onChange }: { value: number; onChange: (v: number) 
 }
 
 // Model selector: both catalogs this deployment can actually serve — the local
-// local llama.cpp model the app already fetches (GET /api/models) and the 9Router
+// local llama.cpp model the app already fetches (GET /api/models) and the OmniRoute
 // catalog (GET /api/router/models) — plus a free-text escape hatch. Built the
 // same way as the model picker in AgentsAdminTab.tsx; the hardcoded list that
 // used to live here went stale and offered models nothing here could route to.
@@ -136,7 +136,7 @@ function ModelSelect({ value, onChange, className, models, routerModels, routerM
   const catalogsReady = localModels.length > 0 || routerModels.length > 0;
   const missing = !!value && !showCustom && catalogsReady && !knownIds.has(value);
   // Which catalog it *should* have come from is inferred from the shape of the
-  // id: 9Router ids are namespaced by provider ('ag/gemini-3.7-flash-high',
+  // id: OmniRoute ids are namespaced by provider ('ag/gemini-3.7-flash-high',
   // 'ds/deepseek-chat'), while the local llama.cpp alias carries no provider
   // prefix ('qwen3.8-27b').
   const missingLabel = value.includes('/') && routerModels.length > 0
@@ -166,7 +166,7 @@ function ModelSelect({ value, onChange, className, models, routerModels, routerM
           </optgroup>
         )}
         {Object.entries(routerModelsByOwner).map(([owner, ownerModels]) => (
-          <optgroup key={owner} label={`9Router · ${owner}`}>
+          <optgroup key={owner} label={`OmniRoute · ${owner}`}>
             {ownerModels.map(m => <option key={m.id} value={m.id}>{m.id}</option>)}
           </optgroup>
         ))}
@@ -183,7 +183,7 @@ function ModelSelect({ value, onChange, className, models, routerModels, routerM
           <option value={value}>{value}</option>
         )}
         {!routerModelsLoaded && (
-          <option value="__loading__" disabled>Загрузка каталога 9Router…</option>
+          <option value="__loading__" disabled>Загрузка каталога OmniRoute…</option>
         )}
         <option value="__custom__">Custom model…</option>
       </select>
@@ -297,7 +297,7 @@ export function SubagentsTab({
 
   const [skillMap, setSkillMap] = useState<Record<string, string[]>>({});
   // The local model list arrives as a prop (App.tsx already fetches
-  // /api/models); the 9Router catalog is only needed by the two model pickers
+  // /api/models); the OmniRoute catalog is only needed by the two model pickers
   // below, so it is fetched here once and shared by both.
   const [routerModels, setRouterModels] = useState<RouterModel[]>([]);
   const [routerModelsLoaded, setRouterModelsLoaded] = useState(false);

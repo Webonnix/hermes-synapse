@@ -628,7 +628,7 @@ def _resolve_agent_llm_config(
     A per-turn override (the chat's model picker) outranks the row: the user
     picked a model for *this* conversation, and the agent row would otherwise
     win the `model` while the override still supplied `api_base` — the exact
-    crossing that sent a local model id to the 9Router endpoint and came back
+    crossing that sent a local model id to the OmniRoute endpoint and came back
     404. Endpoint, key, model and provider are taken as one set or not at all.
     """
     override = current_llm_override()
@@ -1132,7 +1132,7 @@ async def classify_complexity(user_message: str, api_key: str, api_base: str, pr
     # Try LLM classifier with the fast/cheap planner model. `api_base` is the
     # caller's — including the chat's per-turn pick — so an active override
     # decides the model too: AGENT_MODEL_PLANNER/LLM_MODEL name the local
-    # model, which a 9Router endpoint answers with a 404.
+    # model, which an OmniRoute endpoint answers with a 404.
     from backend.subagents import get_agent_model
     override = current_llm_override()
     if override and override.get("model"):
@@ -1297,7 +1297,7 @@ If the user asks what you can do, or requests info about a specific skill, descr
 
 # ── Per-turn model override ──────────────────────────────────────────────────
 # The chat UI lets a single message be sent to a model other than the globally
-# configured one (a bigger local model, or anything in the 9Router catalogue).
+# configured one (a bigger local model, or anything in the OmniRoute catalogue).
 # The agent is a process-wide singleton shared by every WebSocket connection,
 # the Telegram bot and the schedulers, so swapping self.model for the duration
 # of a turn would leak that choice into whatever else happened to be running.
@@ -1368,7 +1368,7 @@ def current_llm_override() -> Optional[Dict[str, str]]:
     Anything that resolves an endpoint *and* a model name as a pair has to ask,
     because the two must travel together: applying the override's api_base while
     letting a DB row supply the model is what sends `unsloth-mtp-q4km` to
-    9Router (HTTP 404 "No active credentials for provider: openai")."""
+    OmniRoute (HTTP 404 "No active credentials for provider: openai")."""
     override = _LLM_OVERRIDE.get()
     return dict(override) if override else None
 
@@ -1760,7 +1760,7 @@ class VexaAgent:
         inside the caller's context, so without this reset the chat's picked
         model would follow the delegation into an agent that has its own model
         and its own endpoint — the one crossing that produces a local model name
-        sent to 9Router (HTTP 404) or vice versa."""
+        sent to OmniRoute (HTTP 404) or vice versa."""
         from backend.llm_client import track_turn_usage
 
         # One primary-key read, done inline like the turn's other small SQLite
@@ -2894,7 +2894,7 @@ class VexaAgent:
         # per-turn model choice — the delegation boundary clears the override
         # (see no_llm_override) — and when it does, the pick wins over the row,
         # endpoint *and* model together. Taking one without the other is what
-        # posted a local model id to 9Router and got HTTP 404 back.
+        # posted a local model id to OmniRoute and got HTTP 404 back.
         # The row's own model is kept for the budget-degrade path below, which
         # must land on something the local llama.cpp server actually serves.
         subagent_local_model = subagent_model

@@ -77,7 +77,7 @@ _PRICING_PATTERNS: Tuple[Tuple["re.Pattern[str]", Tuple[float, float]], ...] = (
     (re.compile(r"gemini-3(-\d+)?-flash-lite"), (0.10, 0.40)),
     (re.compile(r"gemini-3(-\d+)?-flash"), (0.30, 2.50)),
     (re.compile(r"gemini-3(-\d+)?-pro"), (1.25, 10.00)),
-    # 9Router aliases the top Gemini tier without a version number.
+    # OmniRoute aliases the top Gemini tier without a version number.
     (re.compile(r"gemini-pro-agent"), (1.25, 10.00)),
     (re.compile(r"deepseek-v4-pro"), (0.28, 1.10)),
 )

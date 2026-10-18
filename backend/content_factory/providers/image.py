@@ -180,17 +180,17 @@ class OpenAIImageProvider(ImageProvider):
 
 
 class RouterImageProvider(OpenAIImageProvider):
-    """The same OpenAI image contract, served by the 9Router sidecar.
+    """The same OpenAI image contract, served by the OmniRoute sidecar.
 
     Worth its own entry rather than "point OpenAI Images at another base URL"
     for two reasons. It authenticates with `ROUTER_API_KEY` — already stored,
     so this provider configures itself the moment the sidecar has an upstream
-    account — and it must not send `size`: 9Router forwards the payload to
+    account — and it must not send `size`: OmniRoute forwards the payload to
     whichever vendor owns the model, and Gemini's image models reject the
     parameter outright rather than ignoring it. Aspect ratio for those goes in
     the prompt, which is what `_aspect_hint` appends.
 
-    The model is a full 9Router id — `gemini/gemini-3-pro-image-preview`
+    The model is a full OmniRoute id — `gemini/gemini-3-pro-image-preview`
     (Nano Banana Pro), `gemini/gemini-2.5-flash-image` — so which vendor
     actually renders the image is a settings choice, not a code change.
     """
@@ -203,7 +203,7 @@ class RouterImageProvider(OpenAIImageProvider):
         configured = str(self.config.get("apiBase") or "").strip()
         if configured:
             return configured.rstrip("/")
-        return os.environ.get("ROUTER_API_BASE", "http://9router:20128").rstrip("/")
+        return os.environ.get("ROUTER_API_BASE", "http://omniroute:20128").rstrip("/")
 
     def _payload(self, prompt: str, request: dict[str, Any]) -> dict[str, Any]:
         hint = _aspect_hint(request)

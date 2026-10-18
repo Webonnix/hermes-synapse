@@ -429,7 +429,7 @@ def _decode_sse_frames(text: str) -> List[Dict[str, Any]]:
     """Pull the JSON payloads out of an SSE-framed body.
 
     Scans instead of splitting on newlines because the framing is not always
-    well-formed: 9Router glues its terminator straight onto the JSON
+    well-formed: OmniRoute glues its terminator straight onto the JSON
     (``{...}data: [DONE]``), so there is no line break to split on. Returns
     every decoded object in order — one for a complete completion that merely
     carries a trailer, many for a genuine chunk stream.
@@ -884,7 +884,7 @@ async def _call_llm_normalized(
                         raw_data = None
                     if raw_data is None:
                         # Not everything that answers a non-streaming request
-                        # answers with bare JSON: 9Router replies HTTP 200 with
+                        # answers with bare JSON: OmniRoute replies HTTP 200 with
                         # content-type text/event-stream and appends a
                         # "data: [DONE]" trailer to an otherwise complete body.
                         frames = _decode_sse_frames(response.text)

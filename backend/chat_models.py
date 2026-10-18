@@ -7,7 +7,7 @@ them the way Open WebUI's model selector does (Local / External):
 * ``local``  — what this box's llama.cpp server is serving (GET /v1/models).
   llama-server holds exactly one model for the life of the process, so this is
   normally a single entry, always resident.
-* ``router`` — the external catalogue reachable through the 9Router sidecar
+* ``router`` — the external catalogue reachable through the OmniRoute sidecar
   (GET /v1/models with ROUTER_API_KEY). Entry ids are namespaced by provider
   (``kimi/kimi-k3``), and a chat request must use that id verbatim.
 
@@ -32,7 +32,7 @@ from backend.llamacpp_client import LOCAL_PROVIDER, normalize_provider
 
 logger = logging.getLogger(__name__)
 
-# The catalogue is two network calls (llama.cpp + 9Router) and changes only when
+# The catalogue is two network calls (llama.cpp + OmniRoute) and changes only when
 # the server is restarted or someone connects a model, so every chat turn
 # re-fetching it would be pure latency.
 _CACHE_TTL_SECONDS = 60.0
@@ -44,12 +44,12 @@ SOURCE_ROUTER = "router"
 
 
 def router_credentials() -> Tuple[str, str]:
-    """(base_url, api_key) for the 9Router sidecar. The key lives in the DB
+    """(base_url, api_key) for the OmniRoute sidecar. The key lives in the DB
     (Settings → API Keys) with an env var as the fallback — same lookup order
     the AI Router tab's endpoints use."""
     from backend import database as db
 
-    base = os.getenv("ROUTER_API_BASE", "http://9router:20128").rstrip("/")
+    base = os.getenv("ROUTER_API_BASE", "http://omniroute:20128").rstrip("/")
     key = db.get_api_key("ROUTER_API_KEY") or os.getenv("ROUTER_API_KEY", "")
     return base, key
 
@@ -128,8 +128,8 @@ async def _list_router_models() -> Tuple[List[Dict[str, Any]], Optional[str]]:
         async with httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.get(f"{base}/v1/models", headers={"Authorization": f"Bearer {key}"})
     except httpx.HTTPError as exc:
-        logger.warning("Chat model catalogue: 9Router unreachable (%s)", exc)
-        return [], "9Router недоступен — запущен ли контейнер '9router'?"
+        logger.warning("Chat model catalogue: OmniRoute unreachable (%s)", exc)
+        return [], "OmniRoute недоступен — запущен ли контейнер 'omniroute'?"
 
     if resp.status_code != 200:
         detail = "неверный ROUTER_API_KEY" if resp.status_code in (401, 403) else f"HTTP {resp.status_code}"
@@ -151,7 +151,7 @@ async def _list_router_models() -> Tuple[List[Dict[str, Any]], Optional[str]]:
         seen.add(model_id)
         capabilities = entry.get("capabilities") if isinstance(entry.get("capabilities"), dict) else {}
         # The provider prefix is the part a human actually reads in the picker;
-        # 9Router namespaces every catalogue id as "<provider>/<model>".
+        # OmniRoute namespaces every catalogue id as "<provider>/<model>".
         owner = entry.get("owned_by") or (model_id.split("/", 1)[0] if "/" in model_id else "")
         models.append({
             "id": model_id,

@@ -596,18 +596,18 @@ CATALOG: tuple[ProviderSpec, ...] = (
                 ProviderField("usdPerImage", ("Цена за изображение, $", "USD per image"), "number")),
     ),
     ProviderSpec(
-        "router-image", "IMAGE", ("9Router (изображения)", "9Router (images)"), "ROUTER_API_KEY",
+        "router-image", "IMAGE", ("OmniRoute (изображения)", "OmniRoute (images)"), "ROUTER_API_KEY",
         docs="https://router.webonnix.net", model_env="ROUTER_IMAGE_MODEL",
         default_model="gemini/gemini-2.5-flash-image", shared_secret=True,
-        hint=("Картинки через уже подключённые в 9Router аккаунты: "
+        hint=("Картинки через уже подключённые в OmniRoute аккаунты: "
               "gemini/gemini-3-pro-image-preview (Nano Banana Pro), gemini/gemini-2.5-flash-image. "
               "Ключ берётся из «Настройки → API-ключи → AI Router».",
-              "Images through the accounts already connected in 9Router: "
+              "Images through the accounts already connected in OmniRoute: "
               "gemini/gemini-3-pro-image-preview (Nano Banana Pro), gemini/gemini-2.5-flash-image. "
               "The key comes from Settings → API keys → AI Router."),
         fields=(_MODEL_FIELD,
-                ProviderField("apiBase", ("Адрес 9Router", "9Router base URL"),
-                              placeholder="http://9router:20128"),
+                ProviderField("apiBase", ("Адрес OmniRoute", "OmniRoute base URL"),
+                              placeholder="http://omniroute:20128"),
                 ProviderField("usdPerImage", ("Цена за изображение, $", "USD per image"), "number")),
     ),
     ProviderSpec(
@@ -1004,7 +1004,7 @@ def create_llm_endpoint(
 
 async def list_llm_endpoint_models(binding_id: str) -> dict[str, Any]:
     """`GET {api_base}/models` on an approved binding, as the OpenAI-compatible
-    contract defines it — which is what 9Router, OpenRouter, DeepSeek, vLLM and
+    contract defines it — which is what OmniRoute, OpenRouter, DeepSeek, vLLM and
     llama.cpp all answer.
 
     Never raises for an endpoint that simply does not answer: the caller is a

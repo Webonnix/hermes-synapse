@@ -1,6 +1,6 @@
-# AI Router (9Router) dashboard, reachable at https://${ROUTER_HOSTNAME}/ — a
+# AI Router (OmniRoute) dashboard, reachable at https://${ROUTER_HOSTNAME}/ — a
 # separate server block keyed on Host/SNI rather than a location prefix under
-# the main site, because 9Router is its own Next.js app: its HTML/JS reference
+# the main site, because OmniRoute is its own Next.js app: its HTML/JS reference
 # assets and API routes (/_next/..., /api/...) at absolute root paths with no
 # basePath support, so hosting it under a subpath of the main site (e.g.
 # /router/) would silently 404 half its requests — and /api/ would collide
@@ -27,7 +27,7 @@ server {
     server_name ${ROUTER_HOSTNAME};
 
     resolver 127.0.0.11 valid=10s;
-    set $router_upstream http://9router:20128;
+    set $router_upstream http://omniroute:20128;
 
     location / {
         proxy_pass $router_upstream;

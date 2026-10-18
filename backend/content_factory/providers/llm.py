@@ -44,7 +44,7 @@ LOCAL_PROVIDER_ID = "local-llm"
 
 
 class LLMProvider(Provider):
-    """One OpenAI-compatible endpoint (which includes the local llama.cpp server and 9router).
+    """One OpenAI-compatible endpoint (which includes the local llama.cpp server and OmniRoute).
 
     `binding_id` is the `provider_bindings` row this provider draws credentials
     from; None means the local model, which needs none.

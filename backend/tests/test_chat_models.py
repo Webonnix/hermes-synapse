@@ -130,7 +130,7 @@ async def test_one_dead_source_does_not_take_the_other_down():
 
     assert [m["id"] for m in result["local"]] == ["qwen3.8-27b"]
     assert result["router"] == []
-    assert "9Router" in result["router_error"]
+    assert "OmniRoute" in result["router_error"]
 
 
 @pytest.mark.asyncio

@@ -366,9 +366,9 @@ export interface ProviderBinding {
   default_model?: string | null;
 }
 
-// Read-only reachability/catalog snapshot from the optional 9Router sidecar
+// Read-only reachability/catalog snapshot from the optional OmniRoute sidecar
 // (GET /api/router/stats) — model_count/provider_count/sample_models come
-// from GET /v1/models, the one 9Router endpoint that's both documented and
+// from GET /v1/models, the one OmniRoute endpoint that's both documented and
 // confirmed working with a Bearer API key. Combos and 9Router's own
 // connected accounts are read separately, through a backend-held dashboard
 // session — see RouterSessionStatus/RouterCombosResponse/
@@ -392,10 +392,10 @@ export interface RouterSessionStatus {
   pending_task_id: string | null;
 }
 
-// GET /api/router/models — 9Router's full model catalog, namespaced by
+// GET /api/router/models — OmniRoute's full model catalog, namespaced by
 // provider (e.g. 'kimi/kimi-k3', 'ds/deepseek-chat'). Powers the "Добавить
-// тир" form's model picker once a tier is bound to the 9Router provider.
-/** Passed through from 9Router's catalog, so every field is best-effort:
+// тир" form's model picker once a tier is bound to the OmniRoute provider.
+/** Passed through from OmniRoute's catalog, so every field is best-effort:
  *  older entries and other gateways may omit `capabilities` entirely. */
 export interface RouterModelCapabilities {
   vision?: boolean;
@@ -417,8 +417,8 @@ export interface RouterModelsResponse {
   error: string | null;
 }
 
-// A single tier within a 9Router combo — shape is best-effort/defensive
-// since it's passed through from 9Router's own (undocumented) session API.
+// A single tier within an OmniRoute combo — shape is best-effort/defensive
+// since it's passed through from OmniRoute's own (undocumented) session API.
 export interface RouterComboTier {
   model?: string;
   provider?: string;
@@ -440,10 +440,10 @@ export interface RouterCombosResponse {
   error: string | null;
 }
 
-// A connected upstream account inside 9Router itself (e.g. a Claude
+// A connected upstream account inside OmniRoute itself (e.g. a Claude
 // subscription or a GLM API key) — distinct from this app's own
 // ProviderBinding (an agent's binding to reach an external API, which may or
-// may not be 9Router).
+// may not be OmniRoute).
 export interface RouterConnection {
   name?: string;
   id?: string;
@@ -471,7 +471,7 @@ export interface RouterConnectionsResponse {
 }
 
 // backend/router_usage.py's tier_quota_status() — requests-per-window is
-// tracked by Hermes itself (9Router has no quota API to read this from).
+// tracked by Hermes itself (OmniRoute has no quota API to read this from).
 export interface RouterTierQuota {
   used: number;
   limit: number | null;
@@ -500,7 +500,7 @@ export interface RouterTier {
 }
 
 // GET /api/router/overview — the AI Router tab's stat-card row. Computed
-// entirely from Hermes's own usage log, not from 9Router.
+// entirely from Hermes's own usage log, not from OmniRoute.
 export interface RouterOverview {
   active_combo_label: string;
   active_combo_tier_count: number;

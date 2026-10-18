@@ -1,8 +1,8 @@
 """Usage log for the local-orchestrated fallback chain (backend/local_orchestrator.py).
 
-9Router genuinely has no quota/usage API in this version (see backend/main.py's
+OmniRoute genuinely has no quota/usage API in this version (see backend/main.py's
 router_stats_api docstring — every path 404s regardless of auth). So "quota"
-and "economy" numbers shown in the AI Router tab are not scraped from 9Router
+and "economy" numbers shown in the AI Router tab are not scraped from OmniRoute
 at all — they are Hermes's own honest count of which tier handled each
 request, tracked here. Quota is measured in requests-per-window, not tokens:
 that's the one thing every call site can report for free without needing a

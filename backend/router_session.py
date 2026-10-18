@@ -1,6 +1,6 @@
-"""9Router dashboard session management.
+"""OmniRoute dashboard session management.
 
-9Router's own dashboard API (GET /api/combos, GET /api/providers — its
+OmniRoute's own dashboard API (GET /api/combos, GET /api/providers — its
 connected upstream accounts, distinct from this app's own provider_bindings)
 only accepts its dashboard session cookie, never a Bearer API key. This
 module governs the one credential that unlocks it (the dashboard password)
@@ -16,7 +16,7 @@ exist" is worse than no note at all:
 
 * GET /api/quota and GET /api/usage are still 404 on every variant tried
   (/api/dashboard/*, /api/stats, /api/analytics/*, /api/usage/*, /api/quota/*),
-  so per-account quota really is only visible in 9Router's own UI — see GET
+  so per-account quota really is only visible in OmniRoute's own UI — see GET
   /api/router/stats's dashboard_url.
 * GET /api/models, GET /api/pricing, GET /api/settings and GET
   /api/provider-nodes *do* answer now. /api/models is the interesting one: it
@@ -35,7 +35,7 @@ the password is never written to the SQL DB, only to Valkey (internal-only),
 under a short TTL until an owner approves it via the same Control Plane /
 Telegram /approve flow used for external LLM provider bindings. A dashboard
 password is more sensitive than a scoped API key — it grants full control
-over 9Router itself (revoke keys, disconnect accounts, change settings) — so
+over OmniRoute itself (revoke keys, disconnect accounts, change settings) — so
 it gets the same governance, not less.
 """
 
@@ -59,7 +59,7 @@ _SESSION_TOKEN_KEY = "router_dashboard_session"
 _PENDING_TTL_SECONDS = 24 * 60 * 60
 # Refresh a bit before the token's own expiry so a request never races a
 # session that's valid when checked but expired by the time it reaches
-# 9Router.
+# OmniRoute.
 _REFRESH_SKEW_SECONDS = 60
 # 9Router locks the password out after repeated failed attempts (observed:
 # 5) — don't retry a failing login on every single incoming request.
@@ -69,13 +69,13 @@ _last_login_attempt: float = 0.0
 
 
 def _router_api_base() -> str:
-    return os.getenv("ROUTER_API_BASE", "http://9router:20128").rstrip("/")
+    return os.getenv("ROUTER_API_BASE", "http://omniroute:20128").rstrip("/")
 
 
 def _decode_jwt_exp(token: str) -> Optional[int]:
     """Best-effort read of a JWT's `exp` claim without a JWT library or
     signature check — this is only ever used to decide when *our own* cached
-    copy should be refreshed. 9Router is the one actually validating the
+    copy should be refreshed. OmniRoute is the one actually validating the
     token's signature and expiry on every request it receives."""
     try:
         payload_b64 = token.split(".")[1]
@@ -88,7 +88,7 @@ def _decode_jwt_exp(token: str) -> Optional[int]:
 
 
 def propose_router_password(password: str) -> Dict[str, Any]:
-    """Validate + stage the 9Router dashboard password, opening one R3
+    """Validate + stage the OmniRoute dashboard password, opening one R3
     Telegram-approval task before it becomes usable for anything — same
     shape as provider_governance.create_binding_proposal."""
     clean = str(password).strip()
@@ -101,15 +101,15 @@ def propose_router_password(password: str) -> Dict[str, Any]:
     from backend.valkey_client import set_value
 
     task = create_review_task(
-        goal="Configure 9Router dashboard password for backend session access",
+        goal="Configure OmniRoute dashboard password for backend session access",
         arguments={
             "secret_policy": "Password stored only in Valkey (internal-only, password-protected), never in the SQL DB",
         },
         risk_class="R3",
         acceptance=[
             "Password never appears in the SQL database or application logs",
-            "Used only server-side to establish a 9Router dashboard session; never returned to the frontend",
-            "Grants read access to 9Router's own combos/connected-accounts only — not agent LLM routing, "
+            "Used only server-side to establish an OmniRoute dashboard session; never returned to the frontend",
+            "Grants read access to OmniRoute's own combos/connected-accounts only — not agent LLM routing, "
             "which stays a separate, already-governed provider binding",
         ],
         rollback="DELETE /api/router/session-credential clears the stored password and any cached session immediately.",
@@ -181,9 +181,9 @@ def has_pending_proposal() -> Optional[str]:
 
 
 async def get_session_token(*, force_refresh: bool = False) -> Optional[str]:
-    """Returns a valid `auth_token` for 9Router's dashboard API, logging in
+    """Returns a valid `auth_token` for OmniRoute's dashboard API, logging in
     (and caching the result, TTL'd to the token's own expiry) as needed.
-    None if no password is configured, login fails, or 9Router is
+    None if no password is configured, login fails, or OmniRoute is
     unreachable — callers treat that as "session unavailable", not a hard
     error, since this whole feature is optional."""
     from backend.valkey_client import get_value, set_value
@@ -213,16 +213,16 @@ async def get_session_token(*, force_refresh: bool = False) -> Optional[str]:
                 json={"password": password},
             )
     except httpx.HTTPError as exc:
-        logger.warning("9Router login failed (network): %s", exc)
+        logger.warning("OmniRoute login failed (network): %s", exc)
         return None
 
     if resp.status_code != 200:
-        logger.warning("9Router login failed: HTTP %s", resp.status_code)
+        logger.warning("OmniRoute login failed: HTTP %s", resp.status_code)
         return None
 
     token = resp.cookies.get("auth_token")
     if not token:
-        logger.warning("9Router login succeeded but returned no auth_token cookie")
+        logger.warning("OmniRoute login succeeded but returned no auth_token cookie")
         return None
 
     exp = _decode_jwt_exp(token)
@@ -232,7 +232,7 @@ async def get_session_token(*, force_refresh: bool = False) -> Optional[str]:
 
 
 async def session_request(method: str, path: str, **kwargs: Any) -> Optional[httpx.Response]:
-    """Authenticated request against 9Router's session-cookie dashboard API
+    """Authenticated request against OmniRoute's session-cookie dashboard API
     (distinct from the Bearer-key /v1/* surface used elsewhere). Retries
     once with a forced re-login on 401. Returns None if no session is
     available at all — not configured, or login is failing — so callers can
@@ -256,5 +256,5 @@ async def session_request(method: str, path: str, **kwargs: Any) -> Optional[htt
                 resp = await _do(fresh)
         return resp
     except httpx.HTTPError as exc:
-        logger.warning("9Router session request failed: %s %s -> %s", method, path, exc)
+        logger.warning("OmniRoute session request failed: %s %s -> %s", method, path, exc)
         return None

@@ -1363,7 +1363,7 @@ export function MessengerChannelsTab({ agents, view }: MessengerChannelsTabProps
                           placeholder="Пусто — модель агента" />
                       )}
                     </div>
-                  ), 'Канал может отвечать не той моделью, что агент по умолчанию: например, публичный канал — внешней Gemini через 9Router, а внутренний — локальной. Пусто в обоих полях = как у агента.')}
+                  ), 'Канал может отвечать не той моделью, что агент по умолчанию: например, публичный канал — внешней Gemini через OmniRoute, а внутренний — локальной. Пусто в обоих полях = как у агента.')}
                   <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: '0.85rem', color: 'var(--text-muted)', cursor: 'pointer' }}>
                     <input type="checkbox" checked={editEscalation} style={{ marginTop: 3 }}
                       onChange={e => setEditEscalation(e.target.checked)} />

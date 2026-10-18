@@ -33,7 +33,7 @@ import './simple/chatExtras.css';
  *
  * The one structural addition over Open WebUI is the model picker's two
  * sources — the local llama.cpp model this box serves and everything reachable
- * through the 9Router sidecar — which is the whole point of the picker here
+ * through the OmniRoute sidecar — which is the whole point of the picker here
  * (see components/simple/chatModels.ts and backend/chat_models.py).
  */
 
@@ -118,7 +118,7 @@ const COPY = {
     search: 'Поиск чатов',
     placeholder: 'Спросите что-нибудь у Vexa',
     empty: 'С чего начнём?',
-    emptyHint: 'Выберите модель сверху — локальную или внешнюю через 9Router.',
+    emptyHint: 'Выберите модель сверху — локальную или внешнюю через OmniRoute.',
     send: 'Отправить',
     stop: 'Остановить',
     delete: 'Удалить',
@@ -204,7 +204,7 @@ const COPY = {
     search: 'Search chats',
     placeholder: 'Ask Vexa anything',
     empty: 'Where should we begin?',
-    emptyHint: 'Pick a model above — local, or external through 9Router.',
+    emptyHint: 'Pick a model above — local, or external through OmniRoute.',
     send: 'Send',
     stop: 'Stop',
     delete: 'Delete',

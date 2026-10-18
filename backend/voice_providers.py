@@ -15,7 +15,7 @@ owns the network call and nothing else.
 Nothing in the core knows a vendor. Three adapters ship:
 
 * ``openai_compatible`` — ``/audio/speech`` + ``/audio/transcriptions``. Covers OpenAI
-  itself, and this deployment's own 9Router sidecar, which exposes exactly those.
+  itself, and this deployment's own OmniRoute sidecar, which exposes exactly those.
 * ``elevenlabs`` — its REST API (voices, text-to-speech, speech-to-text).
 * ``voice_agent_http`` — a small documented JSON contract (``GET /health``,
   ``POST /respond``) for a self-hosted or third-party voice agent.
@@ -26,7 +26,7 @@ Security posture, deliberately written down
   keys, and the API only ever reports ``has_secret``.
 * ``base_url`` passes the shared SSRF/HTTPS validator (mcp_governance._validate_url):
   HTTPS for public hosts; plain HTTP only for private/loopback/compose-service hosts,
-  because self-hosted voice (the XTTS sidecar, 9Router) is the main use. Link-local,
+  because self-hosted voice (the XTTS sidecar, OmniRoute) is the main use. Link-local,
   multicast and unspecified addresses are refused — and re-checked *after DNS
   resolution* on every call, so a public name pointing at 169.254.169.254 is refused
   too. Redirects are never followed.
@@ -59,7 +59,7 @@ logger = logging.getLogger("hermes.voice_providers")
 
 CAPABILITIES = ("tts", "stt", "voices", "voice_agent")
 KINDS: Dict[str, Dict[str, Any]] = {
-    "openai_compatible": {"label": "OpenAI-совместимый (OpenAI, 9Router)", "capabilities": ("tts", "stt", "voices")},
+    "openai_compatible": {"label": "OpenAI-совместимый (OpenAI, OmniRoute)", "capabilities": ("tts", "stt", "voices")},
     "elevenlabs": {"label": "ElevenLabs", "capabilities": ("tts", "stt", "voices")},
     "voice_agent_http": {"label": "Voice agent (HTTP JSON)", "capabilities": ("voice_agent", "voices")},
 }

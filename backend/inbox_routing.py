@@ -1,6 +1,6 @@
 """Conversation routing: who executes the next AI turn of an inbox conversation.
 
-How this relates to the AI Router (9Router) that already exists
+How this relates to the AI Router (OmniRoute) that already exists
 ───────────────────────────────────────────────────────────────
 backend/local_orchestrator.py + backend/router_tiers.py decide **which model/tier serves
 an LLM call** — local first, escalate up the configured chain on complexity, quota or

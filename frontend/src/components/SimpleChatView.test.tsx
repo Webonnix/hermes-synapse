@@ -284,7 +284,7 @@ describe('SimpleChatView model picker', () => {
   const renderPicker = (overrides: Record<string, unknown> = {}) =>
     render(<SimpleChatView {...baseProps} messages={[]} {...overrides} />);
 
-  it('lists local and 9Router models in separate provider groups', async () => {
+  it('lists local and OmniRoute models in separate provider groups', async () => {
     mockCatalog();
     renderPicker();
 
@@ -339,13 +339,13 @@ describe('SimpleChatView model picker', () => {
     mockCatalog({
       ...catalog,
       router: [],
-      router_error: '9Router недоступен — запущен ли контейнер «9router»?',
+      router_error: 'OmniRoute недоступен — запущен ли контейнер «omniroute»?',
     });
     renderPicker();
 
     fireEvent.click(await screen.findByRole('button', { name: /qwen-mtp:latest/ }));
 
-    expect(await screen.findByText(/9Router недоступен/)).toBeInTheDocument();
+    expect(await screen.findByText(/OmniRoute недоступен/)).toBeInTheDocument();
   });
 
   it('keeps working when the catalogue endpoint is unreachable', async () => {
@@ -360,7 +360,7 @@ describe('SimpleChatView model picker', () => {
 
   it('clears a remembered model the catalogue no longer has', async () => {
     // A selection lives in localStorage forever. A model no longer served locally
-    // (or one whose 9Router credentials went away) would otherwise keep sitting
+    // (or one whose OmniRoute credentials went away) would otherwise keep sitting
     // in the navbar while every turn silently ran on the configured default.
     mockCatalog();
     const onModelSelect = vi.fn();

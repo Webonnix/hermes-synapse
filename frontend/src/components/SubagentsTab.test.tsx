@@ -77,13 +77,13 @@ afterEach(() => {
 });
 
 describe('SubagentsTab model picker', () => {
-  it('offers the live local models and the 9Router catalog, grouped by source', async () => {
+  it('offers the live local models and the OmniRoute catalog, grouped by source', async () => {
     stubFetch();
     renderTab();
 
-    await waitFor(() => expect(groupLabels()).toContain('9Router · ag'));
+    await waitFor(() => expect(groupLabels()).toContain('OmniRoute · ag'));
     expect(groupLabels()).toEqual([
-      'llama.cpp (локальная)', '9Router · ag', '9Router · ds',
+      'llama.cpp (локальная)', 'OmniRoute · ag', 'OmniRoute · ds',
     ]);
     expect(optionLabels()).toEqual([
       '', 'qwen-mtp:latest', 'qwen-quality:latest',
@@ -96,7 +96,7 @@ describe('SubagentsTab model picker', () => {
     stubFetch();
     renderTab();
 
-    await waitFor(() => expect(groupLabels()).toContain('9Router · ag'));
+    await waitFor(() => expect(groupLabels()).toContain('OmniRoute · ag'));
     for (const stale of ['qwen3:8b', 'google/gemini-2.5-pro', 'openai/gpt-4o', 'deepseek/deepseek-r1']) {
       expect(optionLabels()).not.toContain(stale);
     }
@@ -123,7 +123,7 @@ describe('SubagentsTab model picker', () => {
     stubFetch('network-error');
     renderTab({ models: [], newAgentModel: 'ag/gemini-pro-agent' });
 
-    await waitFor(() => expect(screen.queryByText('Загрузка каталога 9Router…')).toBeNull());
+    await waitFor(() => expect(screen.queryByText('Загрузка каталога OmniRoute…')).toBeNull());
     expect(groupLabels()).toEqual([]);
     expect(optionLabels()).toEqual(['ag/gemini-pro-agent', '__custom__']);
   });
@@ -133,7 +133,7 @@ describe('SubagentsTab model picker', () => {
     const setNewAgentModel = vi.fn();
     renderTab({ newAgentModel: 'ds/deepseek-chat', setNewAgentModel });
 
-    await waitFor(() => expect(groupLabels()).toContain('9Router · ds'));
+    await waitFor(() => expect(groupLabels()).toContain('OmniRoute · ds'));
     fireEvent.change(modelSelect(), { target: { value: '__custom__' } });
 
     const input = screen.getByPlaceholderText(/ag\/gemini-3.7-flash-high/) as HTMLInputElement;

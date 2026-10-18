@@ -110,7 +110,7 @@ describe('AgentsAdminTab — AI Router section', () => {
     });
     render(<AgentsAdminTab agents={[]} models={[]} fetchAgents={() => {}} t={t} />);
     fireEvent.click(screen.getByText(t('adminNavRouter')));
-    await waitFor(() => expect(screen.getByText(/контейнер 9router не отвечает/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/контейнер omniroute не отвечает/)).toBeInTheDocument());
   });
 
   it('renders the model/provider catalog once the sidecar responds', async () => {
@@ -124,10 +124,10 @@ describe('AgentsAdminTab — AI Router section', () => {
     });
     render(<AgentsAdminTab agents={[]} models={[]} fetchAgents={() => {}} t={t} />);
     fireEvent.click(screen.getByText(t('adminNavRouter')));
-    // The raw 9Router catalog snapshot is now a demoted diagnostic <details>
+    // The raw OmniRoute catalog snapshot is now a demoted diagnostic <details>
     // section (the AI Router tab's primary view is Hermes's own fallback
     // chain), but its content is still present, just collapsed.
-    fireEvent.click(screen.getByText(/Необработанные данные из дашборда 9Router/));
+    fireEvent.click(screen.getByText(/Необработанные данные из дашборда OmniRoute/));
     await waitFor(() => expect(screen.getByText('679')).toBeInTheDocument());
     expect(screen.getByText('68')).toBeInTheDocument();
     expect(screen.getByText('anthropic/claude-opus-4')).toBeInTheDocument();
@@ -137,7 +137,7 @@ describe('AgentsAdminTab — AI Router section', () => {
     stubFetch({ routerStats: 'network-error' });
     render(<AgentsAdminTab agents={[]} models={[]} fetchAgents={() => {}} t={t} />);
     fireEvent.click(screen.getByText(t('adminNavRouter')));
-    fireEvent.click(screen.getByText(/Необработанные данные из дашборда 9Router/));
+    fireEvent.click(screen.getByText(/Необработанные данные из дашборда OmniRoute/));
     await waitFor(() => expect(screen.getByText('Повторить')).toBeInTheDocument());
   });
 
@@ -159,11 +159,11 @@ describe('AgentsAdminTab — AI Router section', () => {
     // "Подключённые провайдеры" is the one native table for agent provider
     // bindings on this tab now — no separate nav tab for it any more.
     expect(screen.getAllByText('Подключённые провайдеры')).toHaveLength(1);
-    fireEvent.click(screen.getByText(/Необработанные данные из дашборда 9Router/));
+    fireEvent.click(screen.getByText(/Необработанные данные из дашборда OmniRoute/));
     await waitFor(() => expect(screen.getByText('679')).toBeInTheDocument());
   });
 
-  it('offers to connect a 9Router session when none is configured', async () => {
+  it('offers to connect an OmniRoute session when none is configured', async () => {
     stubFetch({
       routerStats: {
         available: true, reachable: true, model_count: 1, provider_count: 1, sample_models: [],
@@ -188,7 +188,7 @@ describe('AgentsAdminTab — AI Router section', () => {
     await waitFor(() => expect(screen.getByText('Подключить')).toBeInTheDocument());
     fireEvent.click(screen.getByText('Подключить'));
 
-    const input = await screen.findByPlaceholderText('пароль из Dashboard 9Router');
+    const input = await screen.findByPlaceholderText('пароль из Dashboard OmniRoute');
     fireEvent.change(input, { target: { value: 'hunter2' } });
     fireEvent.click(screen.getByText('Подключить'));
 
@@ -215,7 +215,7 @@ describe('AgentsAdminTab — AI Router section', () => {
     expect(screen.getByText('claude-subscription')).toBeInTheDocument();
   });
 
-  it('shows empty-state guidance when configured but nothing is set up in 9Router yet', async () => {
+  it('shows empty-state guidance when configured but nothing is set up in OmniRoute yet', async () => {
     stubFetch({
       routerStats: {
         available: true, reachable: true, model_count: 1, provider_count: 1, sample_models: [],
@@ -227,7 +227,7 @@ describe('AgentsAdminTab — AI Router section', () => {
     });
     render(<AgentsAdminTab agents={[]} models={[]} fetchAgents={() => {}} t={t} />);
     fireEvent.click(screen.getByText(t('adminNavRouter')));
-    fireEvent.click(screen.getByText(/Необработанные данные из дашборда 9Router/));
+    fireEvent.click(screen.getByText(/Необработанные данные из дашборда OmniRoute/));
     await waitFor(() => expect(screen.getByText(/Комбо ещё не создано/)).toBeInTheDocument());
     expect(screen.getByText(/Аккаунты ещё не подключены/)).toBeInTheDocument();
   });
@@ -319,7 +319,7 @@ describe('AgentsAdminTab — AI Router section', () => {
     });
   });
 
-  it('shows 9Router-native connections in the main view, not just the collapsed diagnostics', async () => {
+  it('shows OmniRoute-native connections in the main view, not just the collapsed diagnostics', async () => {
     stubFetch({
       routerStats: { available: false, reachable: null, model_count: null, provider_count: null, sample_models: [], dashboard_url: '', error: null },
       sessionStatus: { configured: true, pending_task_id: null },
@@ -338,7 +338,7 @@ describe('AgentsAdminTab — AI Router section', () => {
     expect(screen.getAllByText('active').length).toBeGreaterThanOrEqual(1);
   });
 
-  it('offers a quick-bind action for 9Router connections when no binding points at it yet', async () => {
+  it('offers a quick-bind action for OmniRoute connections when no binding points at it yet', async () => {
     const fetchMock = stubFetch({
       routerStats: { available: false, reachable: null, model_count: null, provider_count: null, sample_models: [], dashboard_url: '', error: null },
       sessionStatus: { configured: true, pending_task_id: null },
@@ -347,8 +347,8 @@ describe('AgentsAdminTab — AI Router section', () => {
     });
     render(<AgentsAdminTab agents={[]} models={[]} fetchAgents={() => {}} t={t} />);
     fireEvent.click(screen.getByText(t('adminNavRouter')));
-    await waitFor(() => expect(screen.getByText('Быстро подключить 9Router как провайдера')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('Быстро подключить 9Router как провайдера'));
+    await waitFor(() => expect(screen.getByText('Быстро подключить OmniRoute как провайдера')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Быстро подключить OmniRoute как провайдера'));
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(c => c[0] === '/api/router/bind-self' && (c[1] as RequestInit)?.method === 'POST');
       expect(call).toBeTruthy();
@@ -356,11 +356,11 @@ describe('AgentsAdminTab — AI Router section', () => {
     await waitFor(() => expect(screen.getByText(/один Telegram \/approve T-2/)).toBeInTheDocument());
   });
 
-  it('skips the quick-bind action once a provider binding already points at 9Router', async () => {
+  it('skips the quick-bind action once a provider binding already points at OmniRoute', async () => {
     stubFetch({
       routerStats: { available: false, reachable: null, model_count: null, provider_count: null, sample_models: [], dashboard_url: '', error: null },
       providers: [{
-        id: 'prov-9r', name: '9Router', provider_type: 'openai_compatible',
+        id: 'prov-9r', name: 'OmniRoute', provider_type: 'openai_compatible',
         api_base: 'http://9router:20128/v1', status: 'active', created_at: '', updated_at: '',
       }],
       sessionStatus: { configured: true, pending_task_id: null },
@@ -370,11 +370,29 @@ describe('AgentsAdminTab — AI Router section', () => {
     render(<AgentsAdminTab agents={[]} models={[]} fetchAgents={() => {}} t={t} />);
     fireEvent.click(screen.getByText(t('adminNavRouter')));
     await waitFor(() => expect(screen.getByText('DeepSeek API')).toBeInTheDocument());
-    expect(screen.queryByText('Быстро подключить 9Router как провайдера')).not.toBeInTheDocument();
-    expect(screen.getByText(/9Router уже добавлен как провайдер/)).toBeInTheDocument();
+    expect(screen.queryByText('Быстро подключить OmniRoute как провайдера')).not.toBeInTheDocument();
+    expect(screen.getByText(/OmniRoute уже добавлен как провайдер/)).toBeInTheDocument();
   });
 
-  it('labels a direct binding distinctly from a 9Router-routed one, and gives a friendly status for a pending approval', async () => {
+  it('treats a binding on the omniroute service name as the router too, not only the legacy 9router alias', async () => {
+    stubFetch({
+      routerStats: { available: false, reachable: null, model_count: null, provider_count: null, sample_models: [], dashboard_url: '', error: null },
+      providers: [{
+        id: 'prov-omr', name: 'OmniRoute', provider_type: 'openai_compatible',
+        api_base: 'http://omniroute:20128/v1', status: 'active', created_at: '', updated_at: '',
+      }],
+      sessionStatus: { configured: true, pending_task_id: null },
+      combos: { available: true, error: null, combos: [] },
+      connections: { available: true, error: null, connections: [{ id: 'c1', name: 'DeepSeek API', provider: 'deepseek', testStatus: 'active', isActive: true }] },
+    });
+    render(<AgentsAdminTab agents={[]} models={[]} fetchAgents={() => {}} t={t} />);
+    fireEvent.click(screen.getByText(t('adminNavRouter')));
+    await waitFor(() => expect(screen.getByText('DeepSeek API')).toBeInTheDocument());
+    expect(screen.queryByText('Быстро подключить OmniRoute как провайдера')).not.toBeInTheDocument();
+    expect(screen.getByText(/OmniRoute уже добавлен как провайдер/)).toBeInTheDocument();
+  });
+
+  it('labels a direct binding distinctly from an OmniRoute-routed one, and gives a friendly status for a pending approval', async () => {
     stubFetch({
       routerStats: { available: false, reachable: null, model_count: null, provider_count: null, sample_models: [], dashboard_url: '', error: null },
       providers: [
@@ -389,7 +407,7 @@ describe('AgentsAdminTab — AI Router section', () => {
     expect(screen.getByText('ждёт /approve')).toBeInTheDocument();
   });
 
-  it('shows auth type and an expiry hint for an OAuth 9Router connection', async () => {
+  it('shows auth type and an expiry hint for an OAuth OmniRoute connection', async () => {
     stubFetch({
       routerStats: { available: false, reachable: null, model_count: null, provider_count: null, sample_models: [], dashboard_url: '', error: null },
       sessionStatus: { configured: true, pending_task_id: null },
@@ -423,7 +441,7 @@ describe('AgentsAdminTab — AI Router section', () => {
     expect(screen.queryByText(/запросов, 24ч · без лимита/)).not.toBeInTheDocument();
   });
 
-  it('swaps the tier form\'s free-text Модель field for a catalog picker once a 9Router binding is chosen', async () => {
+  it('swaps the tier form\'s free-text Модель field for a catalog picker once an OmniRoute binding is chosen', async () => {
     const fetchMock = stubFetch({
       routerStats: { available: false, reachable: null, model_count: null, provider_count: null, sample_models: [], dashboard_url: '', error: null },
       providers: [
@@ -440,12 +458,12 @@ describe('AgentsAdminTab — AI Router section', () => {
     await waitFor(() => expect(screen.getByText('Добавить тир')).toBeInTheDocument());
     fireEvent.click(screen.getByText('Добавить тир'));
 
-    // Direct (non-9Router) binding first — still the plain text input.
+    // Direct (non-OmniRoute) binding first — still the plain text input.
     fireEvent.change(await screen.findByPlaceholderText('Подписка'), { target: { value: 'Прямой DS' } });
     fireEvent.change(screen.getByDisplayValue('— выберите —'), { target: { value: 'prov-ds' } });
     expect(screen.getByPlaceholderText('deepseek-chat')).toBeInTheDocument();
 
-    // Switch to the 9Router binding — the field becomes a catalog select.
+    // Switch to the OmniRoute binding — the field becomes a catalog select.
     fireEvent.change(screen.getByDisplayValue('deepseek (https://api.deepseek.com/v1)'), { target: { value: 'prov-9r' } });
     expect(screen.queryByPlaceholderText('deepseek-chat')).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getByText('ds/deepseek-chat')).toBeInTheDocument());

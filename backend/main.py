@@ -847,7 +847,7 @@ KNOWN_API_KEYS = [
     {"key_name": "OBSIDIAN_API_KEY", "label": "Obsidian", "description": "Доступ к Obsidian Local REST API (skill obsidian_rag).", "category": "Интеграции"},
     {"key_name": "GITEA_TOKEN", "label": "Gitea", "description": "Доступ агентов к dev-репозиторию (skill git_dev).", "category": "Интеграции"},
     {"key_name": "OPENROUTER_API_KEY", "label": "OpenRouter", "description": "Облачный провайдер для основной модели, если выбран OpenRouter.", "category": "LLM"},
-    {"key_name": "ROUTER_API_KEY", "label": "AI Router (9Router)", "description": "Ключ из 9Router → Dashboard → API Keys. Используется в разделе «AI Router» только для проверки доступности и списка моделей (GET /v1/models) — квоты и usage смотрите в самом 9Router. Тот же ключ можно использовать и для провайдер-биндинга агентов через Админку → Providers.", "category": "LLM"},
+    {"key_name": "ROUTER_API_KEY", "label": "AI Router (OmniRoute)", "description": "Ключ из OmniRoute → Dashboard → API Keys. Используется в разделе «AI Router» только для проверки доступности и списка моделей (GET /v1/models) — квоты и usage смотрите в самом OmniRoute. Тот же ключ можно использовать и для провайдер-биндинга агентов через Админку → Providers.", "category": "LLM"},
     {"key_name": "NOWPAYMENTS_API_KEY", "label": "NOWPayments (API)", "description": "Выставление криптосчетов за подписки на ботов.", "category": "Биллинг"},
     {"key_name": "NOWPAYMENTS_IPN_SECRET", "label": "NOWPayments (IPN)", "description": "Секрет для проверки подписи callback-ов об оплате. Без него платежи не подтверждаются.", "category": "Биллинг"},
 ]
@@ -2058,9 +2058,9 @@ async def delete_provider_api(binding_id: str):
 @app.get("/api/providers/{binding_id}/models")
 async def list_provider_models_api(binding_id: str):
     """What one binding says it can serve — `GET {api_base}/models`, the
-    OpenAI-compatible contract 9Router, OpenRouter, DeepSeek and vLLM all
+    OpenAI-compatible contract OmniRoute, OpenRouter, DeepSeek and vLLM all
     answer. Generic on purpose: GET /api/router/models only ever describes the
-    9Router sidecar, so anything that pins a *binding* to a model (a channel, an
+    OmniRoute sidecar, so anything that pins a *binding* to a model (a channel, an
     agent, a Content Factory node) needs to ask that binding, not the sidecar.
 
     Never an error for an endpoint that simply does not list: a caller is always
@@ -2108,9 +2108,9 @@ async def update_provider_pricing_api(binding_id: str, payload: ProviderPricingR
 
 @app.get("/api/router/stats")
 async def router_stats_api():
-    """Reachability/catalog check for the optional 9Router sidecar (Admin -> AI Router).
+    """Reachability/catalog check for the optional OmniRoute sidecar (Admin -> AI Router).
 
-    Deliberately does NOT try to read quota or usage numbers: 9Router's own
+    Deliberately does NOT try to read quota or usage numbers: OmniRoute's own
     docs advertise `GET /api/quota` and `GET /api/usage` as Bearer-key-
     authenticated, but against an actual running instance both 404 — they
     don't exist at that path/version. `/api/providers` and `/api/combos` do
@@ -2131,7 +2131,7 @@ async def router_stats_api():
     from backend import database as db
 
     router_api_key = db.get_api_key("ROUTER_API_KEY") or os.getenv("ROUTER_API_KEY", "")
-    router_api_base = os.getenv("ROUTER_API_BASE", "http://9router:20128").rstrip("/")
+    router_api_base = os.getenv("ROUTER_API_BASE", "http://omniroute:20128").rstrip("/")
     dashboard_url = os.getenv("ROUTER_PUBLIC_BASE_URL", "http://localhost:20128")
 
     if not router_api_key:
@@ -2158,7 +2158,7 @@ async def router_stats_api():
             "provider_count": None,
             "sample_models": [],
             "dashboard_url": dashboard_url,
-            "error": "9Router sidecar not reachable — is the '9router' container running?",
+            "error": "OmniRoute sidecar not reachable — is the 'omniroute' container running?",
         }
 
     if resp.status_code != 200:
@@ -2196,18 +2196,18 @@ async def router_stats_api():
 
 @app.get("/api/router/models")
 async def router_models_api():
-    """Full 9Router model catalog for the AI Router tab's "Добавить тир" form —
+    """Full OmniRoute model catalog for the AI Router tab's "Добавить тир" form —
     GET /api/router/stats only returns an 8-item sample_models preview for the
     diagnostics panel, this is the complete list the tier form's model picker
     needs. Catalog entries are namespaced by provider (e.g. 'kimi/kimi-k3',
     'ds/deepseek-chat') — a tier's model_override must match one of these
     verbatim, which a free-text field made easy to get wrong (a user typed
     'deepseek-chat' instead of 'ds/deepseek-chat' and the tier would have
-    silently 404'd against 9Router on first use)."""
+    silently 404'd against OmniRoute on first use)."""
     from backend import database as db
 
     router_api_key = db.get_api_key("ROUTER_API_KEY") or os.getenv("ROUTER_API_KEY", "")
-    router_api_base = os.getenv("ROUTER_API_BASE", "http://9router:20128").rstrip("/")
+    router_api_base = os.getenv("ROUTER_API_BASE", "http://omniroute:20128").rstrip("/")
     if not router_api_key:
         return {"available": False, "models": [], "error": "ROUTER_API_KEY not configured (Settings -> API Keys -> AI Router)."}
 
@@ -2217,7 +2217,7 @@ async def router_models_api():
             resp = await client.get(f"{router_api_base}/v1/models", headers=headers)
     except httpx.HTTPError as exc:
         logger.warning("AI Router model catalog fetch failed: %s", exc)
-        return {"available": True, "models": [], "error": "9Router sidecar not reachable — is the '9router' container running?"}
+        return {"available": True, "models": [], "error": "OmniRoute sidecar not reachable — is the 'omniroute' container running?"}
 
     if resp.status_code != 200:
         detail = "invalid ROUTER_API_KEY" if resp.status_code in (401, 403) else f"HTTP {resp.status_code}"
@@ -2248,10 +2248,10 @@ async def router_models_api():
 @app.get("/api/chat/models")
 async def chat_models_api(refresh: bool = False):
     """The chat model picker's catalogue: the model the local llama.cpp server is
-    serving plus the external 9Router catalogue, in one payload.
+    serving plus the external OmniRoute catalogue, in one payload.
 
     /api/models answers "what can the *configured* provider serve" and
-    /api/router/models answers only the 9Router half — the picker needs both
+    /api/router/models answers only the OmniRoute half — the picker needs both
     at once, each labelled with its source, because that source is what the
     chat frame sends back and what backend/chat_models.py resolves an endpoint
     from. Neither half can fail the request: an unreachable source comes back
@@ -2272,7 +2272,7 @@ class RouterSessionCredentialRequest(BaseModel):
 
 @app.get("/api/router/session-status")
 async def router_session_status_api():
-    """Whether a 9Router dashboard session is configured/pending/active —
+    """Whether an OmniRoute dashboard session is configured/pending/active —
     powers the combos/connections panels' setup state in the AI Router tab."""
     from backend.router_session import is_configured, has_pending_proposal
 
@@ -2284,7 +2284,7 @@ async def router_session_status_api():
 
 @app.post("/api/router/session-credential")
 async def router_session_credential_propose_api(body: RouterSessionCredentialRequest):
-    """Stage the 9Router dashboard password behind one Telegram/dashboard
+    """Stage the OmniRoute dashboard password behind one Telegram/dashboard
     R3 approval — see backend/router_session.py for why this needs the same
     governance as an external provider binding, not less."""
     from backend.router_session import propose_router_password
@@ -2306,59 +2306,59 @@ async def router_session_credential_revoke_api():
 
 @app.get("/api/router/combos")
 async def router_combos_api():
-    """Proxies 9Router's own GET /api/combos through a backend-held dashboard
+    """Proxies OmniRoute's own GET /api/combos through a backend-held dashboard
     session — this data has no Bearer-key API, only the session-cookie one.
     Degrades to {"available": false} rather than raising when no session is
-    configured or 9Router can't be reached, since this whole panel is optional.
+    configured or OmniRoute can't be reached, since this whole panel is optional.
     """
     from backend.router_session import session_request, is_configured
 
     if not is_configured():
-        return {"available": False, "combos": None, "error": "9Router dashboard session not configured."}
+        return {"available": False, "combos": None, "error": "OmniRoute dashboard session not configured."}
 
     resp = await session_request("GET", "/api/combos")
     if resp is None:
-        return {"available": True, "combos": None, "error": "9Router session unavailable — check the password or container status."}
+        return {"available": True, "combos": None, "error": "OmniRoute session unavailable — check the password or container status."}
     if resp.status_code != 200:
-        return {"available": True, "combos": None, "error": f"9Router returned HTTP {resp.status_code} for /api/combos."}
+        return {"available": True, "combos": None, "error": f"OmniRoute returned HTTP {resp.status_code} for /api/combos."}
     try:
         data = resp.json()
     except ValueError:
-        return {"available": True, "combos": None, "error": "9Router returned invalid JSON for /api/combos."}
+        return {"available": True, "combos": None, "error": "OmniRoute returned invalid JSON for /api/combos."}
     return {"available": True, "combos": data.get("combos") if isinstance(data, dict) else data, "error": None}
 
 
 @app.get("/api/router/connections")
 async def router_connections_api():
-    """Proxies 9Router's own GET /api/providers (its connected upstream AI
+    """Proxies OmniRoute's own GET /api/providers (its connected upstream AI
     accounts — Claude subscription, GLM key, etc.) — deliberately named
     differently from this app's own GET /api/providers (agent provider
     bindings), which is an unrelated concept that happens to share a name
-    with 9Router's endpoint."""
+    with OmniRoute's endpoint."""
     from backend.router_session import session_request, is_configured
 
     if not is_configured():
-        return {"available": False, "connections": None, "error": "9Router dashboard session not configured."}
+        return {"available": False, "connections": None, "error": "OmniRoute dashboard session not configured."}
 
     resp = await session_request("GET", "/api/providers")
     if resp is None:
-        return {"available": True, "connections": None, "error": "9Router session unavailable — check the password or container status."}
+        return {"available": True, "connections": None, "error": "OmniRoute session unavailable — check the password or container status."}
     if resp.status_code != 200:
-        return {"available": True, "connections": None, "error": f"9Router returned HTTP {resp.status_code} for /api/providers."}
+        return {"available": True, "connections": None, "error": f"OmniRoute returned HTTP {resp.status_code} for /api/providers."}
     try:
         data = resp.json()
     except ValueError:
-        return {"available": True, "connections": None, "error": "9Router returned invalid JSON for /api/providers."}
+        return {"available": True, "connections": None, "error": "OmniRoute returned invalid JSON for /api/providers."}
     return {"available": True, "connections": data.get("connections") if isinstance(data, dict) else data, "error": None}
 
 
 @app.get("/api/router/catalog")
 async def router_catalog_api():
-    """Everything 9Router *could* serve, not just what it can serve today.
+    """Everything OmniRoute *could* serve, not just what it can serve today.
 
     GET /api/router/models (the Bearer-key /v1/models) only lists models a
     connected, active upstream account can answer with — 23 of them on this
-    deployment. 9Router's session-cookie /api/models is the whole catalogue,
+    deployment. OmniRoute's session-cookie /api/models is the whole catalogue,
     including providers nobody has connected yet, which is the list to look at
     when the question is "what would connecting this account give me". Grouped
     by provider here because that is the unit an account is connected as.
@@ -2374,7 +2374,7 @@ async def router_catalog_api():
     try:
         entries = resp.json().get("models") or []
     except ValueError:
-        return {"available": False, "providers": [], "error": "9Router returned a non-JSON catalogue"}
+        return {"available": False, "providers": [], "error": "OmniRoute returned a non-JSON catalogue"}
 
     grouped: dict[str, list[dict[str, Any]]] = {}
     for entry in entries:
@@ -2397,13 +2397,13 @@ async def router_catalog_api():
 
 @app.post("/api/router/bind-self")
 async def router_bind_self_api():
-    """Convenience: create a governed provider_binding pointing at the 9Router
+    """Convenience: create a governed provider_binding pointing at the OmniRoute
     sidecar itself, reusing the already-configured ROUTER_API_KEY instead of
     making the user copy/paste it into the generic 'Add provider' form. This
-    is the only way accounts connected inside 9Router's own dashboard (see
+    is the only way accounts connected inside OmniRoute's own dashboard (see
     /api/router/connections) become usable as a fallback-chain tier — a tier
     always routes through one provider_binding + a model_override, never
-    directly at a 9Router-native connection. Still goes through the normal
+    directly at an OmniRoute-native connection. Still goes through the normal
     single-Telegram-approval flow, same as any other binding."""
     from backend import database as db
     from backend.provider_governance import create_binding_proposal, list_bindings
@@ -2413,13 +2413,15 @@ async def router_bind_self_api():
         raise HTTPException(status_code=400, detail="ROUTER_API_KEY not configured (Settings -> API Keys -> AI Router).")
 
     existing = await asyncio.to_thread(list_bindings)
-    if any("9router" in (b.get("api_base") or "") for b in existing):
-        raise HTTPException(status_code=409, detail="A provider binding for 9Router already exists.")
+    # "9router" is the compose alias bindings created before the OmniRoute
+    # switch still point at; both names reach the same sidecar.
+    if any(host in (b.get("api_base") or "") for b in existing for host in ("omniroute", "9router")):
+        raise HTTPException(status_code=409, detail="A provider binding for OmniRoute already exists.")
 
-    router_api_base = os.getenv("ROUTER_API_BASE", "http://9router:20128").rstrip("/") + "/v1"
+    router_api_base = os.getenv("ROUTER_API_BASE", "http://omniroute:20128").rstrip("/") + "/v1"
     try:
         proposal = await asyncio.to_thread(
-            create_binding_proposal, "9Router", "openai_compatible", router_api_base, router_api_key,
+            create_binding_proposal, "OmniRoute", "openai_compatible", router_api_base, router_api_key,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2446,7 +2448,7 @@ class RouterTierRequest(BaseModel):
 @app.get("/api/router/tiers")
 async def list_router_tiers_api():
     """The native fallback chain the local model escalates through — this is
-    Hermes's own concept, distinct from (and not fed by) 9Router's own combos,
+    Hermes's own concept, distinct from (and not fed by) OmniRoute's own combos,
     which stay session-only-visible in the panel above. Each tier is annotated
     with its live quota usage from backend/router_usage.py so the AI Router tab
     never needs to leave this page to show a real number."""
@@ -2501,7 +2503,7 @@ async def router_overview_api():
     24h request volume, an honest 'economy' figure (share of the last 24h's
     traffic that did NOT need the top/most-expensive tier), and provider
     binding health. All computed from Hermes's own usage log, never from
-    9Router (which has no quota/usage API at all — see router_stats_api)."""
+    OmniRoute (which has no quota/usage API at all — see router_stats_api)."""
     from backend import router_usage
 
     return await asyncio.to_thread(router_usage.overview_stats)

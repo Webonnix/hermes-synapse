@@ -1,6 +1,6 @@
 /**
  * The chat model picker's data layer: one catalogue combining the local llama.cpp
- * model this box serves with the external models reachable through 9Router,
+ * model this box serves with the external models reachable through OmniRoute,
  * plus the per-chat memory of which one the user picked.
  *
  * Backed by GET /api/chat/models (backend/chat_models.py). A picked model is
@@ -25,7 +25,7 @@ export interface ChatModel {
   modified_at?: string;
   /** Local only — always true: llama-server keeps its model resident. */
   loaded?: boolean;
-  /** 9Router only. */
+  /** OmniRoute only. */
   capabilities?: Record<string, unknown>;
   context_length?: number | null;
 }
@@ -83,7 +83,7 @@ export function findModel(catalog: ChatModelCatalog, selection: ModelSelection |
 /**
  * Whether a remembered selection still names something the server can route
  * to. A selection lives in localStorage indefinitely, so a model that has been
- * no longer served locally or lost its 9Router credentials otherwise keeps sitting
+ * no longer served locally or lost its OmniRoute credentials otherwise keeps sitting
  * in the navbar looking active while every turn silently falls back to the
  * configured default. Only meaningful once a catalogue has actually loaded —
  * an empty one means "not fetched yet", never "your model is gone".

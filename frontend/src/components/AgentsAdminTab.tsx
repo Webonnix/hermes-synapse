@@ -69,7 +69,15 @@ function formatResetIn(resetsAt: string | null): string {
   return minutes ? `${hours}ч ${minutes}м` : `${hours}ч`;
 }
 
-// 9Router's own GET /api/providers response uses `provider`/`testStatus`/
+// Whether a provider binding routes through the AI Router sidecar. Bindings
+// made before the OmniRoute switch still point at its legacy compose alias
+// `9router`; newer ones use the `omniroute` service name. Matching only one
+// would hide the router's model catalog for the other half.
+function isRouterApiBase(apiBase: string | undefined | null): boolean {
+  return !!apiBase && (apiBase.includes('omniroute') || apiBase.includes('9router'));
+}
+
+// OmniRoute's own GET /api/providers response uses `provider`/`testStatus`/
 // `isActive`, not the `type`/`status` fields this file's own ProviderBinding
 // uses — read both shapes so a real connection (kimi, deepseek, ...) renders
 // correctly regardless of which field name a given 9Router version sends.
@@ -262,7 +270,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
   };
 
   const revokeRouterSession = async () => {
-    if (!window.confirm('Отозвать доступ бэкенда к сессии 9Router? Комбо и подключённые аккаунты перестанут отображаться здесь.')) return;
+    if (!window.confirm('Отозвать доступ бэкенда к сессии OmniRoute? Комбо и подключённые аккаунты перестанут отображаться здесь.')) return;
     await fetch('/api/router/session-credential', { method: 'DELETE', headers: authHeaders() });
     setRouterSession({ configured: false, pending_task_id: null });
     setRouterCombos(null);
@@ -270,7 +278,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
   };
 
   // Reuses the already-configured ROUTER_API_KEY server-side so connecting
-  // an account inside 9Router's own dashboard (visible above via the session
+  // an account inside OmniRoute's own dashboard (visible above via the session
   // proxy) can become an actual fallback-chain tier without retyping that
   // key into the generic "Add provider" form — still one Telegram /approve,
   // same governance as any other binding.
@@ -282,7 +290,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
       const response = await fetch('/api/router/bind-self', { method: 'POST', headers: authHeaders() });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
-      setRouterBindNotice(`Отправлено на подтверждение — один Telegram /approve ${data.task_id}, затем 9Router станет доступен как провайдер для тиров.`);
+      setRouterBindNotice(`Отправлено на подтверждение — один Telegram /approve ${data.task_id}, затем OmniRoute станет доступен как провайдер для тиров.`);
       fetchProviders();
     } catch (err) {
       setRouterBindError(err instanceof Error ? err.message : 'Failed to create binding');
@@ -376,7 +384,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
     fetchProjects();
   }, []);
 
-  // Lazy — an unreachable 9Router sidecar shouldn't add a 5s stall to every
+  // Lazy — an unreachable OmniRoute sidecar shouldn't add a 5s stall to every
   // admin-panel load, only to the one visit that opens this tab.
   useEffect(() => {
     if (section === 'router' && !routerStats && !routerLoading) fetchRouterStats();
@@ -702,12 +710,12 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
   };
 
   // The "Модель" field on the tier form needs a free-text input for a direct
-  // provider binding (model-id conventions vary per API), but 9Router's own
+  // provider binding (model-id conventions vary per API), but OmniRoute's own
   // catalog is namespaced (e.g. 'ds/deepseek-chat') and easy to mistype by
   // hand — swap to a select sourced from the live catalog once the chosen
-  // binding actually routes through the 9Router sidecar.
+  // binding actually routes through the OmniRoute sidecar.
   const selectedTierBinding = providers.find(p => p.id === routerTierForm.provider_binding_id);
-  const selectedTierBindingIsRouter = routerTierForm.kind === 'binding' && !!selectedTierBinding?.api_base.includes('9router');
+  const selectedTierBindingIsRouter = routerTierForm.kind === 'binding' && isRouterApiBase(selectedTierBinding?.api_base);
   const routerModelsByOwner = useMemo(() => {
     const grouped: Record<string, RouterModel[]> = {};
     for (const model of routerModels) {
@@ -723,12 +731,12 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
   // picked before the tier was applied (backend/agent_provider_access.py
   // enforces the same ceiling again server-side, at save time and call time).
   // Same reasoning as the tier form above, applied to the agent itself: once an
-  // agent is pointed at the 9Router binding, its model must come from that
+  // agent is pointed at the OmniRoute binding, its model must come from that
   // catalog ('kimi/kimi-k3', 'ds/deepseek-chat'), not from the local model
   // list — a leftover local model id there makes every external call fail with
   // model_not_found.
   const draftProviderBinding = providers.find(p => p.id === draft.model_provider);
-  const draftUsesRouter = !!draftProviderBinding?.api_base.includes('9router');
+  const draftUsesRouter = isRouterApiBase(draftProviderBinding?.api_base);
 
   // A blank new-agent draft takes the first model the box actually serves.
   // Only ever fills a gap: an agent being edited, or a model already chosen,
@@ -745,7 +753,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
   // (agent_provider_access.allowed_binding_ids_for_chain). Anything else pins
   // the agent to that one binding and skips the chain entirely.
   const routingMode: RoutingMode = (draft.model_provider || 'local') === 'local' ? 'chain' : 'pinned';
-  const routerBinding = providers.find(p => p.status === 'active' && p.api_base.includes('9router'));
+  const routerBinding = providers.find(p => p.status === 'active' && isRouterApiBase(p.api_base));
   const applyRoutingMode = (mode: RoutingMode) => {
     if (mode === routingMode) return;
     if (mode === 'chain') {
@@ -1018,7 +1026,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
                       />
                       <span>
                         <strong style={{ display: 'block', fontSize: '0.85rem' }}>
-                          {mode === 'chain' ? 'Иерархия по умолчанию (AI Router)' : 'Своя модель из каталога 9Router'}
+                          {mode === 'chain' ? 'Иерархия по умолчанию (AI Router)' : 'Своя модель из каталога OmniRoute'}
                         </strong>
                         <span style={{ display: 'block', fontSize: '0.76rem', color: 'var(--text-dim, #8c94a3)', marginTop: 2 }}>
                           {mode === 'chain'
@@ -1122,7 +1130,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
               <h4>Настройки модели</h4>
               <p className="admin-form-section-hint">
                 {selectedModelCapabilities
-                  ? 'Набор параметров зависит от выбранной модели — берётся из её capabilities в каталоге 9Router.'
+                  ? 'Набор параметров зависит от выбранной модели — берётся из её capabilities в каталоге OmniRoute.'
                   : 'Каталог не отдаёт характеристик для этой модели, поэтому показаны только универсальные параметры.'}
               </p>
               {selectedModelCapabilities && (
@@ -1352,7 +1360,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
               {routerStats?.dashboard_url && (
                 <a className="btn-ghost" href={routerStats.dashboard_url} target="_blank" rel="noreferrer" style={{ textDecoration: 'none' }}>
                   <ExternalLink size={14} />
-                  <span>Открыть 9Router</span>
+                  <span>Открыть OmniRoute</span>
                 </a>
               )}
             </div>
@@ -1470,11 +1478,11 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
                     className="form-input" required value={routerTierForm.provider_binding_id}
                     onChange={e => {
                       const nextId = e.target.value;
-                      const prevIsRouter = !!selectedTierBinding?.api_base.includes('9router');
-                      const nextIsRouter = !!providers.find(p => p.id === nextId)?.api_base.includes('9router');
+                      const prevIsRouter = isRouterApiBase(selectedTierBinding?.api_base);
+                      const nextIsRouter = isRouterApiBase(providers.find(p => p.id === nextId)?.api_base);
                       // Only clear a typed/picked model when crossing between the
                       // free-text world (a direct binding) and the catalog-select
-                      // world (9Router) — its value format isn't compatible across
+                      // world (OmniRoute) — its value format isn't compatible across
                       // that boundary. Picking a provider for the first time, or
                       // switching between two direct bindings, leaves it alone so
                       // typing the model before the provider (a normal order) still
@@ -1526,8 +1534,8 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
             <div>
               <h3 style={{ fontSize: '1rem' }}>Подключённые провайдеры</h3>
               <p>
-                Обычные OpenAI-compatible биндинги (например DeepSeek), плюс опционально сам 9Router
-                как один из провайдеров (<code>http://9router:20128/v1</code>). Чувствительные данные
+                Обычные OpenAI-compatible биндинги (например DeepSeek), плюс опционально сам OmniRoute
+                как один из провайдеров (<code>http://omniroute:20128/v1</code>). Чувствительные данные
                 редактируются перед отправкой наружу, новые биндинги требуют одного Telegram{' '}
                 <code>/approve</code>.
               </p>
@@ -1552,7 +1560,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
                       <td>
                         {binding.name}
                         <div className="admin-item-meta">
-                          {binding.api_base.includes('9router') ? 'через governance-биндинг' : 'прямой биндинг'}
+                          {isRouterApiBase(binding.api_base) ? 'через governance-биндинг' : 'прямой биндинг'}
                         </div>
                       </td>
                       <td style={{ fontFamily: 'var(--font-mono)', fontSize: '0.78rem' }}>{binding.api_base}</td>
@@ -1610,18 +1618,18 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
 
           <div className="admin-section-head">
             <div>
-              <h3 style={{ fontSize: '1rem' }}>Аккаунты 9Router</h3>
+              <h3 style={{ fontSize: '1rem' }}>Аккаунты OmniRoute</h3>
               <p>
-                Учётные записи, подключённые напрямую в дашборде самого 9Router (Providers) — например
+                Учётные записи, подключённые напрямую в дашборде самого OmniRoute (Providers) — например
                 после логина через device code или API-ключ. Отдельно от таблицы выше: сами по себе они
-                ещё не доступны фолбэк-цепочке, пока 9Router не добавлен как обычный провайдер ниже.
+                ещё не доступны фолбэк-цепочке, пока OmniRoute не добавлен как обычный провайдер ниже.
               </p>
             </div>
           </div>
 
           {!routerSession?.configured ? (
             <div className="admin-empty">
-              Сессия дашборда 9Router не настроена — разверните диагностический раздел ниже, чтобы
+              Сессия дашборда OmniRoute не настроена — разверните диагностический раздел ниже, чтобы
               подключить её и увидеть аккаунты, добавленные там.
             </div>
           ) : routerConnections?.connections && routerConnections.connections.length > 0 ? (
@@ -1652,13 +1660,13 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
                   </tbody>
                 </table>
               </div>
-              {providers.some(p => p.api_base.includes('9router')) ? (
-                <div className="admin-item-meta" style={{ marginTop: 10 }}>9Router уже добавлен как провайдер выше — выберите нужную модель из его каталога при создании тира.</div>
+              {providers.some(p => isRouterApiBase(p.api_base)) ? (
+                <div className="admin-item-meta" style={{ marginTop: 10 }}>OmniRoute уже добавлен как провайдер выше — выберите нужную модель из его каталога при создании тира.</div>
               ) : (
                 <div style={{ marginTop: 12 }}>
                   <button type="button" className="btn-primary" onClick={bindRouterSelf} disabled={routerBindSaving}>
                     <Plus size={14} />
-                    <span>{routerBindSaving ? '...' : 'Быстро подключить 9Router как провайдера'}</span>
+                    <span>{routerBindSaving ? '...' : 'Быстро подключить OmniRoute как провайдера'}</span>
                   </button>
                   <div className="admin-item-meta" style={{ marginTop: 6 }}>
                     Использует уже сохранённый ROUTER_API_KEY — один Telegram /approve, и модели этих
@@ -1671,12 +1679,12 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
             </>
           ) : (
             <div className="admin-empty">
-              {routerConnections?.error || 'Аккаунты ещё не подключены — сделайте это в 9Router (Dashboard → Providers).'}
+              {routerConnections?.error || 'Аккаунты ещё не подключены — сделайте это в OmniRoute (Dashboard → Providers).'}
             </div>
           )}
 
           <details style={{ marginTop: 22 }}>
-            <summary className="control-eyebrow" style={{ cursor: 'pointer' }}>Необработанные данные из дашборда 9Router (диагностика)</summary>
+            <summary className="control-eyebrow" style={{ cursor: 'pointer' }}>Необработанные данные из дашборда OmniRoute (диагностика)</summary>
             <div style={{ marginTop: 14 }}>
               {routerLoading && !routerStats && <div className="admin-empty">Загрузка…</div>}
 
@@ -1694,15 +1702,15 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
 
               {!routerLoading && routerStats?.available === false && (
                 <div className="admin-empty">
-                  9Router не настроен. Укажите ROUTER_API_KEY в Настройках → API Keys.
+                  OmniRoute не настроен. Укажите ROUTER_API_KEY в Настройках → API Keys.
                   {routerStats.error && <div style={{ marginTop: 8, color: 'var(--text-dim)', fontSize: '0.78rem' }}>{routerStats.error}</div>}
                 </div>
               )}
 
               {!routerLoading && routerStats?.available && !routerStats.reachable && (
                 <div className="admin-empty">
-                  Ключ настроен, но контейнер 9router не отвечает
-                  (<code>docker compose up -d 9router</code>).
+                  Ключ настроен, но контейнер omniroute не отвечает
+                  (<code>docker compose up -d omniroute</code>).
                 </div>
               )}
 
@@ -1737,7 +1745,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
               )}
 
               <div className="admin-section-head">
-                <div><h3 style={{ fontSize: '0.9rem' }}>Сессия дашборда 9Router</h3></div>
+                <div><h3 style={{ fontSize: '0.9rem' }}>Сессия дашборда OmniRoute</h3></div>
                 {routerSession?.configured && (
                   <button type="button" className="icon-btn danger" title="Отозвать доступ" onClick={revokeRouterSession}><Trash2 size={14} /></button>
                 )}
@@ -1759,8 +1767,8 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
               {showRouterSessionForm && (
                 <form onSubmit={proposeRouterSessionPassword} className="admin-add-card">
                   <div className="admin-add-grid">
-                    {field('Пароль дашборда 9Router', (
-                      <input className="form-input" required type="password" autoComplete="off" value={routerSessionPassword} onChange={e => setRouterSessionPassword(e.target.value)} placeholder="пароль из Dashboard 9Router" />
+                    {field('Пароль дашборда OmniRoute', (
+                      <input className="form-input" required type="password" autoComplete="off" value={routerSessionPassword} onChange={e => setRouterSessionPassword(e.target.value)} placeholder="пароль из Dashboard OmniRoute" />
                     ))}
                   </div>
                   <div className="admin-add-actions">
@@ -1796,11 +1804,11 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
                     </div>
                   ) : (
                     <div className="admin-empty">
-                      {routerCombos?.error || 'Комбо ещё не создано — соберите его в самом 9Router (Dashboard → Combos).'}
+                      {routerCombos?.error || 'Комбо ещё не создано — соберите его в самом OmniRoute (Dashboard → Combos).'}
                     </div>
                   )}
                   <div className="admin-item-meta" style={{ marginTop: 10 }}>
-                    Подключённые аккаунты теперь показаны в «Аккаунты 9Router» выше, вне диагностики.
+                    Подключённые аккаунты теперь показаны в «Аккаунты OmniRoute» выше, вне диагностики.
                   </div>
                 </>
               )}

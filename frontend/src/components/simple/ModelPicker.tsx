@@ -8,7 +8,7 @@ import { modelMeta } from './chatModels';
  * active model, and a dropdown with a search field, Local/External filters and
  * the catalogue grouped by provider.
  *
- * "Local" is the llama.cpp server on this box; "External" is everything 9Router can route to.
+ * "Local" is the llama.cpp server on this box; "External" is everything OmniRoute can route to.
  * The two are never merged into one flat list — which side a model sits on
  * decides whether the conversation leaves the machine, and that is the single
  * most important thing this control communicates.
@@ -36,7 +36,7 @@ const COPY = {
     external: 'Внешние',
     noResults: 'Ничего не найдено',
     noModels: 'Моделей нет',
-    connectHint: 'Запустите локальный сервер llama.cpp или укажите ключ 9Router в «Настройки → API-ключи».',
+    connectHint: 'Запустите локальный сервер llama.cpp или укажите ключ OmniRoute в «Настройки → API-ключи».',
     setDefault: 'Сделать моделью по умолчанию',
     isDefault: 'Модель по умолчанию',
     refresh: 'Обновить список',
@@ -57,7 +57,7 @@ const COPY = {
     external: 'External',
     noResults: 'No results found',
     noModels: 'No models available',
-    connectHint: 'Start the local llama.cpp server, or add the 9Router key under Settings → API keys.',
+    connectHint: 'Start the local llama.cpp server, or add the OmniRoute key under Settings → API keys.',
     setDefault: 'Set as default',
     isDefault: 'Default model',
     refresh: 'Refresh list',
@@ -77,11 +77,11 @@ type Filter = 'all' | ModelSource;
 type Copy = { [K in keyof (typeof COPY)['ru']]: string };
 
 /** Group rows the way the dropdown lists them: local under "llama.cpp", external
- * under whichever provider 9Router says owns the model. */
+ * under whichever provider OmniRoute says owns the model. */
 function groupModels(models: ChatModel[]): [string, ChatModel[]][] {
   const groups = new Map<string, ChatModel[]>();
   models.forEach(model => {
-    const key = model.source === 'local' ? 'llama.cpp' : (model.owned_by || '9Router');
+    const key = model.source === 'local' ? 'llama.cpp' : (model.owned_by || 'OmniRoute');
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(model);
   });

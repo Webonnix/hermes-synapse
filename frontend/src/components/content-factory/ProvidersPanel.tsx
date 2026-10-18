@@ -325,8 +325,8 @@ function LlmEndpoints({
     >
       <p style={{ margin: '0 0 12px', fontSize: 11, color: COLORS.faint, lineHeight: 1.55 }}>
         {ru
-          ? 'Любой OpenAI-совместимый endpoint: 9Router, DeepSeek, OpenAI, vLLM. Новый провайдер требует подтверждения владельца — ключ до этого момента хранится с ограниченным сроком жизни. Звёздочкой отмечена модель, которой отвечают текстовые ноды, когда не выбрана своя.'
-          : 'Any OpenAI-compatible endpoint: 9Router, DeepSeek, OpenAI, vLLM. A new one needs owner approval; until then its key is stored with a short expiry. The star marks the model text nodes use when they name none.'}
+          ? 'Любой OpenAI-совместимый endpoint: OmniRoute, DeepSeek, OpenAI, vLLM. Новый провайдер требует подтверждения владельца — ключ до этого момента хранится с ограниченным сроком жизни. Звёздочкой отмечена модель, которой отвечают текстовые ноды, когда не выбрана своя.'
+          : 'Any OpenAI-compatible endpoint: OmniRoute, DeepSeek, OpenAI, vLLM. A new one needs owner approval; until then its key is stored with a short expiry. The star marks the model text nodes use when they name none.'}
       </p>
 
       {llm && (
@@ -378,7 +378,7 @@ function LlmEndpoints({
 
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
         <div style={{ flex: '1 1 180px' }}>
-          <Field label={ru ? 'Имя' : 'Name'} hint="deepseek, openai, 9router">
+          <Field label={ru ? 'Имя' : 'Name'} hint="deepseek, openai, omniroute">
             <input style={inputStyle} value={form.name} disabled={!canEdit}
               onChange={(event) => setForm({ ...form, name: event.target.value })} />
           </Field>

@@ -135,7 +135,7 @@ async def _local_model_confirm(redacted_text: str) -> List[str]:
         from backend.llamacpp_client import LlamaCppClient
 
         # configured_model, never .model: .model follows the chat's per-turn
-        # model picker, and pointing a 9Router model id at the local llama.cpp
+        # model picker, and pointing an OmniRoute model id at the local llama.cpp
         # base URL fails ("model 'ag/claude-sonnet-4-6' not found") and
         # silently drops this whole pass. This check exists precisely so the
         # text never leaves the box, so the local model is the only valid one.

@@ -141,7 +141,31 @@ async def test_bind_self_creates_proposal_with_stored_key():
         result = await main.router_bind_self_api()
     assert result["status"] == "awaiting_approval"
     assert result["task_id"] == "T-99"
-    create.assert_called_once_with("9Router", "openai_compatible", "http://9router:20128/v1", "router-key")
+    create.assert_called_once_with("OmniRoute", "openai_compatible", "http://omniroute:20128/v1", "router-key")
+
+
+@pytest.mark.asyncio
+async def test_bind_self_rejects_duplicate_omniroute_binding():
+    """Bindings made after the OmniRoute switch point at the omniroute service
+    name, not the legacy 9router alias; checking only "9router" let bind-self
+    create a second binding for the same sidecar."""
+    from fastapi import HTTPException
+
+    with patch("backend.database.get_api_key", return_value="router-key"), \
+         patch("backend.provider_governance.list_bindings",
+               return_value=[{"id": "b1", "name": "OmniRoute", "api_base": "http://omniroute:20128/v1"}]):
+        with pytest.raises(HTTPException) as exc_info:
+            await main.router_bind_self_api()
+    assert exc_info.value.status_code == 409
+
+
+def test_validate_binding_config_accepts_the_omniroute_sidecar_hostname():
+    """Same guard as the 9router case below, for the service name the sidecar
+    has had since it was replaced by OmniRoute."""
+    from backend.provider_governance import validate_binding_config
+
+    result = validate_binding_config("omniroute", "openai_compatible", "http://omniroute:20128/v1")
+    assert result["api_base"] == "http://omniroute:20128/v1"
 
 
 def test_validate_binding_config_accepts_the_9router_sidecar_hostname():

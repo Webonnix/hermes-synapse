@@ -159,7 +159,7 @@ export default function App() {
   useEffect(() => { modelSelectionRef.current = modelSelection; }, [modelSelection]);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => localStorage.getItem('hermes_sidebar_collapsed') === '1');
   /**
-   * Public dashboard URL of the 9Router sidecar, so the sidebar can offer a
+   * Public dashboard URL of the OmniRoute sidecar, so the sidebar can offer a
    * one-click jump into it. Comes from the backend rather than being hardcoded
    * because the URL differs per deployment (localhost:20128 in dev, the public
    * tunnel host in prod) — see ROUTER_PUBLIC_BASE_URL. Null until loaded or
@@ -2780,10 +2780,10 @@ export default function App() {
               target="_blank"
               rel="noreferrer"
               onClick={() => setSidebarOpen(false)}
-              title="9Router"
+              title="OmniRoute"
             >
               <Shuffle size={18} />
-              <span>9Router</span>
+              <span>OmniRoute</span>
               {!isSidebarCollapsed && <ExternalLink size={12} style={{ marginLeft: 'auto', opacity: 0.6 }} />}
             </a>
           )}
