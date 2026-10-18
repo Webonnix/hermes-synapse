@@ -1,9 +1,10 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
-  ArrowDown, Check, ChevronDown, ChevronRight, Copy, Edit2, Folder, FolderOpen, FolderPlus,
-  Gauge, Menu, Mic, MicOff, Moon, MoreVertical, Paperclip, PanelLeft, Pencil, Plus, RefreshCw,
-  Search, Send, Sparkles, Square, Sun, Trash2, Volume2, VolumeX, X as XIcon, Zap,
+  ArrowDown, AtSign, Check, ChevronDown, ChevronRight, Clock, Copy, Download, Edit2, EyeOff, Folder,
+  FolderOpen, FolderPlus, Gauge, GitBranch, Menu, Mic, MicOff, Moon, MoreVertical, Paperclip, PanelLeft,
+  Pencil, Plus, RefreshCw, Search, Send, SlidersHorizontal, Sparkles, Square, Sun, Swords, Trash2, Users,
+  Volume2, VolumeX, X as XIcon, Zap,
 } from 'lucide-react';
 import type { ChatMessage, ChatSession, Project } from '../types';
 import { Markdown } from './simple/Markdown';
@@ -12,7 +13,18 @@ import {
   emptyCatalog, fetchChatModels, saveDefaultSelection, loadDefaultSelection, isSelectionStale,
 } from './simple/chatModels';
 import type { ChatModelCatalog, ModelSelection } from './simple/chatModels';
+import {
+  DEFAULT_CHAT_SETTINGS, MAIN_AGENT_ID, branchChat, discardChat, downloadTranscript, fetchAgents,
+  getChatSettings, hasCustomSettings, mentionCandidates, mentionHandle, newIncognitoChatId, parseMention,
+  startIncognitoChat,
+} from './simple/chatApi';
+import type { AgentSummary, ChatSettings, ExportFormat } from './simple/chatApi';
+import { AgentPicker } from './simple/AgentPicker';
+import { AgentsPanel } from './simple/AgentsPanel';
+import { ArenaView } from './simple/ArenaView';
+import { ChatSettingsPanel } from './simple/ChatSettingsPanel';
 import './simple/owui.css';
+import './simple/chatExtras.css';
 
 /**
  * The plain chat view, rebuilt to Open WebUI's shape: chat sidebar with search
@@ -53,7 +65,9 @@ interface SimpleChatViewProps {
   setInputValue: (val: string) => void;
   isGenerating: boolean;
   onStopGeneration: () => void;
-  handleSendMessage: (e: React.FormEvent) => void;
+  /** `options.agentId` routes the turn to an @mentioned agent; `options.text`
+   *  replaces the composer's text (the mention stripped off). */
+  handleSendMessage: (e: React.FormEvent, options?: { agentId?: string | null; text?: string }) => void;
   isConnected: boolean;
   micState: 'off' | 'listening' | 'capturing' | 'transcribing' | 'error';
   onVoiceToggle: () => void;
@@ -83,7 +97,11 @@ interface SimpleChatViewProps {
   modelSelection?: ModelSelection | null;
   onModelSelect?: (selection: ModelSelection | null) => void;
   /** Sends text straight out, bypassing the composer — suggestions, edits, retry. */
-  onSendText?: (text: string) => boolean;
+  onSendText?: (text: string, options?: { agentId?: string | null }) => boolean;
+  /** Binds the chat to an agent (POST /api/history/{id}/agent). */
+  onSetSessionAgent?: (sessionId: string, agentId: string) => void;
+  /** Attaches a pasted or dropped file the same way the file picker does. */
+  onAttachFile?: (file: File) => void;
   onRegenerate?: () => void;
   onDeleteMessage?: (messageId: number) => void;
   onRenameSession?: (sessionId: string, title: string) => void;
@@ -156,6 +174,24 @@ const COPY = {
     scrollDown: 'Вниз',
     offline: 'Нет связи с сервером',
     enterToSend: 'Enter — отправить, Shift+Enter — новая строка',
+    chatSettings: 'Настройки чата',
+    chatSettingsCustom: 'В этом чате свои настройки',
+    agents: 'Агенты',
+    agentLabel: 'Агент этого чата',
+    exportChat: 'Экспорт чата',
+    exportMarkdown: 'Markdown (.md)',
+    exportJson: 'JSON',
+    branch: 'Ветка отсюда',
+    branchTitle: 'Ветка: {title}',
+    branchFailed: 'Не удалось создать ветку',
+    incognito: 'Инкогнито-чат',
+    incognitoActive: 'Инкогнито: чат не сохраняется и удалится при выходе',
+    arena: 'Арена моделей',
+    queued: 'В очереди',
+    removeQueued: 'Убрать из очереди',
+    mentionHint: 'агент ответит в этом чате',
+    dropFile: 'Отпустите файл, чтобы прикрепить',
+    viaAgent: 'через @-упоминание',
     suggestions: [
       ['Что нового на сервере?', 'Проверь загрузку GPU и статус контейнеров'],
       ['Напиши план', 'Разложи задачу на шаги с оценкой времени'],
@@ -224,6 +260,24 @@ const COPY = {
     scrollDown: 'Scroll to bottom',
     offline: 'Disconnected from the server',
     enterToSend: 'Enter to send, Shift+Enter for a new line',
+    chatSettings: 'Chat settings',
+    chatSettingsCustom: 'This chat has its own settings',
+    agents: 'Agents',
+    agentLabel: "This chat's agent",
+    exportChat: 'Export chat',
+    exportMarkdown: 'Markdown (.md)',
+    exportJson: 'JSON',
+    branch: 'Branch from here',
+    branchTitle: 'Branch: {title}',
+    branchFailed: 'Could not create the branch',
+    incognito: 'Incognito chat',
+    incognitoActive: 'Incognito: not saved, deleted when you leave',
+    arena: 'Model arena',
+    queued: 'Queued',
+    removeQueued: 'Remove from queue',
+    mentionHint: 'the agent answers in this chat',
+    dropFile: 'Drop the file to attach it',
+    viaAgent: 'via @mention',
     suggestions: [
       ['What is up with the server?', 'Check GPU load and container status'],
       ['Draft a plan', 'Break the task into steps with estimates'],
@@ -435,6 +489,8 @@ export function SimpleChatView({
   speakText,
   playingMsgIndex = null,
   userName = 'Albert',
+  onSetSessionAgent,
+  onAttachFile,
 }: SimpleChatViewProps) {
   const copy = COPY[language] as unknown as Copy;
   const numberFormat = language === 'ru' ? 'ru-RU' : 'en-US';
@@ -717,6 +773,19 @@ export function SimpleChatView({
   }, [inputValue]);
 
   const onComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (mentionOptions && mentionOptions.length > 0) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const step = e.key === 'ArrowDown' ? 1 : -1;
+        setMentionIndex(index => (index + step + mentionOptions.length) % mentionOptions.length);
+        return;
+      }
+      if ((e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey && !e.nativeEvent.isComposing) {
+        e.preventDefault();
+        completeMention(mentionOptions[mentionIndex] || mentionOptions[0]);
+        return;
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       formRef.current?.requestSubmit();
@@ -764,6 +833,195 @@ export function SimpleChatView({
     if (text && onSendText) onSendText(text);
   };
 
+  // ─── Agents ─────────────────────────────────────────────────────────────
+  // One chat is the way in to every agent: the navbar binds the chat to one,
+  // an "@handle" at the start of a message hands that one turn to another,
+  // and the agents panel shows who is busy with what.
+  const [agents, setAgents] = useState<AgentSummary[]>([]);
+  const [agentsLoading, setAgentsLoading] = useState(false);
+  const [showAgents, setShowAgents] = useState(false);
+
+  const loadAgents = useCallback(async () => {
+    setAgentsLoading(true);
+    try {
+      setAgents(await fetchAgents());
+    } catch {
+      // No agent list just means no picker entries and no @mentions.
+    } finally {
+      setAgentsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void loadAgents(); }, [loadAgents]);
+
+  const currentSession = chatSessions.find(session => session.id === currentChatId);
+  const sessionAgentId = currentSession?.agent_id || MAIN_AGENT_ID;
+  const agentName = useCallback((agentId?: string | null) => {
+    if (!agentId || agentId === MAIN_AGENT_ID) return copy.assistant;
+    return agents.find(agent => agent.id === agentId)?.name || agentId;
+  }, [agents, copy.assistant]);
+
+  /** A new chat already bound to `agent`, opened at once. */
+  const openAgentChat = async (agent: AgentSummary) => {
+    setShowAgents(false);
+    const sessionId = `chat_${Date.now()}`;
+    await fetch(`/api/history/${sessionId}/agent`, {
+      method: 'POST', headers: authHeaders(), body: JSON.stringify({ agent_id: agent.id }),
+    });
+    await fetch(`/api/history/${sessionId}/rename`, {
+      method: 'POST', headers: authHeaders(), body: JSON.stringify({ title: agent.name }),
+    });
+    autoTitledRef.current.add(sessionId);
+    fetchChatSessions();
+    openChat(sessionId);
+  };
+
+  const mentionAgent = (agent: AgentSummary) => {
+    setShowAgents(false);
+    const rest = inputValue.replace(/^@\S*\s*/, '');
+    setInputValue(`@${mentionHandle(agent)} ${rest}`);
+    textareaRef.current?.focus();
+  };
+
+  // ─── Per-chat settings ──────────────────────────────────────────────────
+  const [chatSettings, setChatSettings] = useState<ChatSettings>(DEFAULT_CHAT_SETTINGS);
+  const [showSettings, setShowSettings] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setChatSettings(DEFAULT_CHAT_SETTINGS);
+    if (currentChatId === 'dashboard') return undefined;
+    getChatSettings(currentChatId)
+      .then(settings => { if (!cancelled) setChatSettings(settings); })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [currentChatId]);
+
+  // ─── Incognito ──────────────────────────────────────────────────────────
+  // An incognito chat is discarded as soon as the user moves to another one;
+  // the backend also hides it from the list and purges leftovers at startup.
+  const incognitoIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    incognitoIdsRef.current.forEach(sessionId => {
+      if (sessionId === currentChatId) return;
+      incognitoIdsRef.current.delete(sessionId);
+      void discardChat(sessionId);
+    });
+  }, [currentChatId]);
+
+  const openIncognitoChat = async () => {
+    const sessionId = newIncognitoChatId();
+    try {
+      await startIncognitoChat(sessionId);
+    } catch {
+      return;
+    }
+    incognitoIdsRef.current.add(sessionId);
+    autoTitledRef.current.add(sessionId);
+    openChat(sessionId);
+  };
+
+  // ─── Branches and export ────────────────────────────────────────────────
+  const currentTitle = currentSession?.title && currentSession.title !== currentSession.id
+    ? currentSession.title
+    : getSessionLabel(currentChatId);
+
+  const branchFrom = async (messageId: number) => {
+    try {
+      const newId = await branchChat(currentChatId, messageId, copy.branchTitle.replace('{title}', currentTitle));
+      autoTitledRef.current.add(newId);
+      fetchChatSessions();
+      openChat(newId);
+    } catch {
+      window.alert(copy.branchFailed);
+    }
+  };
+
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const exportChat = (format: ExportFormat) => {
+    setExportMenuOpen(false);
+    downloadTranscript(currentTitle, visibleMessages, format, agentName(sessionAgentId));
+  };
+
+  // ─── Arena ──────────────────────────────────────────────────────────────
+  const [arenaOpen, setArenaOpen] = useState(false);
+
+  // ─── Queue ──────────────────────────────────────────────────────────────
+  // A message written while a reply is still streaming waits here and goes
+  // out, in order, once that reply finishes — instead of being refused.
+  type QueuedMessage = { id: number; chatId: string; text: string; agentId: string | null };
+  const [queue, setQueue] = useState<QueuedMessage[]>([]);
+  const queueSeqRef = useRef(0);
+  const chatQueue = queue.filter(item => item.chatId === currentChatId);
+
+  useEffect(() => {
+    if (isGenerating || !isConnected || !onSendText) return undefined;
+    const next = queue.find(item => item.chatId === currentChatId);
+    if (!next) return undefined;
+    // A short pause lets the finished reply settle (and clears the send
+    // throttle) before the next turn starts.
+    const timer = window.setTimeout(() => {
+      if (onSendText(next.text, { agentId: next.agentId })) {
+        setQueue(prev => prev.filter(item => item.id !== next.id));
+      }
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [queue, isGenerating, isConnected, currentChatId, onSendText]);
+
+  // ─── @mention autocomplete ──────────────────────────────────────────────
+  const mentionOptions = useMemo(() => mentionCandidates(inputValue, agents), [inputValue, agents]);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  useEffect(() => { setMentionIndex(0); }, [mentionOptions?.length]);
+
+  const completeMention = (agent: AgentSummary) => {
+    setInputValue(`@${mentionHandle(agent)} `);
+    textareaRef.current?.focus();
+  };
+
+  const pendingMention = useMemo(() => parseMention(inputValue, agents), [inputValue, agents]);
+
+  // ─── Submit ─────────────────────────────────────────────────────────────
+  const submitComposer = (e: React.FormEvent) => {
+    e.preventDefault();
+    const typed = inputValue.trim();
+    if (!typed && !attachedFile) return;
+    const mention = parseMention(typed, agents);
+    if (isGenerating) {
+      // Attachments are not queued: the file belongs to the turn it was added for.
+      if (!typed || attachedFile) return;
+      queueSeqRef.current += 1;
+      setQueue(prev => [...prev, {
+        id: queueSeqRef.current, chatId: currentChatId,
+        text: mention ? mention.text : typed, agentId: mention?.agentId ?? null,
+      }]);
+      setInputValue('');
+      return;
+    }
+    if (mention) handleSendMessage(e, { agentId: mention.agentId, text: mention.text });
+    else handleSendMessage(e);
+  };
+
+  // ─── Paste and drag & drop ──────────────────────────────────────────────
+  const [dropping, setDropping] = useState(false);
+
+  const onComposerPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!onAttachFile) return;
+    const file = Array.from(e.clipboardData.files || [])[0];
+    if (!file) return;
+    e.preventDefault();
+    onAttachFile(file);
+  };
+
+  const onComposerDrop = (e: React.DragEvent<HTMLFormElement>) => {
+    setDropping(false);
+    if (!onAttachFile) return;
+    const file = Array.from(e.dataTransfer.files || [])[0];
+    if (!file) return;
+    e.preventDefault();
+    onAttachFile(file);
+  };
+
   // ─── Rendering ──────────────────────────────────────────────────────────
   /** One chat row. Shared by the folder tree and the date-grouped list, so a
    * chat looks and behaves the same wherever it sits. */
@@ -794,7 +1052,12 @@ export function SimpleChatView({
             aria-label={copy.rename}
           />
         ) : (
-          <span className="owui-chat-item-title">{label}</span>
+          <>
+            <span className="owui-chat-item-title">{label}</span>
+            {session.agent_id && session.agent_id !== MAIN_AGENT_ID && (
+              <span className="owui-chat-item-agent" title={copy.agentLabel}>@{agentName(session.agent_id)}</span>
+            )}
+          </>
         )}
         <div className={`owui-chat-item-actions${forced ? ' is-forced' : ''}`}>
           {session.id !== 'dashboard' && (
@@ -1122,8 +1385,77 @@ export function SimpleChatView({
               language={language}
               disabled={isGenerating}
             />
+            {currentChatId !== 'dashboard' && onSetSessionAgent && (
+              <AgentPicker
+                agents={agents}
+                currentAgentId={sessionAgentId}
+                onSelect={(agentId) => onSetSessionAgent(currentChatId, agentId)}
+                disabled={isGenerating}
+                label={copy.agentLabel}
+                mainLabel={copy.assistant}
+              />
+            )}
           </div>
           <div className="owui-navbar-right">
+            {currentChatId !== 'dashboard' && (
+              <button
+                type="button"
+                className={`owui-icon-btn${hasCustomSettings(chatSettings) ? ' is-active' : ''}`}
+                onClick={() => setShowSettings(true)}
+                title={hasCustomSettings(chatSettings) ? copy.chatSettingsCustom : copy.chatSettings}
+                aria-label={copy.chatSettings}
+              >
+                <SlidersHorizontal size={16} />
+              </button>
+            )}
+            <button
+              type="button"
+              className="owui-icon-btn"
+              onClick={() => { setShowAgents(true); void loadAgents(); }}
+              title={copy.agents}
+              aria-label={copy.agents}
+            >
+              <Users size={16} />
+            </button>
+            <button
+              type="button"
+              className={`owui-icon-btn${arenaOpen ? ' is-active' : ''}`}
+              onClick={() => setArenaOpen(v => !v)}
+              title={copy.arena}
+              aria-label={copy.arena}
+              aria-pressed={arenaOpen}
+            >
+              <Swords size={16} />
+            </button>
+            {visibleMessages.length > 0 && (
+              <div className="owui-menu-wrap">
+                <button
+                  type="button"
+                  className="owui-icon-btn"
+                  onClick={(e) => { e.stopPropagation(); setExportMenuOpen(v => !v); }}
+                  title={copy.exportChat}
+                  aria-label={copy.exportChat}
+                  aria-expanded={exportMenuOpen}
+                >
+                  <Download size={16} />
+                </button>
+                {exportMenuOpen && (
+                  <div className="owui-menu" style={{ position: 'absolute', top: '100%', right: 0 }} onMouseLeave={() => setExportMenuOpen(false)}>
+                    <button type="button" onClick={() => exportChat('markdown')}>{copy.exportMarkdown}</button>
+                    <button type="button" onClick={() => exportChat('json')}>{copy.exportJson}</button>
+                  </div>
+                )}
+              </div>
+            )}
+            <button
+              type="button"
+              className={`owui-icon-btn${chatSettings.ephemeral ? ' is-active' : ''}`}
+              onClick={() => void openIncognitoChat()}
+              title={chatSettings.ephemeral ? copy.incognitoActive : copy.incognito}
+              aria-label={copy.incognito}
+            >
+              <EyeOff size={16} />
+            </button>
             <button
               type="button"
               className="owui-mode-btn"
@@ -1163,7 +1495,17 @@ export function SimpleChatView({
           </div>
         </header>
 
-        {visibleMessages.length === 0 ? (
+        {arenaOpen ? (
+          <ArenaView
+            language={language}
+            catalog={catalog}
+            modelsLoading={modelsLoading}
+            onRefreshModels={() => void loadModels(true)}
+            initialLeft={modelSelection}
+            systemPrompt={chatSettings.system_prompt}
+            onClose={() => setArenaOpen(false)}
+          />
+        ) : visibleMessages.length === 0 ? (
           <div className="owui-placeholder">
             <h1>{copy.empty}</h1>
             <p>{copy.emptyHint}</p>
@@ -1226,6 +1568,17 @@ export function SimpleChatView({
                                   <Pencil size={14} />
                                 </button>
                               )}
+                              {msg.id != null && !chatSettings.ephemeral && (
+                                <button
+                                  type="button"
+                                  className="owui-action"
+                                  title={copy.branch}
+                                  aria-label={copy.branch}
+                                  onClick={() => void branchFrom(msg.id as number)}
+                                >
+                                  <GitBranch size={14} />
+                                </button>
+                              )}
                               {onDeleteMessage && msg.id != null && (
                                 <button
                                   type="button"
@@ -1248,7 +1601,13 @@ export function SimpleChatView({
                 return (
                   <div key={msg.id ?? idx} className="owui-message is-assistant">
                     <div className="owui-message-head">
-                      <span className="owui-message-name">{copy.assistant}</span>
+                      {msg.meta?.agent_name ? (
+                        <span className="owui-agent-badge" title={copy.viaAgent}>
+                          <AtSign size={11} />{msg.meta.agent_name}
+                        </span>
+                      ) : (
+                        <span className="owui-message-name">{agentName(sessionAgentId)}</span>
+                      )}
                       {msg.meta?.model && <span className="owui-message-model">{msg.meta.model}</span>}
                     </div>
                     <div className="owui-assistant-body">
@@ -1272,6 +1631,17 @@ export function SimpleChatView({
                           </button>
                         )}
                         <StatsAction msg={msg} copy={copy} numberFormat={numberFormat} />
+                        {msg.id != null && !chatSettings.ephemeral && (
+                          <button
+                            type="button"
+                            className="owui-action"
+                            title={copy.branch}
+                            aria-label={copy.branch}
+                            onClick={() => void branchFrom(msg.id as number)}
+                          >
+                            <GitBranch size={14} />
+                          </button>
+                        )}
                         {onRegenerate && isLast && !isGenerating && (
                           <button
                             type="button"
@@ -1304,14 +1674,54 @@ export function SimpleChatView({
           </div>
         )}
 
-        {showScrollDown && (
+        {!arenaOpen && showScrollDown && (
           <button type="button" className="owui-scroll-bottom" onClick={scrollToBottom} title={copy.scrollDown} aria-label={copy.scrollDown}>
             <ArrowDown size={15} />
           </button>
         )}
 
+        {!arenaOpen && (
         <div className="owui-composer-wrap">
           <div className="owui-composer-inner">
+            {(chatSettings.ephemeral || chatQueue.length > 0) && (
+              <div className="owui-chip-row">
+                {chatSettings.ephemeral && (
+                  <span className="owui-chip is-incognito"><EyeOff size={12} /><span>{copy.incognitoActive}</span></span>
+                )}
+                {chatQueue.map(item => (
+                  <span key={item.id} className="owui-chip" title={copy.queued}>
+                    <Clock size={12} />
+                    <span>{item.agentId ? `@${agentName(item.agentId)} ` : ''}{item.text}</span>
+                    <button
+                      type="button"
+                      aria-label={copy.removeQueued}
+                      title={copy.removeQueued}
+                      onClick={() => setQueue(prev => prev.filter(queued => queued.id !== item.id))}
+                    >
+                      <XIcon size={12} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+            {mentionOptions && mentionOptions.length > 0 && (
+              <div className="owui-mention-menu" role="listbox" aria-label={copy.agents}>
+                {mentionOptions.map((agent, index) => (
+                  <button
+                    key={agent.id}
+                    type="button"
+                    role="option"
+                    aria-selected={index === mentionIndex}
+                    className={index === mentionIndex ? 'is-active' : ''}
+                    onMouseDown={(e) => { e.preventDefault(); completeMention(agent); }}
+                  >
+                    <AtSign size={13} />
+                    <span>{agent.name}</span>
+                    <small>@{mentionHandle(agent)}</small>
+                  </button>
+                ))}
+              </div>
+            )}
             {attachedFile && (
               <div className="owui-attachment">
                 <Paperclip size={13} />
@@ -1321,13 +1731,26 @@ export function SimpleChatView({
                 </button>
               </div>
             )}
-            <form className="owui-composer" ref={formRef} onSubmit={handleSendMessage}>
+            <form
+              className={`owui-composer${dropping ? ' is-dropping' : ''}`}
+              ref={formRef}
+              onSubmit={submitComposer}
+              onDragOver={(e) => {
+                if (!onAttachFile || !Array.from(e.dataTransfer.types || []).includes('Files')) return;
+                e.preventDefault();
+                setDropping(true);
+              }}
+              onDragLeave={() => setDropping(false)}
+              onDrop={onComposerDrop}
+              title={dropping ? copy.dropFile : undefined}
+            >
               <textarea
                 ref={textareaRef}
                 rows={1}
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyDown={onComposerKeyDown}
+                onPaste={onComposerPaste}
                 placeholder={copy.placeholder}
                 aria-label={copy.placeholder}
                 disabled={!isConnected || isUploading}
@@ -1361,7 +1784,7 @@ export function SimpleChatView({
                   <button
                     type="submit"
                     className="owui-send"
-                    disabled={!isConnected || isUploading || !inputValue.trim()}
+                    disabled={!isConnected || isUploading || (!inputValue.trim() && !attachedFile)}
                     title={copy.send}
                     aria-label={copy.send}
                   >
@@ -1371,13 +1794,36 @@ export function SimpleChatView({
               </div>
             </form>
             <div className={`owui-composer-hint${isConnected ? '' : ' is-offline'}`}>
-              {isConnected
-                ? <>{activeModelLabel && <><span className="owui-dot" />{activeModelLabel} · </>}{copy.enterToSend}</>
-                : copy.offline}
+              {!isConnected
+                ? copy.offline
+                : pendingMention
+                  ? <><AtSign size={11} /> {pendingMention.agentName} — {copy.mentionHint}</>
+                  : <>{activeModelLabel && <><span className="owui-dot" />{activeModelLabel} · </>}{copy.enterToSend}</>}
             </div>
           </div>
         </div>
+        )}
       </div>
+      {showSettings && currentChatId !== 'dashboard' && (
+        <ChatSettingsPanel
+          language={language}
+          sessionId={currentChatId}
+          settings={chatSettings}
+          onClose={() => setShowSettings(false)}
+          onSaved={setChatSettings}
+        />
+      )}
+      {showAgents && (
+        <AgentsPanel
+          language={language}
+          agents={agents}
+          loading={agentsLoading}
+          onRefresh={() => void loadAgents()}
+          onClose={() => setShowAgents(false)}
+          onOpenChat={(agent) => void openAgentChat(agent)}
+          onMention={mentionAgent}
+        />
+      )}
     </div>
   );
 }

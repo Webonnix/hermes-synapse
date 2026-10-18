@@ -16,6 +16,9 @@ export interface LLMRunMeta {
   input_tokens?: number | null;
   output_tokens?: number | null;
   tool_iterations?: number | null;
+  /** Set when an @mention routed the turn to another agent: who answered. */
+  agent_id?: string | null;
+  agent_name?: string | null;
 }
 
 export interface ChatMessage {

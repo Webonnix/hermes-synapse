@@ -79,6 +79,7 @@ const ContentFactoryTab = lazy(() => import('./components/ContentFactoryTab').th
 const SMMFactoryTab = lazy(() => import('./components/SMMFactoryTab').then(module => ({ default: module.SMMFactoryTab })));
 import type { CFEvent } from './components/content-factory/types';
 import { authEndpointFetch, authErrorMessage } from './accessSession';
+import { composeWithAttachment } from './components/simple/chatApi';
 
 // Initialize global fetch interceptor
 initFetchInterceptor();
@@ -743,7 +744,9 @@ export default function App() {
     setGeneratingRuns(next);
   }, []);
 
-  const sendChatText = useCallback((text: string, targetChatId = currentChatIdRef.current) => {
+  /** `agentId` routes this one turn to another agent inside the same chat —
+   *  the simple chat's @mention (see VexaAgent.respond's agent_override). */
+  const sendChatText = useCallback((text: string, targetChatId = currentChatIdRef.current, options?: { agentId?: string | null }) => {
     const command = text.trim();
     if (!command || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
 
@@ -774,6 +777,7 @@ export default function App() {
       chat_id: targetChatId,
       run_id: runId,
       ...(picked ? { model: picked.id, model_source: picked.source } : {}),
+      ...(options?.agentId ? { agent_id: options.agentId } : {}),
     }));
     markGenerating(targetChatId, runId);
     return true;
@@ -2212,6 +2216,11 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
     e.target.value = ''; // reset so the same file can be reselected after removal
+    await attachFile(file);
+  };
+
+  /** Shared by the file picker, paste and drag & drop. */
+  const attachFile = async (file: File) => {
 
     const isPdf = file.name.toLowerCase().endsWith('.pdf');
 
@@ -2269,10 +2278,16 @@ export default function App() {
   };
 
   // Send message through WebSocket
-  const handleSendMessage = (e: React.FormEvent) => {
+  const handleSendMessage = (e: React.FormEvent, options?: { agentId?: string | null; text?: string }) => {
     e.preventDefault();
-    if (sendChatText(inputValue)) {
+    // The attachment used to be shown in the composer and then dropped: only
+    // the typed text was ever sent. It now travels in the same shape the
+    // messenger bots use (backend/document_extract.build_document_prompt).
+    const typed = options?.text ?? inputValue;
+    const text = attachedFile ? composeWithAttachment(typed, attachedFile) : typed;
+    if (sendChatText(text, undefined, { agentId: options?.agentId })) {
       setInputValue('');
+      setAttachedFile(null);
     }
   };
 
@@ -2858,7 +2873,9 @@ export default function App() {
                 handleSetSessionProject={handleSetSessionProject}
                 modelSelection={modelSelection}
                 onModelSelect={handleModelSelect}
-                onSendText={(text) => sendChatText(text)}
+                onSendText={(text, options) => sendChatText(text, undefined, options)}
+                onSetSessionAgent={handleSetSessionAgent}
+                onAttachFile={attachFile}
                 onRegenerate={handleRetryLast}
                 onDeleteMessage={handleDeleteMessage}
                 onRenameSession={handleRenameSession}
