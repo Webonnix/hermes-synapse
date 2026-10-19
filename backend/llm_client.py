@@ -725,7 +725,7 @@ async def _call_llm_normalized(
 
     # ── Mandatory redaction gateway ─────────────────────────────────────────
     # The local model is the trust boundary: nothing leaves the box for
-    # a non-local api_base without a pass through detect_and_redact first. This
+    # a non-local api_base without a pass through backend.privacy first. This
     # runs on every single call (not once per turn), so tool outputs appended
     # to `messages` in a later tool-loop iteration get scrubbed too, not just
     # the turn's original user/assistant messages.
@@ -733,7 +733,7 @@ async def _call_llm_normalized(
     # A caller like agent.py's tool loop reuses the same `messages` list (and
     # the same dict objects inside it) across many calls, appending as it
     # goes — so without caching, message #1 would get re-sent through
-    # detect_and_redact's local-model confirmation pass on every single one of
+    # the privacy gateway's local-model pass on every single one of
     # up to max_tool_iterations calls, an O(n^2) blow-up in local-model calls
     # for one user turn. Each message dict is redacted at most once: its
     # per-message mapping (possibly empty) is cached on the dict itself under
@@ -743,41 +743,28 @@ async def _call_llm_normalized(
     # Mutating the caller's dicts in place is safe here: DB/memory persistence
     # always uses the original text or the restored response, never this
     # in-memory list, and each conversational turn builds its own fresh list.
-    _redaction_mapping: Dict[str, str] = {}
-    if not is_local:
-        from backend.redaction import detect_and_redact
+    #
+    # Covered: string content, text parts of multimodal content, and assistant
+    # tool_calls arguments (redacted per JSON value). See backend/privacy/.
+    from backend.privacy.gateway import PrivacyCheckFailed, protect_messages, restore_response
+    from backend.privacy.vault import PlaceholderVault
 
-        for msg in messages:
-            if not isinstance(msg, dict):
-                continue
-            content = msg.get("content")
-            if not isinstance(content, str) or not content:
-                continue
-            cached_mapping = msg.get(_REDACTION_MARK)
-            if cached_mapping is not None:
-                _redaction_mapping.update(cached_mapping)
-                continue
-            redacted_content, mapping = await detect_and_redact(content)
-            msg["content"] = redacted_content
-            msg[_REDACTION_MARK] = mapping
-            if mapping:
-                _redaction_mapping.update(mapping)
+    _vault = PlaceholderVault()
+    if not is_local:
+        try:
+            _vault = await protect_messages(messages, mark_key=_REDACTION_MARK)
+        except PrivacyCheckFailed as exc:
+            # PRIVACY_FAIL_MODE=closed and the local check failed: nothing was
+            # sent. provider_error lets a fallback chain move on to the next
+            # tier (e.g. the local model) instead of hard-failing the turn.
+            logger.warning("Privacy gateway blocked call to %s/%s: %s", provider, model, exc)
+            return NormalizedLLMResponse(
+                status=STATUS_PROVIDER_ERROR, provider=provider, model=model,
+                error_message=str(exc),
+            )
 
     def _restore(resp: NormalizedLLMResponse) -> NormalizedLLMResponse:
-        if not _redaction_mapping:
-            return resp
-        from backend.redaction import restore_secrets_with_mapping
-
-        if resp.content:
-            resp.content = restore_secrets_with_mapping(resp.content, _redaction_mapping)
-        if resp.reasoning:
-            resp.reasoning = restore_secrets_with_mapping(resp.reasoning, _redaction_mapping)
-        for call in resp.tool_calls or []:
-            fn = call.get("function") if isinstance(call, dict) else None
-            args = fn.get("arguments") if isinstance(fn, dict) else None
-            if isinstance(args, str) and args:
-                fn["arguments"] = restore_secrets_with_mapping(args, _redaction_mapping)
-        return resp
+        return restore_response(resp, _vault)
 
     headers = {
         "Authorization": f"Bearer {api_key}",

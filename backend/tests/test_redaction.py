@@ -1,6 +1,6 @@
 """Unit tests for backend/redaction.py's regex pass.
 
-_local_model_confirm (the second pass) needs a running local model and is
+The local-model pass (privacy/detectors/local_llm.py) needs a running model and is
 covered indirectly via backend/tests/test_llm_client.py's redaction-gateway
 tests, which patch it out. This file is about the deterministic regex pass
 in isolation: what it catches, and — just as important for a dev-tooling

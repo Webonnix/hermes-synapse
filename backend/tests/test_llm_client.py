@@ -310,7 +310,7 @@ async def test_call_redacts_secret_before_send_and_restores_in_response():
         return _mock_response(200, _make_body(f"Использую ключ {placeholder}"))
 
     with patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=fake_post)), \
-         patch("backend.redaction._local_model_confirm", new=AsyncMock(return_value=[])):
+         patch("backend.privacy.detectors.local_llm.find_spans", new=AsyncMock(return_value=[])):
         r = await call_llm_normalized(
             api_base="https://openrouter.ai/api/v1", api_key="k", model="m",
             messages=[{"role": "user", "content": secret}], max_retries=0,
@@ -333,7 +333,7 @@ async def test_call_does_not_redact_for_local_provider():
     result = LlamaCppChatResult(model="qwen3.8-27b", content="ok", done_reason="stop",
                                 prompt_tokens=1, completion_tokens=1)
     with patch("backend.llamacpp_client.LlamaCppClient.chat", new=AsyncMock(return_value=result)) as chat, \
-         patch("backend.redaction.detect_and_redact") as spy:
+         patch("backend.privacy.gateway.protect_messages") as spy:
         await call_llm_normalized(
             api_base="http://hermes-llama:8080", api_key="", model="qwen3.8-27b",
             messages=[{"role": "user", "content": secret}], max_retries=0,
@@ -354,7 +354,7 @@ async def test_redaction_scans_each_message_at_most_once_across_calls():
         return _mock_response(200, _make_body("ok"))
 
     with patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=fake_post)), \
-         patch("backend.redaction._local_model_confirm", new=AsyncMock(return_value=[])) as confirm:
+         patch("backend.privacy.detectors.local_llm.find_spans", new=AsyncMock(return_value=[])) as confirm:
         await call_llm_normalized(api_base="https://openrouter.ai/api/v1", api_key="k",
                                   model="m", messages=messages, max_retries=0)
         messages.append({"role": "assistant", "content": "first reply"})
