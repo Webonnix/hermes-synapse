@@ -59,7 +59,14 @@ const NetworkTab = lazy(() => import('./components/NetworkTab').then(module => (
 const MCPTab = lazy(() => import('./components/MCPTab').then(module => ({ default: module.MCPTab })));
 const AgentsAdminTab = lazy(() => import('./components/AgentsAdminTab').then(module => ({ default: module.AgentsAdminTab })));
 const ApiKeysTab = lazy(() => import('./components/ApiKeysTab').then(module => ({ default: module.ApiKeysTab })));
-import { splitForSpeech } from './speechChunks';
+import {
+  SPEECH_CHUNK_MAX,
+  SPEECH_FIRST_CHUNK_MAX,
+  StreamingSpeechSplitter,
+  cleanForSpeech,
+  splitForSpeech,
+  takeSpeechBatch,
+} from './speechChunks';
 const ProcessesTab = lazy(() => import('./components/ProcessesTab').then(module => ({ default: module.ProcessesTab })));
 import { HermesMark } from './components/HermesMark';
 import { VexaLogo } from './components/VexaLogo';
@@ -94,6 +101,40 @@ const langToLocale: Record<string, string> = {
 // hang for up to 120s — and Vexa's dialog mode refuses to reopen the microphone while the
 // flag is set. Without this ceiling one hung request would freeze the conversation loop.
 const TTS_PENDING_TIMEOUT_MS = 25000;
+
+/**
+ * One spoken reply in progress. Its text may keep arriving after playback has started —
+ * a streamed answer is spoken sentence by sentence while the model is still writing.
+ */
+interface SpeechSession {
+  requestId: number;
+  /** Speakable pieces not yet taken for synthesis, in order. */
+  queue: string[];
+  /** No more pieces will come; the reply ends once the queue has played out. */
+  closed: boolean;
+  /** Playback caught up with a reply that is still being written. */
+  paused: boolean;
+  /** The playback loop, parked until more text arrives or the reply closes. */
+  waiters: Array<() => void>;
+}
+
+function wakeSpeech(session: SpeechSession) {
+  session.waiters.splice(0).forEach(resolve => resolve());
+}
+
+/** A streamed reply being fed to speech as it arrives, keyed by run id. */
+interface SpeechStream {
+  splitter: StreamingSpeechSplitter;
+  session: SpeechSession | null;
+  /** Speech for this reply was switched off or stopped — it must not resume. */
+  muted: boolean;
+  /**
+   * A reconnect replays this run from further back than what was already fed in, so its
+   * deltas would repeat spoken text. Stop feeding them; the final answer is lined up
+   * against what was spoken instead.
+   */
+  frozen: boolean;
+}
 
 const tabs = ['vexa', 'processes', 'devruns', 'kanban', 'clients', 'agents', 'schedule', 'contentfactory', 'smm', 'settings', 'network', 'metrics'] as const;
 type AppTab = typeof tabs[number];
@@ -316,6 +357,8 @@ export default function App() {
   const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
   const ttsAudioUrlRef = useRef('');
   const ttsRequestRef = useRef(0);
+  const speechSessionRef = useRef<SpeechSession | null>(null);
+  const speechStreamsRef = useRef(new Map<string, SpeechStream>());
   const ttsPendingTimerRef = useRef<number | null>(null);
   const serverTtsAvailableRef = useRef<boolean | null>(null);
   // Last user message per session, used by the "Retry" action (P0 UX).
@@ -460,6 +503,15 @@ export default function App() {
 
   const stopSpeech = useCallback(() => {
     ttsRequestRef.current += 1;
+    // A queue parked waiting for more streamed text must wake to see it was superseded,
+    // or its loop would wait forever.
+    const session = speechSessionRef.current;
+    speechSessionRef.current = null;
+    if (session) {
+      session.closed = true;
+      session.queue.length = 0;
+      wakeSpeech(session);
+    }
     window.speechSynthesis?.cancel();
     if (ttsAudioRef.current) {
       ttsAudioRef.current.pause();
@@ -490,45 +542,17 @@ export default function App() {
   }, [endTtsPending]);
 
   // ── TTS helper ─────────────────────────────────────────────────────────────
-  const speakText = useCallback((rawText: string, msgIndex?: number) => {
-    // If already playing this message — stop it
-    if (msgIndex !== undefined && msgIndex === playingMsgIndex) {
-      stopSpeech();
-      return;
-    }
-    // Filter out Markdown tables and dividers line-by-line first
-    const lines = rawText.split('\n');
-    const filteredLines = lines.filter(line => {
-      const trimmed = line.trim();
-      if ((trimmed.match(/\|/g) || []).length >= 2) {
-        return false;
-      }
-      if (/^[-\=_*]{3,}$/.test(trimmed)) {
-        return false;
-      }
-      return true;
-    });
-    const textWithoutTables = filteredLines.join('\n');
-
-    // Strip markdown before speaking
-    const clean = textWithoutTables
-      .replace(/```[\s\S]*?```/g, 'code block.')
-      .replace(/`[^`]+`/g, '')
-      .replace(/\*\*(.+?)\*\*/g, '$1')
-      .replace(/__(.+?)__/g, '$1')
-      .replace(/\*(.+?)\*/g, '$1')
-      .replace(/_(.+?)_/g, '$1')
-      .replace(/#{1,6}\s/g, '')
-      .replace(/!?\[.*?\]\(.*?\)/g, '')
-      .replace(/[\r\n]+/g, '. ')
-      .replace(/[^a-zA-Zа-яА-ЯёЁ0-9\+\-\=\.,\?!:;\s]/g, ' ')
-      .replace(/\.{2,}/g, '.')
-      .replace(/\s+/g, ' ')
-      .trim();
-    if (!clean) return;
-
+  /**
+   * Starts a spoken reply whose text can keep arriving after playback has begun: pieces
+   * are appended with enqueueSpeech, and the reply ends once closeSpeech was called and
+   * everything queued has played. Only one reply speaks at a time — opening another, or
+   * stopSpeech(), supersedes this one.
+   */
+  const openSpeech = useCallback((msgIndex?: number): SpeechSession => {
     stopSpeech();
     const requestId = ttsRequestRef.current;
+    const session: SpeechSession = { requestId, queue: [], closed: false, paused: false, waiters: [] };
+    speechSessionRef.current = session;
     // stopSpeech() just cleared the previous reply's flag; from here until playback
     // actually starts, this reply owns it. Vexa's dialog mode reads it to know a spoken
     // answer is still coming — otherwise it reopens the microphone 1.1s after the text
@@ -536,16 +560,46 @@ export default function App() {
     beginTtsPending();
     if (msgIndex !== undefined) setPlayingMsgIndex(msgIndex);
 
-    // Takes the text to speak so a mid-queue failure can voice just the part that has
-    // not been played yet, rather than repeating the whole answer from the top.
-    const browserFallback = (pending: string = clean) => {
-      if (requestId !== ttsRequestRef.current) return;
-      if (!pending.trim()) return;
+    const alive = () => requestId === ttsRequestRef.current;
+    // The loop ended on a failure it already reported: stop taking text without
+    // cancelling anything, so later sentences of a streamed reply are not queued here.
+    const retire = () => {
+      if (speechSessionRef.current === session) speechSessionRef.current = null;
+      setIsSpeaking(false);
+      setPlayingMsgIndex(null);
+    };
+    const resumed = () => {
+      session.paused = false;
+      endTtsPending();
+      setIsSpeaking(true);
+    };
+    // Playback caught up with a reply that is still being written. Vexa is silent until
+    // the next sentence arrives — not speaking, but with a spoken answer still on its
+    // way, which is exactly what isTtsPending tells dialog mode.
+    const pauseIfStarved = (starved: boolean) => {
+      if (!starved || !alive()) return;
+      session.paused = true;
+      setIsSpeaking(false);
+      beginTtsPending();
+    };
+    // Next text to synthesise, waiting for a streamed reply to produce it if need be.
+    // null once the reply is closed and played out, superseded, or `giveUp` says so.
+    const nextText = async (max: number, giveUp?: () => boolean): Promise<string | null> => {
+      for (;;) {
+        if (!alive() || giveUp?.()) return null;
+        if (session.queue.length) return takeSpeechBatch(session.queue, max);
+        if (session.closed) return null;
+        await new Promise<void>(resolve => session.waiters.push(resolve));
+      }
+    };
+
+    const speakWithBrowser = (text: string) => new Promise<boolean>(resolve => {
       if (!('speechSynthesis' in window)) {
         showVoiceError('Голосовой движок недоступен в этом браузере.');
+        resolve(false);
         return;
       }
-      const utter = new SpeechSynthesisUtterance(pending);
+      const utter = new SpeechSynthesisUtterance(text);
       const locale = langToLocale[appSettingsRef.current.language] || 'ru-RU';
       utter.lang = locale;
       utter.rate = 1;
@@ -577,37 +631,46 @@ export default function App() {
       let started = false;
       utter.onstart = () => {
         started = true;
-        endTtsPending();
-        setIsSpeaking(true);
+        resumed();
       };
-      utter.onend = () => {
-        setIsSpeaking(false);
-        setPlayingMsgIndex(null);
-      };
+      utter.onend = () => resolve(true);
       utter.onerror = () => {
-        setIsSpeaking(false);
-        setPlayingMsgIndex(null);
-        if (requestId === ttsRequestRef.current) {
-          showVoiceError('Не удалось озвучить ответ.');
-        }
+        // stopSpeech()'s cancel() lands here too; that is not a failure.
+        if (alive()) showVoiceError('Не удалось озвучить ответ.');
+        resolve(false);
       };
       window.speechSynthesis.speak(utter);
       setTimeout(() => {
-        if (!started && requestId === ttsRequestRef.current) {
+        if (!started && alive()) {
           showVoiceError('Браузер заблокировал голосовой ответ — кликните на странице и повторите.');
         }
       }, 1200);
+    });
+
+    // `first` is text already taken off the queue that the server voice failed to play,
+    // so a mid-reply failure resumes where it stopped instead of repeating the answer.
+    const speakQueueWithBrowser = async (first: string | null) => {
+      let text = first ?? await nextText(SPEECH_CHUNK_MAX);
+      while (text !== null) {
+        if (!(await speakWithBrowser(text))) {
+          if (alive()) retire();
+          return;
+        }
+        if (!alive()) return;
+        pauseIfStarved(!session.queue.length && !session.closed);
+        text = await nextText(SPEECH_CHUNK_MAX);
+      }
+      if (alive()) stopSpeech();
     };
 
     void (async () => {
-      const chunks = splitForSpeech(clean);
-      if (!chunks.length) return;
-      // How many chunks actually reached the speakers — a mid-queue failure resumes the
-      // browser voice from here instead of restarting the whole answer.
-      let spoken = 0;
+      // Pieces taken off the queue whose audio has not finished playing yet.
+      const unplayed: string[] = [];
+      let serverFailed = false;
+      let taken = 0;
       // The chunk being synthesised ahead of playback. If we bail before awaiting it, its
       // rejection still has to be observed or the browser logs an unhandled rejection.
-      let lookahead: Promise<Blob> | null = null;
+      let lookahead: Promise<Blob | null> | null = null;
 
       try {
         const authToken = localStorage.getItem('vexa_auth_token');
@@ -617,8 +680,9 @@ export default function App() {
           const status = statusResponse.ok ? await statusResponse.json() : null;
           serverTtsAvailableRef.current = Boolean(status?.available);
         }
+        if (!alive()) return;
         if (!serverTtsAvailableRef.current) {
-          browserFallback();
+          await speakQueueWithBrowser(null);
           return;
         }
 
@@ -637,10 +701,7 @@ export default function App() {
         // would leak nodes and leave the core animation reading a dead source.
         const audio = new Audio();
         ttsAudioRef.current = audio;
-        audio.onplay = () => {
-          endTtsPending();
-          setIsSpeaking(true);
-        };
+        audio.onplay = resumed;
 
         const playBlob = (blob: Blob) => new Promise<void>((resolve, reject) => {
           const url = URL.createObjectURL(blob);
@@ -652,37 +713,166 @@ export default function App() {
           audio.play().catch(reject);
         });
 
-        lookahead = synthesize(chunks[0]);
-        for (let index = 0; index < chunks.length; index += 1) {
+        // Waits for the next text (a streamed reply may still be writing it) and starts
+        // synthesising it at once. Called *before* the current chunk plays, so generation
+        // overlaps playback. Synthesis runs ~2x faster than speech, so after the first
+        // chunk the queue stays ahead of the speaker and the seams are inaudible.
+        const fetchNext = async (): Promise<Blob | null> => {
+          // Only the opening chunk is kept small: it alone decides the initial silence.
+          const max = taken === 0 ? SPEECH_FIRST_CHUNK_MAX : SPEECH_CHUNK_MAX;
+          // Once the server voice failed, the browser voice owns the queue — never race it.
+          const text = await nextText(max, () => serverFailed);
+          if (text === null) return null;
+          taken += 1;
+          unplayed.push(text);
+          return synthesize(text);
+        };
+
+        lookahead = fetchNext();
+        for (;;) {
           const pending = lookahead;
           lookahead = null;
-          const blob = await pending!;
-          if (requestId !== ttsRequestRef.current) return;
-          // Start the next chunk's synthesis *before* playing this one, so generation
-          // overlaps playback. Synthesis runs ~2x faster than speech, so after the first
-          // chunk the queue stays ahead of the speaker and the seams are inaudible.
-          if (index + 1 < chunks.length) lookahead = synthesize(chunks[index + 1]);
+          const blob = await pending;
+          if (!alive()) return;
+          if (!blob) break;
+          lookahead = fetchNext();
           await playBlob(blob);
-          if (requestId !== ttsRequestRef.current) return;
-          spoken = index + 1;
+          if (!alive()) return;
+          unplayed.shift();
+          // The lookahead is parked waiting for text: the stream has not caught up yet.
+          pauseIfStarved(session.waiters.length > 0);
         }
-        if (requestId === ttsRequestRef.current) stopSpeech();
+        if (alive()) stopSpeech();
       } catch {
         // A superseded request is not a failure: stopSpeech() clearing audio.src is what
         // rejected us. Falling through here would reset serverTtsAvailableRef and make
         // every following reply pay for a pointless /api/voice/tts/status probe.
-        if (requestId !== ttsRequestRef.current) return;
+        if (!alive()) return;
+        serverFailed = true;
+        lookahead?.catch(() => {});
         // Reset to null (not false) — a single failure shouldn't permanently downgrade
         // every future reply to the browser's robotic fallback voice for the rest of the
-        // page session. null makes the next speakText call re-probe and retry.
+        // page session. null makes the next reply re-probe and retry.
         serverTtsAvailableRef.current = null;
         setIsSpeaking(false);
-        browserFallback(chunks.slice(spoken).join(' '));
+        await speakQueueWithBrowser(unplayed.length ? unplayed.splice(0).join(' ') : null);
       } finally {
         lookahead?.catch(() => {});
       }
     })();
-  }, [playingMsgIndex, stopSpeech, showVoiceError, beginTtsPending, endTtsPending]);
+
+    return session;
+  }, [stopSpeech, showVoiceError, beginTtsPending, endTtsPending]);
+
+  const enqueueSpeech = useCallback((session: SpeechSession, pieces: string[]) => {
+    if (session !== speechSessionRef.current || session.closed || !pieces.length) return;
+    session.queue.push(...pieces);
+    // Speech had run dry, and its pending flag may have timed out while a tool ran:
+    // re-assert it so dialog mode does not reopen the mic just before this plays.
+    if (session.paused) beginTtsPending();
+    wakeSpeech(session);
+  }, [beginTtsPending]);
+
+  const closeSpeech = useCallback((session: SpeechSession) => {
+    session.closed = true;
+    wakeSpeech(session);
+  }, []);
+
+  /** Speaks a complete text from the top, replacing whatever is being said. */
+  const speakWhole = useCallback((rawText: string, msgIndex?: number) => {
+    const clean = cleanForSpeech(rawText);
+    if (!clean) return;
+    const session = openSpeech(msgIndex);
+    enqueueSpeech(session, splitForSpeech(clean));
+    closeSpeech(session);
+  }, [openSpeech, enqueueSpeech, closeSpeech]);
+
+  const speakText = useCallback((rawText: string, msgIndex?: number) => {
+    // If already playing this message — stop it
+    if (msgIndex !== undefined && msgIndex === playingMsgIndex) {
+      stopSpeech();
+      return;
+    }
+    speakWhole(rawText, msgIndex);
+  }, [playingMsgIndex, stopSpeech, speakWhole]);
+
+  /**
+   * Speaks a streamed reply's finished sentences while the model is still writing the
+   * rest, so Vexa starts talking after the first sentence rather than the whole answer.
+   * The caller only feeds deltas of the chat on screen.
+   */
+  const feedSpeechStream = useCallback((runId: string, delta: string) => {
+    const streams = speechStreamsRef.current;
+    let stream = streams.get(runId);
+    if (!stream) {
+      stream = { splitter: new StreamingSpeechSplitter(), session: null, muted: false, frozen: false };
+      streams.set(runId, stream);
+    }
+    if (stream.muted || stream.frozen) return;
+    if (!ttsEnabledRef.current) {
+      stream.muted = true;
+      return;
+    }
+    const pieces = stream.splitter.push(delta);
+    if (!pieces.length) return;
+    if (!stream.session) {
+      stream.session = openSpeech();
+    } else if (stream.session !== speechSessionRef.current) {
+      // This reply's speech was stopped (mic opened, stop pressed, something else
+      // started speaking): the next sentence must not start it again.
+      stream.muted = true;
+      return;
+    }
+    enqueueSpeech(stream.session, pieces);
+  }, [openSpeech, enqueueSpeech]);
+
+  /**
+   * Ends a streamed reply's speech. With `speak`, says whatever part of the reply the
+   * stream has not voiced yet — of `finalText` when given (all of it if nothing was
+   * spoken while streaming); without, lets already-queued speech finish and adds nothing.
+   */
+  const finishSpeechStream = useCallback((runId: string, speak: boolean, finalText?: string) => {
+    const streams = speechStreamsRef.current;
+    const stream = streams.get(runId);
+    streams.delete(runId);
+    if (finalText === undefined) {
+      // Ended without the final answer (stream end or a lost buffer). Should that answer
+      // still arrive afterwards, this muted entry stops it being read out a second time.
+      streams.set(runId, { splitter: new StreamingSpeechSplitter(), session: null, muted: true, frozen: false });
+      if (streams.size > 32) streams.delete(streams.keys().next().value!);
+    }
+    if (!stream) {
+      if (speak && finalText !== undefined) speakWhole(finalText);
+      return;
+    }
+    let { session } = stream;
+    // Its speech was stopped or replaced meanwhile: leave whatever is playing now alone.
+    if (session && session !== speechSessionRef.current) return;
+    if (speak && !stream.muted) {
+      const pieces = stream.splitter.finish(finalText);
+      if (!session && pieces.length) session = openSpeech();
+      if (session) enqueueSpeech(session, pieces);
+    }
+    if (session) closeSpeech(session);
+  }, [speakWhole, openSpeech, enqueueSpeech, closeSpeech]);
+
+  /**
+   * Silences a streamed reply for good: stops its speech if that is what is playing, and
+   * keeps a muted entry so a straggling delta or final frame cannot start it again.
+   */
+  const cancelSpeechStream = useCallback((runId: string) => {
+    const streams = speechStreamsRef.current;
+    const stream = streams.get(runId);
+    if (stream?.session && stream.session === speechSessionRef.current) stopSpeech();
+    streams.set(runId, {
+      splitter: stream?.splitter ?? new StreamingSpeechSplitter(),
+      session: null,
+      muted: true,
+      frozen: false,
+    });
+    // A cancelled run gets no terminal frame to clear its entry; keep the map bounded.
+    if (streams.size > 32) streams.delete(streams.keys().next().value!);
+  }, [stopSpeech]);
 
   // ── Voice command helpers ───────────────────────────────────────────────────
   useEffect(() => {
@@ -1353,6 +1543,8 @@ export default function App() {
             // partial and let the replay rebuild it.
             if (data.status === 'gap') {
               runCursorsRef.current.reset(data.run_id);
+              const speechStream = speechStreamsRef.current.get(String(data.run_id));
+              if (speechStream) speechStream.frozen = true;
               setMessages(prev => prev.map(message => message.run_id === data.run_id
                 ? { ...message, content: '', thinking: '' }
                 : message));
@@ -1360,6 +1552,7 @@ export default function App() {
               // The buffer is gone (expired or never existed). The DB is the only
               // remaining source of truth for this run.
               runCursorsRef.current.forget(data.run_id);
+              finishSpeechStream(String(data.run_id), false);
               // No terminal frame will ever come for it — don't leave its chat
               // stuck on "generating".
               clearGenerating(undefined, data.run_id);
@@ -1441,9 +1634,18 @@ export default function App() {
                     streaming: true,
                   }
                 : message));
+              if (data.content && data.run_id) feedSpeechStream(String(data.run_id), String(data.content));
             }
           } else if (data.type === 'chat_stream_end') {
             const msgChatId = data.chat_id || 'dashboard';
+            // Normally chat_message already finished this reply's speech; this covers a
+            // stream that ends without one.
+            if (data.run_id) {
+              finishSpeechStream(
+                String(data.run_id),
+                ttsEnabledRef.current && msgChatId === currentChatIdRef.current,
+              );
+            }
             if (msgChatId === currentChatIdRef.current) {
               setMessages(prev => prev.map(message => message.run_id === data.run_id
                 ? { ...message, streaming: false, id: data.message_id || message.id, meta: data.meta || message.meta }
@@ -1468,10 +1670,21 @@ export default function App() {
             }
             if (data.role === 'assistant') {
               clearGenerating(msgChatId, data.run_id || undefined);
+              const runId = data.run_id ? String(data.run_id) : '';
               if (data.suppress_tts) {
+                if (runId) cancelSpeechStream(runId);
                 stopSpeech();
               } else if (ttsEnabledRef.current && msgChatId === currentChatIdRef.current) {
-                speakText(data.content as string);
+                if (!runId || data.meta?.status === 'error') {
+                  // An error replaces whatever the stream was saying — say it whole.
+                  if (runId) cancelSpeechStream(runId);
+                  speakWhole(data.content as string);
+                } else {
+                  // Most of a streamed reply has usually been spoken already; say the rest.
+                  finishSpeechStream(runId, true, data.content as string);
+                }
+              } else if (runId) {
+                finishSpeechStream(runId, false);
               }
               if (
                 'Notification' in window &&
@@ -1505,6 +1718,7 @@ export default function App() {
               ));
             }
             clearGenerating(cancelledChatId, cancelledRunId || undefined);
+            if (cancelledRunId) cancelSpeechStream(cancelledRunId);
           } else if (data.type === 'user_message_id_update') {
             const msgChatId = data.chat_id || 'dashboard';
             if (msgChatId === currentChatIdRef.current) {
