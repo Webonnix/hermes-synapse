@@ -1080,6 +1080,7 @@ body.vx-resizing * { cursor: col-resize !important; user-select: none; }
 .vx-message.is-error { align-self: flex-start; background: rgba(64, 12, 26, .6); border: 1px solid rgba(240, 93, 117, .35); }
 .vx-message > p { color: var(--vexa-text-primary); font-size: .8rem; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
 .vx-message footer { display: flex; min-height: 18px; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 3px; }
+.vx-message footer:empty { display: none; }
 .vx-message time { color: var(--vexa-text-muted); font: .58rem var(--vexa-font-mono); }
 .vx-message .vx-cursor { display: inline-block; width: 7px; height: 13px; margin-left: 3px; border-radius: 1px; background: var(--vexa-cyan); vertical-align: -2px; animation: vx-blink 1s steps(2) infinite; }
 

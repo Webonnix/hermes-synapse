@@ -72,9 +72,14 @@ export function AgentCircuitCard({ copy, agents, activeCount, selectedAgentId, o
   );
 }
 
+/**
+ * The message's own timestamp, or '' when it has none. History rows carry no time, and
+ * falling back to "now" stamped every old reply with the current minute.
+ */
 function messageTime(message: ChatMessage): string {
   const raw = (message as unknown as Record<string, unknown>).created_at;
-  const date = typeof raw === 'string' ? new Date(raw) : new Date();
+  if (typeof raw !== 'string') return '';
+  const date = new Date(raw);
   if (Number.isNaN(date.getTime())) return '';
   return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
@@ -150,6 +155,7 @@ function MessageBubble({ copy, message, playing, onSpeak, onStopSpeech }: Messag
   const typing = smooth.length < (message.content || '').length;
   const widget = isAssistant ? messageWidget(message) : null;
   const waiting = isAssistant && streaming && !smooth;
+  const time = messageTime(message);
 
   return (
     <div className={`vx-message is-${message.role}${streaming || typing ? ' is-live' : ''}`}>
@@ -182,7 +188,7 @@ function MessageBubble({ copy, message, playing, onSpeak, onStopSpeech }: Messag
             )
         )}
         {isAssistant && !streaming && message.content && <CopyButton copy={copy} text={message.content} />}
-        <time>{messageTime(message)}</time>
+        {time && <time>{time}</time>}
       </footer>
     </div>
   );
