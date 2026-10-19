@@ -13,6 +13,19 @@ class VoiceSynthesisError(RuntimeError):
     """Raised when a configured local TTS provider cannot synthesize speech."""
 
 
+# Exactly what src/xtts/server.py had Piper read to build vexa-reference.wav —
+# Qwen3-TTS's Base task clones in context, so it needs the transcript of the
+# reference clip alongside the audio itself.
+QWEN3_REFERENCE_TEXT = (
+    "Hello, I am Vexa, your autonomous voice control centre. "
+    "All systems are online and every agent is standing by for your command. "
+    "I can read your messages, run your tasks, and answer questions at any hour. "
+    "Would you like me to walk you through what changed today? "
+    "Just say the word, and I will take care of the rest."
+)
+_QWEN3_LANGUAGES = {"ru": "Russian", "en": "English"}
+
+
 def _tts_config() -> Dict[str, Any]:
     provider = (os.getenv("VOICE_TTS_PROVIDER", "auto").strip() or "auto").lower()
     return {
@@ -23,6 +36,19 @@ def _tts_config() -> Dict[str, Any]:
         # per-language ones. Preferred over Piper whenever it answers /health.
         "xtts_url": (os.getenv("VOICE_TTS_XTTS_URL", "http://xtts:8700").strip() or "http://xtts:8700").rstrip("/"),
         "xtts_timeout_seconds": max(5, int(os.getenv("VOICE_TTS_XTTS_TIMEOUT_SECONDS", "120"))),
+        # Qwen3-TTS on vLLM-Omni (compose service qwen3-tts), selected with
+        # VOICE_TTS_PROVIDER=qwen3; "auto" never picks it. By default it clones the
+        # same reference XTTS used, read from XTTS's speaker volume;
+        # VOICE_TTS_QWEN3_VOICE switches to a voice uploaded once via
+        # POST /v1/audio/voices instead.
+        "qwen3_url": (os.getenv("VOICE_TTS_QWEN3_URL", "http://qwen3-tts:8091").strip() or "http://qwen3-tts:8091").rstrip("/"),
+        "qwen3_model": os.getenv("VOICE_TTS_QWEN3_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-Base").strip()
+        or "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+        "qwen3_voice": os.getenv("VOICE_TTS_QWEN3_VOICE", "").strip(),
+        "qwen3_ref_audio": os.getenv("VOICE_TTS_QWEN3_REF_AUDIO", "file:///xtts-speakers/vexa-reference.wav").strip()
+        or "file:///xtts-speakers/vexa-reference.wav",
+        "qwen3_ref_text": os.getenv("VOICE_TTS_QWEN3_REF_TEXT", "").strip() or QWEN3_REFERENCE_TEXT,
+        "qwen3_timeout_seconds": max(5, int(os.getenv("VOICE_TTS_QWEN3_TIMEOUT_SECONDS", "60"))),
         "piper_binary": os.getenv("VOICE_TTS_PIPER_BINARY", "piper").strip() or "piper",
         "piper_model": os.getenv("VOICE_TTS_PIPER_MODEL", "").strip(),
         # Piper models are single-language (a ru_RU model mangles English the same
@@ -100,7 +126,47 @@ def _xtts_health(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return health
 
 
+_qwen3_health_cache: Dict[str, Any] = {"expires_at": 0.0, "url": "", "health": None}
+
+
+def _qwen3_health(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """GET /v1/models on the vLLM-Omni server: None when unreachable, else the
+    served model ids. Cached like `_xtts_health` for the same reason."""
+    url = config["qwen3_url"]
+    now = time.monotonic()
+    if _qwen3_health_cache["url"] == url and _qwen3_health_cache["expires_at"] > now:
+        return _qwen3_health_cache["health"]
+
+    health: Optional[Dict[str, Any]]
+    try:
+        with urllib.request.urlopen(f"{url}/v1/models", timeout=3) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        data = payload.get("data") if isinstance(payload, dict) else None
+        models = [str(item.get("id", "")) for item in data or [] if isinstance(item, dict)]
+        health = {"models": models}
+    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError, AttributeError):
+        health = None
+
+    _qwen3_health_cache.update({"expires_at": now + _XTTS_HEALTH_TTL_SECONDS, "url": url, "health": health})
+    return health
+
+
+def _qwen3_voice_label(config: Dict[str, Any]) -> str:
+    return config["qwen3_voice"] or config["qwen3_ref_audio"].rsplit("/", 1)[-1]
+
+
 def _provider_status(provider: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    if provider == "qwen3":
+        health = _qwen3_health(config)
+        return {
+            "provider": "qwen3",
+            "binary": config["qwen3_url"],
+            "binary_available": health is not None,
+            "model": config["qwen3_model"],
+            # vLLM only lists a model once it is loaded and serving.
+            "model_available": bool(health and config["qwen3_model"] in health["models"]),
+            "voice": _qwen3_voice_label(config),
+        }
     if provider == "xtts":
         health = _xtts_health(config)
         ready = bool(health and health.get("ready"))
@@ -141,10 +207,19 @@ def _provider_status(provider: str, config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+_AUTO_PROVIDERS = ["xtts", "piper", "rhvoice"]
+
+
 def _candidate_providers(config: Dict[str, Any]) -> List[str]:
     # "auto" prefers the multilingual sidecar: a single voice across languages is
     # the point, and Piper/RHVoice stay behind it as offline fallbacks.
-    return ["xtts", "piper", "rhvoice"] if config["provider"] == "auto" else [config["provider"]]
+    if config["provider"] == "auto":
+        return list(_AUTO_PROVIDERS)
+    # Qwen3-TTS is still young here: keep the whole "auto" chain behind it so a
+    # stopped or crashed qwen3-tts container never leaves Vexa mute.
+    if config["provider"] == "qwen3":
+        return ["qwen3", *_AUTO_PROVIDERS]
+    return [config["provider"]]
 
 
 def get_tts_status() -> Dict[str, Any]:
@@ -207,6 +282,44 @@ def _synthesize_with_xtts(text: str, output: str, config: Dict[str, Any], rate: 
     return speaker
 
 
+def _synthesize_with_qwen3(text: str, output: str, config: Dict[str, Any], rate: float) -> str:
+    """POST to vLLM-Omni's OpenAI-style /v1/audio/speech (Base task = voice
+    cloning) and write the wav it returns. Returns the voice label it used."""
+    body: Dict[str, Any] = {
+        "model": config["qwen3_model"],
+        "input": text,
+        "task_type": "Base",
+        "language": _QWEN3_LANGUAGES[_detect_language_for_text(text)],
+        "response_format": "wav",
+    }
+    if config["qwen3_voice"]:
+        body["voice"] = config["qwen3_voice"]
+    else:
+        body["ref_audio"] = config["qwen3_ref_audio"]
+        body["ref_text"] = config["qwen3_ref_text"]
+    if rate != 1.0:
+        body["speed"] = rate
+    request = urllib.request.Request(
+        f"{config['qwen3_url']}/v1/audio/speech",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=config["qwen3_timeout_seconds"]) as response:
+            audio = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace").strip()[:500] or str(exc)
+        raise VoiceSynthesisError(f"qwen3 synthesis failed: {detail}") from exc
+    except (urllib.error.URLError, OSError) as exc:
+        raise VoiceSynthesisError(f"qwen3 synthesis failed: {exc}") from exc
+
+    if not audio:
+        raise VoiceSynthesisError("qwen3 synthesis failed: no audio produced")
+    Path(output).write_bytes(audio)
+    return _qwen3_voice_label(config)
+
+
 def synthesize_speech(text: str, output_path: str, voice: Optional[str] = None, rate: float = 1.0) -> Dict[str, Any]:
     config = _tts_config()
     clean_text = "".join(character for character in text if character in "\n\t" or ord(character) >= 32).strip()
@@ -254,6 +367,13 @@ def _synthesize_with(
         return {
             "provider": "xtts",
             "voice": speaker or "xtts",
+            "size_bytes": Path(output).stat().st_size,
+        }
+    if provider == "qwen3":
+        # Same as XTTS: one cloned voice for both languages.
+        return {
+            "provider": "qwen3",
+            "voice": _synthesize_with_qwen3(clean_text, output, config, rate),
             "size_bytes": Path(output).stat().st_size,
         }
     if provider == "piper":
