@@ -79,6 +79,31 @@ def _init_schema() -> None:
                 connection.execute("ALTER TABLE provider_bindings ADD COLUMN default_model TEXT")
             except sqlite3.OperationalError:
                 pass
+        _migrate_retired_router_host(connection)
+
+
+# One-time cleanup for bindings created before OmniRoute took over the AI
+# router: they still name the retired sidecar host, whose compose alias is
+# gone. Point them at the `omniroute` service (digest recomputed so dedupe on
+# create keeps matching). A no-op on any install that never had it.
+_RETIRED_ROUTER_HOST = "://9router:"
+
+
+def _migrate_retired_router_host(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(
+        "SELECT id, name, provider_type, api_base FROM provider_bindings WHERE api_base LIKE ?",
+        (f"%{_RETIRED_ROUTER_HOST}%",),
+    ).fetchall()
+    for row in rows:
+        api_base = row["api_base"].replace(_RETIRED_ROUTER_HOST, "://omniroute:")
+        try:
+            digest = _digest(validate_binding_config(row["name"], row["provider_type"], api_base))
+        except ValueError:
+            continue
+        connection.execute(
+            "UPDATE provider_bindings SET api_base = ?, config_digest = ? WHERE id = ?",
+            (api_base, digest, row["id"]),
+        )
 
 
 def validate_binding_config(name: str, provider_type: str, api_base: str) -> dict[str, Any]:

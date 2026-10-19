@@ -1,8 +1,8 @@
-"""Image generation routed through the 9Router sidecar.
+"""Image generation routed through the OmniRoute sidecar.
 
 The point of the provider is that *which vendor renders the image* stops being
 a code change: the model id carries it (`gemini/gemini-3-pro-image-preview`,
-`gemini/gemini-2.5-flash-image`), and 9Router forwards to whichever upstream
+`gemini/gemini-2.5-flash-image`), and OmniRoute forwards to whichever upstream
 account is connected. Two request-shape rules make that work and are what these
 tests pin, because both fail as an opaque vendor 400 several layers away:
 
@@ -49,12 +49,12 @@ def test_a_prompt_with_no_size_information_is_left_alone():
 
 
 def test_base_url_comes_from_the_environment_by_default(monkeypatch):
-    monkeypatch.setenv("ROUTER_API_BASE", "http://9router:20128")
-    assert _provider()._api_base() == "http://9router:20128"
+    monkeypatch.setenv("ROUTER_API_BASE", "http://omniroute:20128")
+    assert _provider()._api_base() == "http://omniroute:20128"
 
 
 def test_a_configured_base_url_wins_over_the_environment(monkeypatch):
-    monkeypatch.setenv("ROUTER_API_BASE", "http://9router:20128")
+    monkeypatch.setenv("ROUTER_API_BASE", "http://omniroute:20128")
     assert _provider(apiBase="http://elsewhere:9000/")._api_base() == "http://elsewhere:9000"
 
 
@@ -85,7 +85,7 @@ async def test_generated_image_bytes_are_returned_as_an_asset(monkeypatch):
 
     monkeypatch.setattr(httpx, "AsyncClient", client_factory)
 
-    result = await _provider(apiBase="http://9router:20128").execute({"prompt": "a cat"})
+    result = await _provider(apiBase="http://omniroute:20128").execute({"prompt": "a cat"})
     assert result.assets[0].data == b"png-bytes"
     assert result.provider == "router-image"
 

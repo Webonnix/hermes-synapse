@@ -381,14 +381,14 @@ def _sse_mock_response(text):
 
 @pytest.mark.asyncio
 async def test_complete_body_with_sse_done_trailer_is_still_parsed():
-    """9Router answers a plain (non-streaming) request with HTTP 200,
+    """OmniRoute answers a plain (non-streaming) request with HTTP 200,
     content-type text/event-stream, and glues `data: [DONE]` straight onto the
     JSON. That trailer alone used to surface to the user as 'Provider response
     was not valid JSON' — an agent answering a Matrix message with an error."""
     body = json.dumps(_make_body("Привет! Дела отлично.")) + "data: [DONE]\n\n"
     with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=_sse_mock_response(body))):
         r = await call_llm_normalized(
-            api_base="http://9router:20128/v1", api_key="k", model="ds/deepseek-v4-pro",
+            api_base="http://omniroute:20128/v1", api_key="k", model="ds/deepseek-v4-pro",
             messages=[{"role": "user", "content": "привет"}], max_retries=0,
         )
     assert r.status == lc.STATUS_SUCCESS
@@ -407,7 +407,7 @@ async def test_real_chunk_stream_is_merged_instead_of_truncated():
     body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
     with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=_sse_mock_response(body))):
         r = await call_llm_normalized(
-            api_base="http://9router:20128/v1", api_key="k", model="ds/deepseek-v4-pro",
+            api_base="http://omniroute:20128/v1", api_key="k", model="ds/deepseek-v4-pro",
             messages=[{"role": "user", "content": "привет"}], max_retries=0,
         )
     assert r.status == lc.STATUS_SUCCESS
@@ -418,7 +418,7 @@ async def test_real_chunk_stream_is_merged_instead_of_truncated():
 async def test_body_that_is_genuinely_not_json_still_fails_loudly():
     with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=_sse_mock_response("<html>502</html>"))):
         r = await call_llm_normalized(
-            api_base="http://9router:20128/v1", api_key="k", model="m",
+            api_base="http://omniroute:20128/v1", api_key="k", model="m",
             messages=[{"role": "user", "content": "hi"}], max_retries=0,
         )
     assert r.status == lc.STATUS_PARSE_ERROR
@@ -439,7 +439,7 @@ async def test_parameter_the_model_refuses_is_dropped_and_the_call_retried():
 
     with patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=fake_post)):
         r = await call_llm_normalized(
-            api_base="http://9router:20128/v1", api_key="k", model="kimi/kimi-k3",
+            api_base="http://omniroute:20128/v1", api_key="k", model="kimi/kimi-k3",
             messages=[{"role": "user", "content": "17*3"}], temperature=0.7, max_retries=0,
         )
     assert r.status == lc.STATUS_SUCCESS
@@ -459,7 +459,7 @@ async def test_refused_parameter_retry_happens_only_once():
 
     with patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=fake_post)):
         r = await call_llm_normalized(
-            api_base="http://9router:20128/v1", api_key="k", model="kimi/kimi-k3",
+            api_base="http://omniroute:20128/v1", api_key="k", model="kimi/kimi-k3",
             messages=[{"role": "user", "content": "hi"}], temperature=0.7, max_retries=0,
         )
     assert r.status == lc.STATUS_PROVIDER_ERROR
@@ -506,7 +506,7 @@ async def test_a_refusal_is_remembered_so_the_next_call_never_repeats_it():
     with patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=fake_post)):
         for _ in range(3):
             r = await call_llm_normalized(
-                api_base="http://9router:20128/v1", api_key="k", model="kimi/kimi-k3",
+                api_base="http://omniroute:20128/v1", api_key="k", model="kimi/kimi-k3",
                 messages=[{"role": "user", "content": "17*3"}], temperature=0.7, max_retries=0,
             )
             assert r.status == lc.STATUS_SUCCESS
@@ -515,4 +515,4 @@ async def test_a_refusal_is_remembered_so_the_next_call_never_repeats_it():
     assert len(calls) == 4
     assert all("temperature" not in payload for payload in calls[1:])
     # Scoped to that model — a different one still gets the owner's temperature.
-    assert lc.remembered_refusals("http://9router:20128/v1", "ds/deepseek-v4-pro") == set()
+    assert lc.remembered_refusals("http://omniroute:20128/v1", "ds/deepseek-v4-pro") == set()

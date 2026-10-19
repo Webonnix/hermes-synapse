@@ -176,7 +176,7 @@ def is_tool_allowed(
     if who == OWNER:
         return True
 
-    if name in SERVER_ACTION_TOOLS:
+    if name in SERVER_ACTION_TOOLS or name in _omniroute_owner_only():
         return False
 
     if who == SUBAGENT:
@@ -188,6 +188,14 @@ def is_tool_allowed(
     if plan_allowed_tools is not None:
         return name in set(plan_allowed_tools)
     return name in PUBLIC_CHANNEL_TOOLS
+
+
+def _omniroute_owner_only() -> frozenset:
+    """OmniRoute MCP tools that reconfigure routing or spend on test calls
+    (backend/omniroute_mcp.py) — infrastructure actions, like shell and git."""
+    from backend.omniroute_mcp import OWNER_ONLY_TOOLS
+
+    return OWNER_ONLY_TOOLS
 
 
 def filter_tool_names(
@@ -208,10 +216,10 @@ def denial_payload(principal: Optional[str], tool_name: str) -> str:
     """JSON string handed back to the model in place of a tool result, so the
     turn continues with a clear explanation instead of failing."""
     who = normalize_principal(principal)
-    if tool_name in SERVER_ACTION_TOOLS:
+    if tool_name in SERVER_ACTION_TOOLS or tool_name in _omniroute_owner_only():
         reason = (
-            "Server-side actions (shell, dev sandbox, git, capability provisioning) "
-            "are reserved for the main agent operated by the owner."
+            "Server-side actions (shell, dev sandbox, git, capability provisioning, "
+            "AI router configuration) are reserved for the main agent operated by the owner."
         )
     elif who == PUBLIC_CHANNEL:
         reason = "This tool is not available on a public token-gated channel."

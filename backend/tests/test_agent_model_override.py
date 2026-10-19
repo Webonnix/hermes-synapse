@@ -1,7 +1,7 @@
 """The per-turn model override in backend/agent.py.
 
 The agent is a process-wide singleton: one WebSocket connection picking a
-9Router model for a message must not move the model out from under the Telegram
+OmniRoute model for a message must not move the model out from under the Telegram
 bot, a scheduler run, or another chat that is mid-turn. These tests pin that
 the override is visible everywhere inside the turn that asked for it, and
 nowhere else — including in a concurrently running turn.
@@ -39,7 +39,7 @@ def agent():
 ROUTER_OVERRIDE = {
     "source": "router",
     "model": "kimi/kimi-k3",
-    "api_base": "http://9router:20128/v1",
+    "api_base": "http://omniroute:20128/v1",
     "api_key": "rtr_key",
     "provider": "openai_compatible",
 }
@@ -67,7 +67,7 @@ async def test_override_is_visible_to_the_whole_turn(agent):
     assert seen == {
         "model": "kimi/kimi-k3",
         "provider": "openai_compatible",
-        "api_base": "http://9router:20128/v1",
+        "api_base": "http://omniroute:20128/v1",
         "api_key": "rtr_key",
     }
 
@@ -165,8 +165,8 @@ def test_runtime_config_still_reports_the_configured_model(agent):
 
 # ─── Endpoint and model must travel together ────────────────────────────────
 # The bug these pin: the override supplied api_base while the agent's DB row
-# still supplied `model`, so a turn picked for a 9Router model posted the local
-# tag `unsloth-mtp-q4km` to http://9router:20128/v1 and got back
+# still supplied `model`, so a turn picked for a OmniRoute model posted the local
+# tag `unsloth-mtp-q4km` to http://omniroute:20128/v1 and got back
 # HTTP 404 "No active credentials for provider: openai".
 
 
@@ -182,7 +182,7 @@ def test_resolve_agent_llm_config_prefers_the_picked_model_over_the_row(agent):
     finally:
         _LLM_OVERRIDE.reset(token)
 
-    assert (api_base, model) == ("http://9router:20128/v1", "kimi/kimi-k3")
+    assert (api_base, model) == ("http://omniroute:20128/v1", "kimi/kimi-k3")
     assert (api_key, provider) == ("rtr_key", "openai_compatible")
     # A router turn is billable and must be gated/costed like one.
     assert is_external is True and provider_id is None
@@ -220,9 +220,9 @@ async def test_delegation_does_not_inherit_the_chats_model(agent):
     with patch.object(VexaAgent, "_respond", fake_respond):
         await agent.respond("привет", session_id="outer", llm_override=ROUTER_OVERRIDE)
 
-    assert seen["outer"] == ("kimi/kimi-k3", "http://9router:20128/v1")
+    assert seen["outer"] == ("kimi/kimi-k3", "http://omniroute:20128/v1")
     assert seen["inner"] == ("qwen-mtp:latest", "http://hermes-llama:8080")
-    assert seen["outer_after"] == ("kimi/kimi-k3", "http://9router:20128/v1")
+    assert seen["outer_after"] == ("kimi/kimi-k3", "http://omniroute:20128/v1")
 
 
 @pytest.mark.asyncio
@@ -231,14 +231,14 @@ async def test_no_llm_override_also_drops_the_orchestration_endpoint(agent):
     from backend.subagents import _active_llm_runtime, use_llm_runtime
 
     async def fake_respond(*args, **kwargs):
-        use_llm_runtime("http://9router:20128/v1", {"provider": "openai_compatible"})
-        assert _active_llm_runtime()[0] == "http://9router:20128/v1"
+        use_llm_runtime("http://omniroute:20128/v1", {"provider": "openai_compatible"})
+        assert _active_llm_runtime()[0] == "http://omniroute:20128/v1"
         with no_llm_override():
             # A delegated sub-agent's helper calls must not land on the
             # endpoint the outer chat happens to be pinned to.
             assert agent.model == "qwen-mtp:latest"
-            assert _active_llm_runtime()[0] != "http://9router:20128/v1"
-        assert _active_llm_runtime()[0] == "http://9router:20128/v1"
+            assert _active_llm_runtime()[0] != "http://omniroute:20128/v1"
+        assert _active_llm_runtime()[0] == "http://omniroute:20128/v1"
         return "ok"
 
     with patch.object(VexaAgent, "_respond", fake_respond):
@@ -251,7 +251,7 @@ def test_configured_accessors_ignore_the_override(agent):
     token = _LLM_OVERRIDE.set(ROUTER_OVERRIDE)
     try:
         # redaction.py's local confirmation pass reads these: it posts to the
-        # local llama.cpp base URL, where a 9Router model id is a 404.
+        # local llama.cpp base URL, where a OmniRoute model id is a 404.
         assert agent.configured_model == "qwen-mtp:latest"
         assert agent.configured_api_base == "http://hermes-llama:8080"
         assert agent.configured_provider == "llamacpp"
@@ -269,7 +269,7 @@ async def test_per_turn_endpoint_does_not_leak_between_turns(agent):
     observed = {}
 
     async def one():
-        use_llm_runtime("http://9router:20128/v1", {"provider": "openai_compatible"})
+        use_llm_runtime("http://omniroute:20128/v1", {"provider": "openai_compatible"})
         await asyncio.sleep(0)
         observed["router-turn"] = _active_llm_runtime()[0]
 
@@ -279,5 +279,5 @@ async def test_per_turn_endpoint_does_not_leak_between_turns(agent):
 
     await asyncio.gather(one(), two())
 
-    assert observed["router-turn"] == "http://9router:20128/v1"
-    assert observed["other-turn"] != "http://9router:20128/v1"
+    assert observed["router-turn"] == "http://omniroute:20128/v1"
+    assert observed["other-turn"] != "http://omniroute:20128/v1"

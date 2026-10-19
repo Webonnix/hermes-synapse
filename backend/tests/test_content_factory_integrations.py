@@ -258,7 +258,7 @@ def approved_llm_binding(db, monkeypatch):
     monkeypatch.setattr("backend.control_plane.create_review_task", lambda **kw: {"id": "task-1"})
 
     proposal = provider_governance.create_binding_proposal(
-        "9router", "openai_compatible", "http://9router:20128/v1", "sk-router",
+        "omniroute", "openai_compatible", "http://omniroute:20128/v1", "sk-router",
         default_model="ag/gemini-3.7-flash-high",
     )
     provider_governance._set_status(proposal["id"], "active")
@@ -408,7 +408,7 @@ def test_onedrive_is_a_selectable_storage_backend(db):
 
 
 # ── A borrowed credential ────────────────────────────────────────────────────
-# The 9Router image provider authenticates with ROUTER_API_KEY, which belongs to
+# The OmniRoute image provider authenticates with ROUTER_API_KEY, which belongs to
 # the AI Router and is shared with agent routing and the tier chain. Clearing it
 # because somebody disconnected image generation would take all of that down.
 

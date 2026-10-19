@@ -300,7 +300,7 @@ run-state). У нас неявных контрактов не меньше, и 
 Чтобы калибровать: наш проект содержательно глубже по продукту — мультиагентность с
 бюджетами и тарифами, per-agent мессенджеры (Telegram/Discord/Matrix/VK/WhatsApp/Slack/email),
 CRM с клиентами и сделками, биллинг и крипто-подписки, content-factory и SMM,
-автономные dev-runs с песочницей, 9Router с fallback-цепочками, RAG/Obsidian,
+автономные dev-runs с песочницей, OmniRoute с fallback-цепочками, RAG/Obsidian,
 governance инструментов и провайдеров. Ничего из этого в hermes-webui нет.
 
 Мы берём у них **не функциональность продукта, а инженерную зрелость носителя**:
@@ -338,4 +338,4 @@ durability, восстановление, наблюдаемость, безоп
   их же `ARCHITECTURE.md` содержит раздел «Known Bugs and Technical Debt».
 - Их `api/config.py`, `api/providers.py`, `api/streaming.py` напрямую импортируют
   внутренности Hermes Agent — они сами признают это нерешённой проблемой границы
-  (issues #1925, #2491). Наш `llm_client.py` + 9Router — уже более чистая граница.
+  (issues #1925, #2491). Наш `llm_client.py` + OmniRoute — уже более чистая граница.

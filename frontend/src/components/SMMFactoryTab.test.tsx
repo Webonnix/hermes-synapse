@@ -66,8 +66,8 @@ const drafts = [{
 }];
 
 const providerBindings = [{
-  id: 'prov-9r', name: '9router', provider_type: 'openai_compatible',
-  api_base: 'http://9router:20128/v1', status: 'active',
+  id: 'prov-omr', name: 'omniroute', provider_type: 'openai_compatible',
+  api_base: 'http://omniroute:20128/v1', status: 'active',
   created_at: '2026-08-09T10:36:20Z', updated_at: '2026-08-09T10:37:16Z',
 }];
 
@@ -412,7 +412,7 @@ describe('SMMFactoryTab', () => {
 
     expect(await screen.findByText('Модель этого канала')).toBeInTheDocument();
     expect(await screen.findByRole('option', { name: 'Как у агента' })).toBeInTheDocument();
-    expect(await screen.findByRole('option', { name: '9router' })).toBeInTheDocument();
+    expect(await screen.findByRole('option', { name: 'omniroute' })).toBeInTheDocument();
   });
 
   it('sends the chosen provider and model when the channel is saved', async () => {
@@ -422,8 +422,8 @@ describe('SMMFactoryTab', () => {
     await screen.findByText(/Моё сообщество \(@mygroup\)/);
     fireEvent.click(screen.getByTitle('Настроить промпт/режим'));
 
-    const providerSelect = await screen.findByRole('option', { name: '9router' });
-    fireEvent.change(providerSelect.closest('select')!, { target: { value: 'prov-9r' } });
+    const providerSelect = await screen.findByRole('option', { name: 'omniroute' });
+    fireEvent.change(providerSelect.closest('select')!, { target: { value: 'prov-omr' } });
 
     // The model list is fetched from that provider, not from a hardcoded table.
     const modelOption = await screen.findByRole('option', { name: 'ag/gemini-pro-agent' });
@@ -438,7 +438,7 @@ describe('SMMFactoryTab', () => {
       );
       expect(patch).toBeTruthy();
       const body = JSON.parse(String((patch![1] as RequestInit).body));
-      expect(body.model_provider).toBe('prov-9r');
+      expect(body.model_provider).toBe('prov-omr');
       expect(body.model).toBe('ag/gemini-pro-agent');
     });
   });

@@ -200,6 +200,12 @@ def _init_schema() -> None:
                 );
                 """
             )
+            # Same one-time cleanup as provider_governance: the retired
+            # router host's compose alias is gone, OmniRoute serves its port.
+            connection.execute(
+                "UPDATE voice_providers SET base_url = REPLACE(base_url, '://9router:', '://omniroute:') "
+                "WHERE base_url LIKE '%://9router:%'"
+            )
         _schema_ready_for = path
 
 

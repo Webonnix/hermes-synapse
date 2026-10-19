@@ -1,4 +1,4 @@
-"""Unit tests for GET /api/router/models (backend/main.py) — the full 9Router
+"""Unit tests for GET /api/router/models (backend/main.py) — the full OmniRoute
 model catalog powering the AI Router tab's "Добавить тир" model picker. Same
 module-level call style as test_router_stats.py.
 """

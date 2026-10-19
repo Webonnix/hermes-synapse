@@ -18,6 +18,8 @@ interface StubOptions {
   onBindSelf?: () => unknown;
   routerModels?: unknown;
   projects?: unknown[];
+  routerMcp?: unknown;
+  onRouterMcpAction?: (action: string) => unknown;
 }
 
 const defaultRouterOverview = {
@@ -33,6 +35,8 @@ function stubFetch(opts: StubOptions) {
     routerOverview = defaultRouterOverview, routerTiers = [], onCreateRouterTier, onBindSelf,
     routerModels = { available: true, models: [], error: null },
     projects = [],
+    routerMcp = { enabled: true, connected: false, url: '', tools: [], available_tools: 0, error: null },
+    onRouterMcpAction,
   } = opts;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
@@ -78,6 +82,12 @@ function stubFetch(opts: StubOptions) {
       return { ok: true, json: async () => result };
     }
     if (path === '/api/router/models') return { ok: true, json: async () => routerModels };
+    if (path === '/api/router/mcp') return { ok: true, json: async () => routerMcp };
+    if (path.startsWith('/api/router/mcp/') && init?.method === 'POST') {
+      const action = path.split('/').pop() || '';
+      const result = onRouterMcpAction ? onRouterMcpAction(action) : routerMcp;
+      return { ok: true, json: async () => result };
+    }
     return { ok: true, json: async () => [] };
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -89,6 +99,37 @@ afterEach(() => {
 });
 
 describe('AgentsAdminTab — AI Router section', () => {
+  it('lists the OmniRoute MCP tools agents got once it is connected', async () => {
+    stubFetch({
+      routerStats: { available: false, reachable: null, model_count: null, provider_count: null, sample_models: [], dashboard_url: '', error: null },
+      routerMcp: {
+        enabled: true, connected: true, url: 'http://omniroute:20128/api/mcp/stream',
+        tools: ['omniroute_check_quota', 'omniroute_get_health'], available_tools: 110, error: null,
+      },
+    });
+    render(<AgentsAdminTab agents={[]} models={[]} fetchAgents={() => {}} t={t} />);
+    fireEvent.click(screen.getByText(t('adminNavRouter')));
+    await waitFor(() => expect(screen.getByText(/подключён · 2 инстр\./)).toBeInTheDocument());
+    expect(screen.getByText('omniroute_check_quota · omniroute_get_health')).toBeInTheDocument();
+  });
+
+  it('enables MCP in OmniRoute through the dashboard session and shows the new state', async () => {
+    const onRouterMcpAction = vi.fn(() => ({
+      enabled: true, connected: true, url: '', tools: ['omniroute_get_health'], available_tools: 110, error: null,
+    }));
+    stubFetch({
+      routerStats: { available: false, reachable: null, model_count: null, provider_count: null, sample_models: [], dashboard_url: '', error: null },
+      sessionStatus: { configured: true, pending_task_id: null },
+      routerMcp: { enabled: true, connected: false, url: '', tools: [], available_tools: 0, error: 'MCP-сервер OmniRoute выключен' },
+      onRouterMcpAction,
+    });
+    render(<AgentsAdminTab agents={[]} models={[]} fetchAgents={() => {}} t={t} />);
+    fireEvent.click(screen.getByText(t('adminNavRouter')));
+    fireEvent.click(await screen.findByText('Включить MCP в OmniRoute'));
+    await waitFor(() => expect(screen.getByText(/подключён · 1 инстр\./)).toBeInTheDocument());
+    expect(onRouterMcpAction).toHaveBeenCalledWith('enable');
+  });
+
   it('shows the not-configured state when ROUTER_API_KEY is missing', async () => {
     stubFetch({
       routerStats: {
@@ -360,24 +401,6 @@ describe('AgentsAdminTab — AI Router section', () => {
     stubFetch({
       routerStats: { available: false, reachable: null, model_count: null, provider_count: null, sample_models: [], dashboard_url: '', error: null },
       providers: [{
-        id: 'prov-9r', name: 'OmniRoute', provider_type: 'openai_compatible',
-        api_base: 'http://9router:20128/v1', status: 'active', created_at: '', updated_at: '',
-      }],
-      sessionStatus: { configured: true, pending_task_id: null },
-      combos: { available: true, error: null, combos: [] },
-      connections: { available: true, error: null, connections: [{ id: 'c1', name: 'DeepSeek API', provider: 'deepseek', testStatus: 'active', isActive: true }] },
-    });
-    render(<AgentsAdminTab agents={[]} models={[]} fetchAgents={() => {}} t={t} />);
-    fireEvent.click(screen.getByText(t('adminNavRouter')));
-    await waitFor(() => expect(screen.getByText('DeepSeek API')).toBeInTheDocument());
-    expect(screen.queryByText('Быстро подключить OmniRoute как провайдера')).not.toBeInTheDocument();
-    expect(screen.getByText(/OmniRoute уже добавлен как провайдер/)).toBeInTheDocument();
-  });
-
-  it('treats a binding on the omniroute service name as the router too, not only the legacy 9router alias', async () => {
-    stubFetch({
-      routerStats: { available: false, reachable: null, model_count: null, provider_count: null, sample_models: [], dashboard_url: '', error: null },
-      providers: [{
         id: 'prov-omr', name: 'OmniRoute', provider_type: 'openai_compatible',
         api_base: 'http://omniroute:20128/v1', status: 'active', created_at: '', updated_at: '',
       }],
@@ -397,7 +420,7 @@ describe('AgentsAdminTab — AI Router section', () => {
       routerStats: { available: false, reachable: null, model_count: null, provider_count: null, sample_models: [], dashboard_url: '', error: null },
       providers: [
         { id: 'prov-1', name: 'deepseek', provider_type: 'openai_compatible', api_base: 'https://api.deepseek.com/v1', status: 'active', created_at: '', updated_at: '' },
-        { id: 'prov-2', name: '9router', provider_type: 'openai_compatible', api_base: 'http://9router:20128/v1', status: 'awaiting_approval', created_at: '', updated_at: '' },
+        { id: 'prov-2', name: 'omniroute', provider_type: 'openai_compatible', api_base: 'http://omniroute:20128/v1', status: 'awaiting_approval', created_at: '', updated_at: '' },
       ],
     });
     render(<AgentsAdminTab agents={[]} models={[]} fetchAgents={() => {}} t={t} />);
@@ -445,7 +468,7 @@ describe('AgentsAdminTab — AI Router section', () => {
     const fetchMock = stubFetch({
       routerStats: { available: false, reachable: null, model_count: null, provider_count: null, sample_models: [], dashboard_url: '', error: null },
       providers: [
-        { id: 'prov-9r', name: '9router', provider_type: 'openai_compatible', api_base: 'http://9router:20128/v1', status: 'active', created_at: '', updated_at: '' },
+        { id: 'prov-omr', name: 'omniroute', provider_type: 'openai_compatible', api_base: 'http://omniroute:20128/v1', status: 'active', created_at: '', updated_at: '' },
         { id: 'prov-ds', name: 'deepseek', provider_type: 'openai_compatible', api_base: 'https://api.deepseek.com/v1', status: 'active', created_at: '', updated_at: '' },
       ],
       routerModels: {
@@ -464,7 +487,7 @@ describe('AgentsAdminTab — AI Router section', () => {
     expect(screen.getByPlaceholderText('deepseek-chat')).toBeInTheDocument();
 
     // Switch to the OmniRoute binding — the field becomes a catalog select.
-    fireEvent.change(screen.getByDisplayValue('deepseek (https://api.deepseek.com/v1)'), { target: { value: 'prov-9r' } });
+    fireEvent.change(screen.getByDisplayValue('deepseek (https://api.deepseek.com/v1)'), { target: { value: 'prov-omr' } });
     expect(screen.queryByPlaceholderText('deepseek-chat')).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getByText('ds/deepseek-chat')).toBeInTheDocument());
     expect(screen.getByText('kimi/kimi-k3')).toBeInTheDocument();
@@ -478,7 +501,7 @@ describe('AgentsAdminTab — AI Router section', () => {
     });
     const [, init] = fetchMock.mock.calls.find(c => c[0] === '/api/router/tiers' && (c[1] as RequestInit)?.method === 'POST')!;
     const body = JSON.parse(String((init as RequestInit).body));
-    expect(body).toMatchObject({ provider_binding_id: 'prov-9r', model_override: 'ds/deepseek-chat' });
+    expect(body).toMatchObject({ provider_binding_id: 'prov-omr', model_override: 'ds/deepseek-chat' });
   });
 
   it('draws a connecting arrow between fallback-chain tier cards and colors the quota bar by status', async () => {

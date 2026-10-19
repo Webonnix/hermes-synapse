@@ -1,5 +1,5 @@
 """Tests for backend/router_session.py — the governed credential + cached
-session for 9Router's dashboard-only API (combos, connected accounts).
+session for OmniRoute's dashboard-only API (combos, connected accounts).
 
 Valkey is faked with a plain in-memory dict rather than a real connection:
 there's no existing Valkey-backed test convention in this suite (see

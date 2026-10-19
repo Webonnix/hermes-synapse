@@ -862,6 +862,7 @@ KNOWN_API_KEYS = [
     {"key_name": "GITEA_TOKEN", "label": "Gitea", "description": "Доступ агентов к dev-репозиторию (skill git_dev).", "category": "Интеграции"},
     {"key_name": "OPENROUTER_API_KEY", "label": "OpenRouter", "description": "Облачный провайдер для основной модели, если выбран OpenRouter.", "category": "LLM"},
     {"key_name": "ROUTER_API_KEY", "label": "AI Router (OmniRoute)", "description": "Ключ из OmniRoute → Dashboard → API Keys. Используется в разделе «AI Router» только для проверки доступности и списка моделей (GET /v1/models) — квоты и usage смотрите в самом OmniRoute. Тот же ключ можно использовать и для провайдер-биндинга агентов через Админку → Providers.", "category": "LLM"},
+    {"key_name": "OMNIROUTE_MCP_API_KEY", "label": "OmniRoute MCP", "description": "Отдельный ключ OmniRoute со scope mcp:connect (Dashboard → API Keys) для подключения его MCP-сервера: агенты получают инструменты роутинга, квот, стоимости и веб-поиска OmniRoute. Если не задан — используется ROUTER_API_KEY.", "category": "LLM"},
     {"key_name": "NOWPAYMENTS_API_KEY", "label": "NOWPayments (API)", "description": "Выставление криптосчетов за подписки на ботов.", "category": "Биллинг"},
     {"key_name": "NOWPAYMENTS_IPN_SECRET", "label": "NOWPayments (IPN)", "description": "Секрет для проверки подписи callback-ов об оплате. Без него платежи не подтверждаются.", "category": "Биллинг"},
 ]
@@ -890,6 +891,7 @@ async def save_api_key(update: ApiKeyUpdate):
     if not update.value.strip():
         raise HTTPException(status_code=400, detail="Value is required.")
     db.set_api_key(update.key_name, update.value.strip())
+    await _reconnect_omniroute_mcp_if(update.key_name)
     return {"status": "success"}
 
 @app.delete("/api/settings/api-keys/{key_name}")
@@ -898,7 +900,16 @@ async def remove_api_key(key_name: str):
     if key_name not in _KNOWN_API_KEY_NAMES:
         raise HTTPException(status_code=400, detail=f"Unknown key: {key_name}")
     db.delete_api_key(key_name)
+    await _reconnect_omniroute_mcp_if(key_name)
     return {"status": "success"}
+
+
+async def _reconnect_omniroute_mcp_if(key_name: str) -> None:
+    """A changed OmniRoute key takes effect for its MCP tools right away."""
+    if key_name in {"OMNIROUTE_MCP_API_KEY", "ROUTER_API_KEY"}:
+        from backend import omniroute_mcp
+
+        await omniroute_mcp.connect()
 
 @app.get("/api/config")
 async def get_config():
@@ -1986,6 +1997,20 @@ async def get_mcp_servers():
             "connected": name in mcp_clients,
             "tools_count": len(mcp_clients[name].tools) if name in mcp_clients else 0,
         })
+    from backend import omniroute_mcp
+    omni = omniroute_mcp.status()
+    result.append({
+        "name": omniroute_mcp.SERVER_NAME,
+        "command": "",
+        "args": [],
+        "env": {},
+        "url": omni["url"],
+        "transport": "streamable-http",
+        "builtin": True,
+        "connected": omni["connected"],
+        "tools_count": len(omni["tools"]),
+        "error": omni["error"],
+    })
     return result
 
 @app.post("/api/mcp/servers")
@@ -2012,7 +2037,10 @@ async def add_mcp_server(server: MCPServerConfig):
 async def delete_mcp_server(name: str):
     """Removes an MCP server from config and disconnects it."""
     import json, os
-    from backend.mcp_client import mcp_clients, mcp_tool_to_server
+    from backend.mcp_client import mcp_clients, unregister_client_tools
+    from backend import omniroute_mcp
+    if name == omniroute_mcp.SERVER_NAME:
+        raise HTTPException(status_code=400, detail="OmniRoute MCP is built in — disable it with OMNIROUTE_MCP_ENABLED=false.")
     config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "mcp_config.json")
     if os.path.exists(config_path):
         with open(config_path, "r") as f:
@@ -2023,10 +2051,7 @@ async def delete_mcp_server(name: str):
     if name in mcp_clients:
         await mcp_clients[name].shutdown()
         del mcp_clients[name]
-        # Remove its tools from registry
-        dead = [t for t, s in mcp_tool_to_server.items() if s == name]
-        for t in dead:
-            mcp_tool_to_server.pop(t, None)
+    unregister_client_tools(name)
     return {"status": "success", "name": name}
 
 @app.get("/api/providers")
@@ -2280,6 +2305,33 @@ async def chat_models_api(refresh: bool = False):
     )
 
 
+@app.get("/api/router/mcp")
+async def router_mcp_status_api():
+    """OmniRoute's built-in MCP server as seen by Hermes (backend/omniroute_mcp.py):
+    connected or not, which curated tools agents got, and why not if it failed."""
+    from backend import omniroute_mcp
+
+    return omniroute_mcp.status()
+
+
+@app.post("/api/router/mcp/reconnect")
+async def router_mcp_reconnect_api():
+    """Re-run the OmniRoute MCP handshake — after saving a new key or enabling
+    MCP in OmniRoute's own dashboard."""
+    from backend import omniroute_mcp
+
+    return await omniroute_mcp.connect()
+
+
+@app.post("/api/router/mcp/enable")
+async def router_mcp_enable_api():
+    """Switch OmniRoute's MCP server on (streamable-http transport) through the
+    governed dashboard session, then connect to it."""
+    from backend import omniroute_mcp
+
+    return await omniroute_mcp.enable_on_router()
+
+
 class RouterSessionCredentialRequest(BaseModel):
     password: str
 
@@ -2427,9 +2479,7 @@ async def router_bind_self_api():
         raise HTTPException(status_code=400, detail="ROUTER_API_KEY not configured (Settings -> API Keys -> AI Router).")
 
     existing = await asyncio.to_thread(list_bindings)
-    # "9router" is the compose alias bindings created before the OmniRoute
-    # switch still point at; both names reach the same sidecar.
-    if any(host in (b.get("api_base") or "") for b in existing for host in ("omniroute", "9router")):
+    if any("omniroute" in (b.get("api_base") or "") for b in existing):
         raise HTTPException(status_code=409, detail="A provider binding for OmniRoute already exists.")
 
     router_api_base = os.getenv("ROUTER_API_BASE", "http://omniroute:20128").rstrip("/") + "/v1"

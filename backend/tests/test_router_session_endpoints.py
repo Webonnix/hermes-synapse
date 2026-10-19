@@ -121,18 +121,6 @@ async def test_bind_self_rejects_when_no_router_api_key():
 
 
 @pytest.mark.asyncio
-async def test_bind_self_rejects_duplicate_binding():
-    from fastapi import HTTPException
-
-    with patch("backend.database.get_api_key", return_value="router-key"), \
-         patch("backend.provider_governance.list_bindings",
-               return_value=[{"id": "b1", "name": "9Router", "api_base": "http://9router:20128/v1"}]):
-        with pytest.raises(HTTPException) as exc_info:
-            await main.router_bind_self_api()
-    assert exc_info.value.status_code == 409
-
-
-@pytest.mark.asyncio
 async def test_bind_self_creates_proposal_with_stored_key():
     with patch("backend.database.get_api_key", return_value="router-key"), \
          patch("backend.provider_governance.list_bindings", return_value=[]), \
@@ -146,9 +134,6 @@ async def test_bind_self_creates_proposal_with_stored_key():
 
 @pytest.mark.asyncio
 async def test_bind_self_rejects_duplicate_omniroute_binding():
-    """Bindings made after the OmniRoute switch point at the omniroute service
-    name, not the legacy 9router alias; checking only "9router" let bind-self
-    create a second binding for the same sidecar."""
     from fastapi import HTTPException
 
     with patch("backend.database.get_api_key", return_value="router-key"), \
@@ -160,25 +145,15 @@ async def test_bind_self_rejects_duplicate_omniroute_binding():
 
 
 def test_validate_binding_config_accepts_the_omniroute_sidecar_hostname():
-    """Same guard as the 9router case below, for the service name the sidecar
-    has had since it was replaced by OmniRoute."""
+    """Regression test: the SSRF/HTTPS guard shared with MCP server validation
+    (backend/mcp_governance.py's _validate_url) must treat the compose service
+    name as private, or both the manual 'Add provider' form and POST
+    /api/router/bind-self fail with 'must use HTTPS outside the private
+    network' for the exact URL the AI Router tab tells the user to use."""
     from backend.provider_governance import validate_binding_config
 
     result = validate_binding_config("omniroute", "openai_compatible", "http://omniroute:20128/v1")
     assert result["api_base"] == "http://omniroute:20128/v1"
-
-
-def test_validate_binding_config_accepts_the_9router_sidecar_hostname():
-    """Regression test: the SSRF/HTTPS guard shared with MCP server validation
-    (backend/mcp_governance.py's _validate_url) didn't recognize the compose
-    service name '9router' as private, so both the manual 'Add provider' form
-    and POST /api/router/bind-self failed with 'must use HTTPS outside the
-    private network' for the exact http://9router:20128/v1 URL the AI Router
-    tab's own copy tells the user to use."""
-    from backend.provider_governance import validate_binding_config
-
-    result = validate_binding_config("9router", "openai_compatible", "http://9router:20128/v1")
-    assert result["api_base"] == "http://9router:20128/v1"
 
 
 def test_validate_binding_config_still_rejects_plain_http_for_other_hosts():

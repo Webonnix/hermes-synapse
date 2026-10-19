@@ -117,7 +117,7 @@ async def test_router_entry_keeps_the_namespaced_id_but_shows_the_short_name():
     result = await _catalogue()
 
     kimi = next(m for m in result["router"] if m["id"] == "kimi/kimi-k3")
-    # The id must survive verbatim — 9Router 404s on an unprefixed model.
+    # The id must survive verbatim — OmniRoute 404s on an unprefixed model.
     assert kimi["id"] == "kimi/kimi-k3"
     assert kimi["name"] == "kimi-k3"
     assert kimi["owned_by"] == "kimi"
@@ -181,11 +181,11 @@ async def test_local_pick_resolves_to_the_llamacpp_endpoint():
 
 @pytest.mark.asyncio
 async def test_router_pick_resolves_to_the_sidecar_with_its_own_key(monkeypatch):
-    monkeypatch.setenv("ROUTER_API_BASE", "http://9router:20128")
+    monkeypatch.setenv("ROUTER_API_BASE", "http://omniroute:20128")
 
     resolved = await _resolve("router", "kimi/kimi-k3")
 
-    assert resolved["api_base"] == "http://9router:20128/v1"
+    assert resolved["api_base"] == "http://omniroute:20128/v1"
     assert resolved["api_key"] == "rtr_key"
     assert resolved["provider"] == "openai_compatible"
     assert resolved["model"] == "kimi/kimi-k3"

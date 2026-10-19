@@ -21,7 +21,7 @@ const llm = (overrides: Partial<CFLLMEndpoints> = {}): CFLLMEndpoints => ({
     default_model: 'qwen3:8b', status: 'active', local: true,
   },
   bindings: [{
-    id: 'prov-9r', name: '9router', api_base: 'http://9router:20128/v1',
+    id: 'prov-omr', name: 'omniroute', api_base: 'http://omniroute:20128/v1',
     default_model: 'ag/gemini-3.7-flash-high', status: 'active', local: false,
   }],
   default: 'local-llm',
@@ -52,7 +52,7 @@ describe('ProvidersPanel — external language models', () => {
       onSetDefault={onSetDefault} onUpdateLlm={noop} onLoadLlmModels={async () => []} />);
 
     fireEvent.click(screen.getByRole('button', { name: /По умолчанию/ }));
-    await waitFor(() => expect(onSetDefault).toHaveBeenCalledWith('LLM', 'prov-9r'));
+    await waitFor(() => expect(onSetDefault).toHaveBeenCalledWith('LLM', 'prov-omr'));
   });
 
   it('does not offer a provider still awaiting approval as the default', () => {
@@ -99,6 +99,6 @@ describe('ProvidersPanel — external language models', () => {
     fireEvent.change(screen.getByDisplayValue('ag/gemini-3.7-flash-high'),
       { target: { value: 'ag/gemini-pro-agent' } });
     fireEvent.click(save);
-    await waitFor(() => expect(onUpdateLlm).toHaveBeenCalledWith('prov-9r', 'ag/gemini-pro-agent'));
+    await waitFor(() => expect(onUpdateLlm).toHaveBeenCalledWith('prov-omr', 'ag/gemini-pro-agent'));
   });
 });

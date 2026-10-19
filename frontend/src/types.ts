@@ -371,11 +371,11 @@ export interface ProviderBinding {
 // Read-only reachability/catalog snapshot from the optional OmniRoute sidecar
 // (GET /api/router/stats) — model_count/provider_count/sample_models come
 // from GET /v1/models, the one OmniRoute endpoint that's both documented and
-// confirmed working with a Bearer API key. Combos and 9Router's own
+// confirmed working with a Bearer API key. Combos and OmniRoute's own
 // connected accounts are read separately, through a backend-held dashboard
 // session — see RouterSessionStatus/RouterCombosResponse/
 // RouterConnectionsResponse below. Quota/usage numbers genuinely have no API
-// in this 9Router version (confirmed: every plausible path 404s regardless
+// in this OmniRoute version (confirmed: every plausible path 404s regardless
 // of auth) — `dashboard_url` is the only place those are visible.
 export interface RouterStats {
   available: boolean;
@@ -386,6 +386,19 @@ export interface RouterStats {
   providers?: ProviderBinding[];
   dashboard_url: string;
   error: string | null;
+}
+
+// GET /api/router/mcp (and POST .../reconnect, .../enable) — OmniRoute's
+// built-in MCP server as connected by backend/omniroute_mcp.py. `tools` is the
+// curated subset agents actually get; `available_tools` is what OmniRoute offered.
+export interface RouterMcpStatus {
+  enabled: boolean;
+  connected: boolean;
+  url: string;
+  tools: string[];
+  available_tools: number;
+  error: string | null;
+  router_error?: string;
 }
 
 // GET /api/router/session-status
@@ -449,9 +462,9 @@ export interface RouterCombosResponse {
 export interface RouterConnection {
   name?: string;
   id?: string;
-  // 9Router's actual GET /api/providers response (confirmed live) uses
+  // OmniRoute's actual GET /api/providers response (confirmed live) uses
   // `provider`/`testStatus`/`isActive` — `type`/`status` are kept only as a
-  // fallback shape in case a future 9Router version renames them back.
+  // fallback shape in case a future OmniRoute version renames them back.
   provider?: string;
   type?: string;
   testStatus?: string;

@@ -68,7 +68,7 @@ def test_unsafe_base_urls_are_refused(inbox_env, url):
         _provider(base=url)
 
 
-@pytest.mark.parametrize("url", ["https://api.elevenlabs.io", "http://10.0.0.5:8700", "http://9router:20128/v1"])
+@pytest.mark.parametrize("url", ["https://api.elevenlabs.io", "http://10.0.0.5:8700", "http://omniroute:20128/v1"])
 def test_https_and_private_self_hosted_urls_are_accepted(inbox_env, url):
     assert _provider(base=url)["base_url"] == url
 

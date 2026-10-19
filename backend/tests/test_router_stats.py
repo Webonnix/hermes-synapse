@@ -1,11 +1,11 @@
 """Unit tests for GET /api/router/stats (backend/main.py), the read-only
-reachability/catalog check for the optional 9Router sidecar. Called directly
+reachability/catalog check for the optional OmniRoute sidecar. Called directly
 as a plain async function — the route carries no parameters, so no FastAPI
 test harness is needed, matching this codebase's module-level testing style.
 
 Note: this checks GET /v1/models (documented, Bearer-key auth, confirmed
 working against a real running instance) rather than /api/quota or
-/api/usage — those are advertised in 9Router's own docs but 404 against the
+/api/usage — those are advertised in OmniRoute's own docs but 404 against the
 actual shipped API, and /api/providers / /api/combos exist but only accept a
 dashboard session cookie, not an API key. See router_stats_api's docstring.
 """
@@ -65,8 +65,8 @@ async def test_full_success_reports_model_and_provider_counts():
             {"id": "glm/glm-5", "object": "model", "owned_by": "glm"},
         ],
     }
-    fake_binding = {"id": "prov-1", "name": "9router-main", "provider_type": "openai_compatible",
-                    "api_base": "http://9router:20128/v1", "status": "active"}
+    fake_binding = {"id": "prov-1", "name": "omniroute-main", "provider_type": "openai_compatible",
+                    "api_base": "http://omniroute:20128/v1", "status": "active"}
     with patch("backend.database.get_api_key", return_value="rtr_key"), \
          patch("httpx.AsyncClient.get", new=AsyncMock(return_value=_resp(200, models))), \
          patch("backend.provider_governance.list_bindings", return_value=[fake_binding]):

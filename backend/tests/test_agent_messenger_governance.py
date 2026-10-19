@@ -261,9 +261,9 @@ async def test_an_active_provider_binding_is_accepted(messenger_db, monkeypatch)
         "agent-1", "123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     )
     updated = await agent_messenger_governance.update_binding_settings(
-        proposal["id"], model_provider_override="prov-9router", model_override="ag/gemini-pro-agent",
+        proposal["id"], model_provider_override="prov-omniroute", model_override="ag/gemini-pro-agent",
     )
-    assert updated["model_provider_override"] == "prov-9router"
+    assert updated["model_provider_override"] == "prov-omniroute"
     assert updated["model_override"] == "ag/gemini-pro-agent"
 
 

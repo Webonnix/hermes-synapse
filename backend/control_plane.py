@@ -165,6 +165,12 @@ def _safe_json(value: Any) -> str:
 def classify_tool_risk(tool_name: str) -> str:
     if tool_name.startswith(("ctrader_", "bcm_")):
         return "R4"
+    if tool_name.startswith("omniroute_"):
+        # Curated OmniRoute MCP tools carry their own tiers; anything else the
+        # server might add later stays at the R4 default.
+        from backend.omniroute_mcp import TOOL_RISKS as OMNIROUTE_TOOL_RISKS
+
+        return OMNIROUTE_TOOL_RISKS.get(tool_name, "R4")
     return TOOL_RISKS.get(tool_name, "R4")
 
 

@@ -10,7 +10,7 @@ that data without a human re-logging in on every request.
 Confirmed against a live instance before building this: GET /api/combos and
 GET /api/providers return 200 with a valid session cookie.
 
-Re-confirmed against 9Router 0.5.59 (2026-09-02), because half of what this
+Re-confirmed against the live router (2026-09-02), because half of what this
 docstring used to claim had gone stale and a stale "that endpoint does not
 exist" is worse than no note at all:
 
@@ -61,7 +61,7 @@ _PENDING_TTL_SECONDS = 24 * 60 * 60
 # session that's valid when checked but expired by the time it reaches
 # OmniRoute.
 _REFRESH_SKEW_SECONDS = 60
-# 9Router locks the password out after repeated failed attempts (observed:
+# The router locks the password out after repeated failed attempts (observed:
 # 5) — don't retry a failing login on every single incoming request.
 _LOGIN_RETRY_COOLDOWN_SECONDS = 30
 

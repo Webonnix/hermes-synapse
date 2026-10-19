@@ -75,11 +75,11 @@ def _validate_url(value: str, field: str) -> str:
     if address and (address.is_link_local or address.is_multicast or address.is_unspecified):
         raise ValueError(f"{field} points to a blocked network range")
     if parsed.scheme == "http":
-        # "omniroute" (and its legacy alias "9router") is this deployment's own
-        # sidecar service name on the compose network (see
-        # backend/router_session.py) — not attacker-suppliable like an
-        # arbitrary hostname would be, so it's as trusted as localhost here.
-        private_http = host in {"localhost", "host.docker.internal", "omniroute", "9router"} or bool(
+        # "omniroute" is this deployment's own sidecar service name on the
+        # compose network (see backend/router_session.py) — not
+        # attacker-suppliable like an arbitrary hostname would be, so it's as
+        # trusted as localhost here.
+        private_http = host in {"localhost", "host.docker.internal", "omniroute"} or bool(
             address and (address.is_private or address.is_loopback)
         )
         if not private_http:
@@ -96,6 +96,8 @@ def validate_server_config(name: str, config: dict[str, Any]) -> dict[str, Any]:
     clean_name = str(name).strip().lower()
     if not _NAME.fullmatch(clean_name):
         raise ValueError("MCP name must contain only lowercase letters, digits, underscores or hyphens")
+    if clean_name == "omniroute":
+        raise ValueError("MCP name 'omniroute' is reserved for the built-in OmniRoute connection")
     command = str(config.get("command", "")).strip()
     args = config.get("args") or []
     env = config.get("env") or {}

@@ -7,7 +7,7 @@ import { AgentLearningPanel } from './AgentLearningPanel';
 import { VoiceProvidersPanel } from './smm/dialogs/VoiceProvidersPanel';
 import { RouteTargetsPanel } from './smm/dialogs/RouteTargetsPanel';
 import type {
-  AgentBudgetStatus, AgentModel, AgentTelegramBinding, AgentTier, Project, ProviderBinding, RouterStats,
+  AgentBudgetStatus, AgentModel, AgentTelegramBinding, AgentTier, Project, ProviderBinding, RouterMcpStatus, RouterStats,
   RouterSessionStatus, RouterCombosResponse, RouterConnection, RouterConnectionsResponse, RouterModel, RouterTier, RouterOverview,
 } from '../types';
 import { styles } from '../styles';
@@ -69,18 +69,16 @@ function formatResetIn(resetsAt: string | null): string {
   return minutes ? `${hours}ч ${minutes}м` : `${hours}ч`;
 }
 
-// Whether a provider binding routes through the AI Router sidecar. Bindings
-// made before the OmniRoute switch still point at its legacy compose alias
-// `9router`; newer ones use the `omniroute` service name. Matching only one
-// would hide the router's model catalog for the other half.
+// Whether a provider binding routes through the AI Router sidecar (the
+// `omniroute` compose service).
 function isRouterApiBase(apiBase: string | undefined | null): boolean {
-  return !!apiBase && (apiBase.includes('omniroute') || apiBase.includes('9router'));
+  return !!apiBase && apiBase.includes('omniroute');
 }
 
 // OmniRoute's own GET /api/providers response uses `provider`/`testStatus`/
 // `isActive`, not the `type`/`status` fields this file's own ProviderBinding
 // uses — read both shapes so a real connection (kimi, deepseek, ...) renders
-// correctly regardless of which field name a given 9Router version sends.
+// correctly regardless of which field name a given OmniRoute version sends.
 function connectionType(conn: RouterConnection): string {
   return String(conn.provider ?? conn.type ?? '');
 }
@@ -160,6 +158,8 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
   const [telegramNotice, setTelegramNotice] = useState('');
 
   const [routerStats, setRouterStats] = useState<RouterStats | null>(null);
+  const [routerMcp, setRouterMcp] = useState<RouterMcpStatus | null>(null);
+  const [routerMcpBusy, setRouterMcpBusy] = useState(false);
   const [routerLoading, setRouterLoading] = useState(false);
 
   const [routerSession, setRouterSession] = useState<RouterSessionStatus | null>(null);
@@ -228,6 +228,22 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
       .then(data => setRouterStats(data))
       .catch(() => setRouterStats(null))
       .finally(() => setRouterLoading(false));
+  };
+
+  const fetchRouterMcp = () => {
+    fetch('/api/router/mcp', { headers: authHeaders() })
+      .then(response => (response.ok ? response.json() : null))
+      .then(setRouterMcp)
+      .catch(() => setRouterMcp(null));
+  };
+
+  const runRouterMcpAction = (action: 'reconnect' | 'enable') => {
+    setRouterMcpBusy(true);
+    fetch(`/api/router/mcp/${action}`, { method: 'POST', headers: authHeaders() })
+      .then(response => (response.ok ? response.json() : null))
+      .then(data => { if (data) setRouterMcp(data); })
+      .catch(() => {})
+      .finally(() => setRouterMcpBusy(false));
   };
 
   const fetchRouterSession = () => {
@@ -389,6 +405,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
   useEffect(() => {
     if (section === 'router' && !routerStats && !routerLoading) fetchRouterStats();
     if (section === 'router' && !routerSession) fetchRouterSession();
+    if (section === 'router' && !routerMcp) fetchRouterMcp();
     if (section === 'router' && !routerOverview) fetchRouterOverview();
     // The tier chain and the model catalog are also what the agent form's
     // routing picker and model dropdown are built from, so they load on the
@@ -1352,7 +1369,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
             <div style={{ display: 'flex', gap: 8 }}>
               <button
                 type="button" className="icon-btn" title="Обновить"
-                onClick={() => { fetchRouterOverview(); fetchRouterTierList(); fetchRouterStats(); fetchProviders(); fetchRouterModels(); }}
+                onClick={() => { fetchRouterOverview(); fetchRouterTierList(); fetchRouterStats(); fetchProviders(); fetchRouterModels(); fetchRouterMcp(); }}
                 disabled={routerLoading}
               >
                 <RefreshCw size={14} />
@@ -1680,6 +1697,44 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
           ) : (
             <div className="admin-empty">
               {routerConnections?.error || 'Аккаунты ещё не подключены — сделайте это в OmniRoute (Dashboard → Providers).'}
+            </div>
+          )}
+
+          <div className="admin-section-head" style={{ marginTop: 22 }}>
+            <div>
+              <h3 style={{ fontSize: '0.9rem' }}>MCP-сервер OmniRoute</h3>
+              <div className="admin-item-meta">
+                Инструменты роутера для агентов: здоровье, квоты, стоимость, комбо, веб-поиск. Изменение роутинга — только для Vexa и с подтверждением.
+              </div>
+            </div>
+            {routerMcp && (
+              <span className={`admin-status-chip ${routerMcp.connected ? 'is-active' : 'is-inactive'}`}>
+                <i className="dot" />{routerMcp.connected ? `подключён · ${routerMcp.tools.length} инстр.` : 'не подключён'}
+              </span>
+            )}
+          </div>
+          {!routerMcp && <div className="admin-empty">Статус MCP недоступен.</div>}
+          {routerMcp && !routerMcp.connected && (
+            <div className="admin-empty">
+              {routerMcp.error || 'MCP-сервер OmniRoute не подключён.'}
+              {routerMcp.router_error && <div style={{ marginTop: 8, color: 'var(--danger)', fontSize: '0.78rem' }}>{routerMcp.router_error}</div>}
+            </div>
+          )}
+          {routerMcp?.connected && routerMcp.tools.length > 0 && (
+            <div className="admin-item-meta" style={{ fontFamily: 'var(--font-mono)', fontSize: '0.74rem', marginTop: 8 }}>
+              {routerMcp.tools.join(' · ')}
+            </div>
+          )}
+          {routerMcp && routerMcp.enabled && (
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
+              <button type="button" className="btn-ghost" onClick={() => runRouterMcpAction('reconnect')} disabled={routerMcpBusy}>
+                <RefreshCw size={14} /><span>{routerMcpBusy ? '...' : 'Переподключить'}</span>
+              </button>
+              {!routerMcp.connected && routerSession?.configured && (
+                <button type="button" className="btn-primary" onClick={() => runRouterMcpAction('enable')} disabled={routerMcpBusy}>
+                  <Zap size={14} /><span>Включить MCP в OmniRoute</span>
+                </button>
+              )}
             </div>
           )}
 
