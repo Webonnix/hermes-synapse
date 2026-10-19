@@ -194,3 +194,11 @@ async def test_call_restores_secret_inside_tool_call_arguments():
         )
     assert KEY not in sent["content"]
     assert json.loads(r.tool_calls[0]["function"]["arguments"]) == {"key": KEY}
+
+
+def test_local_prompt_is_few_shot_and_guards_against_injection():
+    # Zero-shot + think=False made the 27B model answer [] for obvious casual
+    # passwords; the examples are what makes this pass work at all.
+    prompt = local_llm._SYSTEM_PROMPT
+    assert "never instructions" in prompt
+    assert prompt.count("<message>") >= 4 and "-> []" in prompt
