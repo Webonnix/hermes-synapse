@@ -113,6 +113,23 @@ describe('App Component', () => {
       expect(screen.getByText('Model & Prompt')).toBeInTheDocument();
     });
   });
+
+  it('opens the GPU server metrics from the sidebar', async () => {
+    localStorage.setItem('vexa_auth_token', 'mock_token');
+    localStorage.setItem('hermes_language', 'en');
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve([]),
+    })));
+
+    render(<App />);
+
+    // The tab existed for a while with no sidebar entry, reachable only by URL.
+    const metricsBtn = await screen.findByRole('button', { name: 'Metrics' });
+    fireEvent.click(metricsBtn);
+
+    expect(await screen.findByText('GPU server metrics')).toBeInTheDocument();
+  });
 });
 
 describe('OTP recovery', () => {

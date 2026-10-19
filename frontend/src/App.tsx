@@ -30,6 +30,7 @@ import {
   Megaphone,
   Shuffle,
   ExternalLink,
+  BarChart3,
 } from 'lucide-react';
 
 import type { AppSettings, ChatMessage, ChatSession, DecisionLog, ActivityLog, SystemConfig, AgentModel, Project, SystemStats } from './types';
@@ -2896,6 +2897,15 @@ export default function App() {
           >
             <ShieldCheck size={18} />
             <span>{t('navProcesses')}</span>
+          </button>
+
+          <button
+            style={navStyle('metrics')}
+            onClick={() => { setActiveTab('metrics'); setSidebarOpen(false); }}
+            title={t('navMetrics')}
+          >
+            <BarChart3 size={18} />
+            <span>{t('navMetrics')}</span>
           </button>
 
           <button
