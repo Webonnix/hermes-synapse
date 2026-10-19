@@ -31,6 +31,8 @@ export interface ChatMessage {
   run_id?: string;
   streaming?: boolean;
   thinking?: string;
+  /** Tool the agent is running mid-stream (e.g. `web_search`), so the chat can say what it is doing. */
+  activity?: string;
 }
 
 export interface DecisionLog {

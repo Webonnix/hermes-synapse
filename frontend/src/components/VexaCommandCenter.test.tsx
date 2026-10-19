@@ -63,7 +63,8 @@ describe('VexaCommandCenter', () => {
     });
 
     expect(screen.getByText('Готова к команде')).toBeInTheDocument();
-    expect(screen.getByText('Проверка завершена. Ошибок нет.')).toBeInTheDocument();
+    // Replies render as markdown, so the bold lead-in is its own <strong>.
+    expect(screen.getByText('Проверка завершена.').tagName).toBe('STRONG');
     fireEvent.change(screen.getByLabelText('Скажите или напишите задачу для Vexa'), {
       target: { value: 'Запусти тесты' },
     });

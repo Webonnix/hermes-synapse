@@ -595,8 +595,10 @@ export function VexaCommandCenter({
           <ConversationCard
             copy={copy}
             messages={messages}
-            disabled={!isConnected || isGenerating || emergencyStopped}
+            disabled={!isConnected || emergencyStopped}
+            generating={isGenerating}
             onSend={submitCommand}
+            onStop={onStop}
             onOpenFullChat={() => onOpenAgentChat()}
           />
           <SystemInsightsCard copy={copy} metrics={telemetry.insights} />

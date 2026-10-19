@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { LayoutGrid, MoreHorizontal, Send } from 'lucide-react';
+import { ArrowDown, ArrowUp, Check, Copy, LayoutGrid, MoreHorizontal, Square } from 'lucide-react';
 import type { AgentModel, ChatMessage } from '../../types';
 import type { VexaCopy } from './vexaCopy';
 import type { InsightMetric, LineChartWidget } from './vexaDashboardTypes';
 import { parseLineChartWidget } from './vexaDashboardTypes';
 import { MessageLineChart } from './VexaVisuals';
+import { useSmoothText } from './useSmoothText';
+import { Markdown } from '../simple/Markdown';
 
 /** Right column: agent circuit, conversation, system insights. */
 
@@ -77,19 +79,6 @@ function messageTime(message: ChatMessage): string {
   return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
 
-/** Strips markdown down to readable plain text for the compact conversation panel. */
-function plainText(value: string): string {
-  return value
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/!\[[^\]]*]\([^)]*\)/g, ' ')
-    .replace(/\[([^\]]+)]\([^)]*\)/g, '$1')
-    .replace(/^[>#\s]*/gm, '')
-    .replace(/\*\*|__|\*|_/g, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
 function messageWidget(message: ChatMessage): LineChartWidget | null {
   const raw = message as unknown as Record<string, unknown>;
   const widgets = raw.widgets;
@@ -101,36 +90,164 @@ function messageWidget(message: ChatMessage): LineChartWidget | null {
   return null;
 }
 
+/** What the "typing" line says while the reply has no text yet: the tool at work, else thinking. */
+function activityLabel(copy: VexaCopy, message: ChatMessage | null): string {
+  const tool = (message?.activity || '').toLowerCase();
+  if (tool) {
+    if (tool.includes('web_search') || tool.includes('search_web')) return copy.toolWebSearch;
+    if (tool.includes('fetch') || tool.includes('browse') || tool.includes('browser')) return copy.toolWebFetch;
+    if (tool.includes('calendar')) return copy.toolCalendar;
+    if (tool.includes('memory')) return copy.toolMemory;
+    if (tool.includes('obsidian') || tool.includes('note')) return copy.toolNotes;
+    if (tool.includes('command') || tool.startsWith('git_') || tool.startsWith('dev_')) return copy.toolCommand;
+    if (tool.includes('image')) return copy.toolImage;
+    if (tool.includes('market') || tool.includes('price')) return copy.toolMarket;
+    if (tool.includes('weather')) return copy.toolWeather;
+    return `${copy.vexaUsingTool}: ${message?.activity}`;
+  }
+  if (message?.thinking) return copy.vexaReasoning;
+  return copy.vexaTyping;
+}
+
+function TypingIndicator({ label }: { label: string }) {
+  return (
+    <span className="vx-typing" role="status" aria-live="polite">
+      <span className="vx-typing-dots" aria-hidden="true"><i /><i /><i /></span>
+      <span className="vx-typing-label">{label}</span>
+    </span>
+  );
+}
+
+function CopyButton({ copy, text }: { copy: VexaCopy; text: string }) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch { /* clipboard blocked (insecure origin) — the text is still selectable */ }
+  };
+  return (
+    <button type="button" className="vx-msg-action" onClick={onCopy} title={copied ? copy.copied : copy.copyMessage} aria-label={copy.copyMessage}>
+      {copied ? <Check size={12} /> : <Copy size={12} />}
+    </button>
+  );
+}
+
+interface MessageBubbleProps {
+  copy: VexaCopy;
+  message: ChatMessage;
+}
+
+function MessageBubble({ copy, message }: MessageBubbleProps) {
+  const isAssistant = message.role === 'assistant';
+  const streaming = Boolean(message.streaming);
+  const smooth = useSmoothText(message.content || '', isAssistant && streaming);
+  const typing = smooth.length < (message.content || '').length;
+  const widget = isAssistant ? messageWidget(message) : null;
+  const waiting = isAssistant && streaming && !smooth;
+
+  return (
+    <div className={`vx-message is-${message.role}${streaming || typing ? ' is-live' : ''}`}>
+      {waiting
+        ? <TypingIndicator label={activityLabel(copy, message)} />
+        : isAssistant
+          ? (
+            <div className="vx-md">
+              <Markdown text={smooth} />
+              {(streaming || typing) && <i className="vx-cursor" aria-hidden="true" />}
+            </div>
+          )
+          : <p>{message.content}</p>}
+      {isAssistant && streaming && smooth && message.activity && (
+        <TypingIndicator label={activityLabel(copy, message)} />
+      )}
+      {widget && <MessageLineChart widget={widget} />}
+      <footer>
+        {isAssistant && !streaming && message.content && <CopyButton copy={copy} text={message.content} />}
+        <time>{messageTime(message)}</time>
+      </footer>
+    </div>
+  );
+}
+
 interface ConversationProps {
   copy: VexaCopy;
   messages: ChatMessage[];
+  /** No connection or an emergency stop: nothing can be sent at all. */
   disabled: boolean;
+  /** A reply is in progress — the composer stays editable, but send turns into stop. */
+  generating: boolean;
   onSend: (text: string) => boolean;
+  onStop: () => void;
   onOpenFullChat: () => void;
 }
 
-export function ConversationCard({ copy, messages, disabled, onSend, onOpenFullChat }: ConversationProps) {
+/** Distance from the bottom (px) that still counts as "following the conversation". */
+const FOLLOW_THRESHOLD = 90;
+
+export function ConversationCard({ copy, messages, disabled, generating, onSend, onStop, onOpenFullChat }: ConversationProps) {
   const [draft, setDraft] = useState('');
+  const [following, setFollowing] = useState(true);
   const listRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const followingRef = useRef(true);
 
   const visible = useMemo(
     () => messages.filter(message => message.role === 'user' || message.role === 'assistant').slice(-40),
     [messages],
   );
 
-  // Streaming appends to the last message; scrolling on every token would fight the user,
-  // so only follow along when they are already at the bottom.
-  useEffect(() => {
+  const last = visible[visible.length - 1] ?? null;
+  // Between sending and the first stream frame there is no assistant bubble yet; show a
+  // standalone "thinking" line so the reply visibly starts the moment Enter is pressed.
+  const pendingReply = generating && !(last?.role === 'assistant' && last.streaming);
+
+  const scrollToBottom = (smooth: boolean) => {
     const list = listRef.current;
     if (!list) return;
-    const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 90;
-    if (atBottom) list.scrollTop = list.scrollHeight;
-  }, [visible]);
+    list.scrollTo({ top: list.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
+  };
+
+  // Streaming (and the smooth reveal) keeps growing the last bubble; follow it only while
+  // the user is at the bottom, so reading an earlier reply is never yanked away.
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list) return undefined;
+    const observer = new ResizeObserver(() => {
+      if (followingRef.current) list.scrollTop = list.scrollHeight;
+    });
+    Array.from(list.children).forEach(child => observer.observe(child));
+    if (followingRef.current) list.scrollTop = list.scrollHeight;
+    return () => observer.disconnect();
+  }, [visible, pendingReply]);
+
+  const onScroll = () => {
+    const list = listRef.current;
+    if (!list) return;
+    const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < FOLLOW_THRESHOLD;
+    followingRef.current = atBottom;
+    if (atBottom !== following) setFollowing(atBottom);
+  };
+
+  // Auto-grow the composer up to ~6 lines, like a chat app, instead of a one-line input.
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    input.style.height = 'auto';
+    input.style.height = `${Math.min(input.scrollHeight, 132)}px`;
+  }, [draft]);
 
   const submit = () => {
     const text = draft.trim();
-    if (!text || disabled) return;
-    if (onSend(text)) setDraft('');
+    if (!text || disabled || generating) return;
+    if (onSend(text)) {
+      setDraft('');
+      // Your own message always brings you back to the live end of the conversation.
+      followingRef.current = true;
+      setFollowing(true);
+      window.requestAnimationFrame(() => scrollToBottom(true));
+    }
   };
 
   return (
@@ -142,37 +259,62 @@ export function ConversationCard({ copy, messages, disabled, onSend, onOpenFullC
         </button>
       </div>
 
-      <div className="vx-messages" ref={listRef}>
-        {visible.length === 0 && <p className="vx-empty">{copy.conversationEmpty}</p>}
-        {visible.map((message, index) => {
-          const widget = message.role === 'assistant' ? messageWidget(message) : null;
-          return (
-            <div className={`vx-message is-${message.role}`} key={message.id ?? message.run_id ?? index}>
-              <p>
-                {plainText(message.content)}
-                {message.streaming && <i className="vx-cursor" aria-hidden="true" />}
-              </p>
-              {widget && <MessageLineChart widget={widget} />}
-              <time>{messageTime(message)}</time>
+      <div className="vx-messages-wrap">
+        <div className="vx-messages" ref={listRef} onScroll={onScroll} aria-live="polite">
+          {visible.length === 0 && !pendingReply && <p className="vx-empty">{copy.conversationEmpty}</p>}
+          {visible.map((message, index) => (
+            <MessageBubble copy={copy} message={message} key={message.id ?? message.run_id ?? index} />
+          ))}
+          {pendingReply && (
+            <div className="vx-message is-assistant is-live">
+              <TypingIndicator label={copy.vexaTyping} />
             </div>
-          );
-        })}
+          )}
+        </div>
+        {!following && (
+          <button
+            type="button"
+            className="vx-jump-latest"
+            onClick={() => { followingRef.current = true; setFollowing(true); scrollToBottom(true); }}
+            title={copy.jumpToLatest}
+            aria-label={copy.jumpToLatest}
+          >
+            <ArrowDown size={14} />
+          </button>
+        )}
       </div>
 
       <form
         className="vx-quick-ask"
         onSubmit={event => { event.preventDefault(); submit(); }}
       >
-        <input
+        <textarea
+          ref={inputRef}
+          rows={1}
           value={draft}
           onChange={event => setDraft(event.target.value)}
+          onKeyDown={event => {
+            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              submit();
+            }
+          }}
           placeholder={copy.askFollowUp}
           aria-label={copy.askFollowUp}
+          title={copy.composerHint}
           disabled={disabled}
         />
-        <button type="submit" disabled={disabled || !draft.trim()} title={copy.send} aria-label={`${copy.send} — ${copy.conversationTitle}`}>
-          <Send size={14} />
-        </button>
+        {generating
+          ? (
+            <button type="button" className="is-stop" onClick={onStop} title={copy.stop} aria-label={copy.stop}>
+              <Square size={11} fill="currentColor" />
+            </button>
+          )
+          : (
+            <button type="submit" disabled={disabled || !draft.trim()} title={copy.send} aria-label={`${copy.send} — ${copy.conversationTitle}`}>
+              <ArrowUp size={15} />
+            </button>
+          )}
       </form>
     </section>
   );

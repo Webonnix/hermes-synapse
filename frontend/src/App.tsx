@@ -1425,11 +1425,19 @@ export default function App() {
           } else if (data.type === 'chat_stream_chunk') {
             const msgChatId = data.chat_id || 'dashboard';
             if (msgChatId === currentChatIdRef.current) {
+              // A chunk with tool calls means the model is about to run a tool; the name
+              // stays as the message's activity until the model starts writing again.
+              const toolName = Array.isArray(data.tool_calls)
+                ? (data.tool_calls as Array<{ function?: { name?: string }; name?: string }>)
+                    .map(call => call?.function?.name || call?.name || '')
+                    .find(Boolean)
+                : undefined;
               setMessages(prev => prev.map(message => message.run_id === data.run_id
                 ? {
                     ...message,
                     content: `${message.content || ''}${data.content || ''}`,
                     thinking: `${message.thinking || ''}${data.thinking || ''}`,
+                    activity: toolName || (data.content ? undefined : message.activity),
                     streaming: true,
                   }
                 : message));

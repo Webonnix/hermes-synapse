@@ -1070,50 +1070,103 @@ body.vx-resizing * { cursor: col-resize !important; user-select: none; }
 
 /* conversation */
 .vx-conversation { display: flex; min-height: 0; flex: 1 1 0; flex-direction: column; }
-.vx-messages { display: flex; min-height: 0; flex: 1 1 0; flex-direction: column; gap: 8px; overflow: hidden auto; padding: 0 var(--vexa-pad-panel); }
+.vx-messages-wrap { position: relative; display: flex; min-height: 0; flex: 1 1 0; flex-direction: column; }
+.vx-messages { display: flex; min-height: 0; flex: 1 1 0; flex-direction: column; gap: 10px; overflow: hidden auto; padding: 2px var(--vexa-pad-panel) 6px; overscroll-behavior: contain; scrollbar-width: thin; }
 
-.vx-message { max-width: 84%; padding: 8px 11px; border-radius: 8px; }
-.vx-message.is-user { align-self: flex-end; background: rgba(124, 92, 252, .34); border: 1px solid rgba(124, 92, 252, .3); }
-.vx-message.is-assistant { align-self: flex-start; background: rgba(31, 36, 49, .8); border: 1px solid rgba(157, 166, 181, 0.154); }
+.vx-message { max-width: 88%; padding: 9px 12px 6px; border-radius: 14px; animation: vx-msg-in .28s cubic-bezier(.2, .8, .2, 1) both; }
+.vx-message.is-user { align-self: flex-end; border: 1px solid rgba(124, 92, 252, .34); border-bottom-right-radius: 4px; background: linear-gradient(160deg, rgba(124, 92, 252, .42), rgba(91, 66, 214, .3)); }
+.vx-message.is-assistant { align-self: flex-start; max-width: 96%; border: 1px solid rgba(157, 166, 181, .14); border-bottom-left-radius: 4px; background: rgba(27, 32, 44, .82); }
+.vx-message.is-assistant.is-live { border-color: rgba(54, 207, 251, .28); box-shadow: 0 0 18px rgba(54, 207, 251, .07); }
 .vx-message.is-error { align-self: flex-start; background: rgba(64, 12, 26, .6); border: 1px solid rgba(240, 93, 117, .35); }
-.vx-message p { color: var(--vexa-text-primary); font-size: .74rem; line-height: 1.44; overflow-wrap: anywhere; white-space: pre-wrap; }
-.vx-message time { display: block; margin-top: 4px; color: var(--vexa-text-muted); font: .58rem var(--vexa-font-mono); text-align: right; }
-.vx-message .vx-cursor { display: inline-block; width: 6px; height: 12px; margin-left: 2px; background: var(--vexa-cyan); vertical-align: -1px; animation: vx-blink 1s steps(2) infinite; }
+.vx-message > p { color: var(--vexa-text-primary); font-size: .8rem; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
+.vx-message footer { display: flex; min-height: 18px; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 3px; }
+.vx-message time { color: var(--vexa-text-muted); font: .58rem var(--vexa-font-mono); }
+.vx-message .vx-cursor { display: inline-block; width: 7px; height: 13px; margin-left: 3px; border-radius: 1px; background: var(--vexa-cyan); vertical-align: -2px; animation: vx-blink 1s steps(2) infinite; }
+
+.vx-msg-action { display: grid; width: 22px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--vexa-text-muted); cursor: pointer; opacity: 0; place-items: center; transition: opacity var(--vexa-transition), color var(--vexa-transition), background var(--vexa-transition); }
+.vx-message:hover .vx-msg-action, .vx-msg-action:focus-visible { opacity: 1; }
+.vx-msg-action:hover { background: rgba(157, 166, 181, .12); color: var(--vexa-text-primary); }
+
+/* typing indicator */
+.vx-typing { display: inline-flex; align-items: center; gap: 9px; padding: 2px 0; color: var(--vexa-text-secondary); font-size: .74rem; }
+.vx-message .vx-md + .vx-typing { margin-top: 6px; }
+.vx-typing-dots { display: inline-flex; gap: 4px; }
+.vx-typing-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--vexa-cyan); animation: vx-typing-dot 1.2s ease-in-out infinite; }
+.vx-typing-dots i:nth-child(2) { animation-delay: .15s; }
+.vx-typing-dots i:nth-child(3) { animation-delay: .3s; }
+.vx-typing-label { background: linear-gradient(90deg, var(--vexa-text-secondary) 0%, #fff 50%, var(--vexa-text-secondary) 100%); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: vx-shimmer 1.8s linear infinite; }
+
+/* markdown inside assistant replies */
+.vx-md { color: var(--vexa-text-primary); font-size: .8rem; line-height: 1.55; overflow-wrap: anywhere; }
+.vx-md > :first-child { margin-top: 0; }
+.vx-md > :last-child { margin-bottom: 0; }
+.vx-md p { margin: 0 0 .55em; white-space: pre-wrap; }
+.vx-md h1, .vx-md h2, .vx-md h3, .vx-md h4 { margin: .8em 0 .35em; color: #fff; font-size: .86rem; font-weight: 650; line-height: 1.3; }
+.vx-md h1 { font-size: .95rem; }
+.vx-md ul, .vx-md ol { margin: 0 0 .55em; padding-left: 1.25em; }
+.vx-md li { margin: .18em 0; }
+.vx-md li::marker { color: var(--vexa-cyan); }
+.vx-md strong { color: #fff; font-weight: 650; }
+.vx-md a { color: var(--vexa-cyan-soft); text-decoration: underline; text-decoration-color: rgba(94, 225, 255, .35); text-underline-offset: 2px; }
+.vx-md blockquote { margin: 0 0 .55em; padding: 2px 0 2px 10px; border-left: 2px solid var(--vexa-violet); color: var(--vexa-text-secondary); white-space: pre-wrap; }
+.vx-md hr { margin: .7em 0; border: 0; border-top: 1px solid rgba(157, 166, 181, .18); }
+.vx-md .owui-code-inline { padding: 1px 5px; border-radius: 4px; background: rgba(8, 9, 13, .75); color: #f8c98a; font: .72rem var(--vexa-font-mono); }
+.vx-md .owui-codeblock { margin: 0 0 .6em; overflow: hidden; border: 1px solid rgba(157, 166, 181, .16); border-radius: 8px; background: rgba(6, 7, 11, .85); }
+.vx-md .owui-codeblock-head { display: flex; align-items: center; justify-content: space-between; padding: 4px 8px; border-bottom: 1px solid rgba(157, 166, 181, .12); color: var(--vexa-text-muted); font: .6rem var(--vexa-font-mono); }
+.vx-md .owui-codeblock-head button { display: inline-flex; align-items: center; gap: 4px; padding: 1px 4px; border: 0; border-radius: 4px; background: transparent; color: var(--vexa-text-secondary); cursor: pointer; font: inherit; }
+.vx-md .owui-codeblock-head button:hover { background: rgba(157, 166, 181, .12); color: #fff; }
+.vx-md .owui-codeblock pre { margin: 0; padding: 8px 10px; overflow-x: auto; color: #dbe4f0; font: .7rem/1.5 var(--vexa-font-mono); }
+.vx-md .owui-table-wrap { margin: 0 0 .6em; overflow-x: auto; }
+.vx-md table { border-collapse: collapse; font-size: .72rem; }
+.vx-md th, .vx-md td { padding: 4px 8px; border: 1px solid rgba(157, 166, 181, .16); text-align: left; }
+.vx-md th { background: rgba(59, 130, 246, .1); color: #fff; font-weight: 600; }
+
+.vx-jump-latest { position: absolute; bottom: 8px; left: calc(50% - 15px); display: grid; width: 30px; height: 30px; border: 1px solid var(--vexa-border-active); border-radius: 50%; background: rgba(17, 20, 27, .95); box-shadow: var(--vexa-glow-violet); color: var(--vexa-text-primary); cursor: pointer; place-items: center; animation: vx-msg-in .2s ease-out both; }
+.vx-jump-latest:hover { border-color: var(--vexa-cyan); color: var(--vexa-cyan); }
 
 .vx-message-chart { margin-top: 8px; border: 1px solid rgba(157, 166, 181, 0.154); border-radius: var(--vexa-radius-small); background: rgba(8, 9, 13, .7); padding: 6px 4px 2px; }
 .vx-message-chart svg { display: block; width: 100%; height: 84px; }
 .vx-message-chart figcaption { display: flex; justify-content: space-between; padding: 2px 6px 4px; color: var(--vexa-text-muted); font: .55rem var(--vexa-font-mono); }
 
-.vx-quick-ask { display: grid; align-items: center; gap: 0; padding: 8px var(--vexa-pad-panel) var(--vexa-pad-panel); grid-template-columns: minmax(0, 1fr) 34px; }
+.vx-quick-ask { display: flex; align-items: flex-end; gap: 6px; margin: 8px var(--vexa-pad-panel) var(--vexa-pad-panel); padding: 5px 5px 5px 12px; border: 1px solid var(--vexa-border-default); border-radius: 14px; background: rgba(9, 11, 16, .85); transition: border-color var(--vexa-transition), box-shadow var(--vexa-transition); }
+.vx-quick-ask:focus-within { border-color: var(--vexa-border-active); box-shadow: 0 0 0 3px rgba(124, 92, 252, .12); }
 
-.vx-quick-ask input {
+.vx-quick-ask textarea {
   min-width: 0;
-  height: 34px;
-  padding: 0 10px;
-  border: 1px solid var(--vexa-border-subtle);
-  border-right: 0;
-  border-radius: var(--vexa-radius-small) 0 0 var(--vexa-radius-small);
-  background: rgba(9, 11, 16, .8);
+  flex: 1 1 auto;
+  min-height: 26px;
+  max-height: 132px;
+  padding: 5px 0;
+  border: 0;
+  background: transparent;
   color: var(--vexa-text-primary);
-  font: .72rem var(--vexa-font);
+  font: .78rem/1.4 var(--vexa-font);
   outline: none;
+  resize: none;
 }
 
-.vx-quick-ask input:focus { border-color: var(--vexa-border-active); }
+.vx-quick-ask textarea::placeholder { color: var(--vexa-text-muted); }
+/* The whole composer shows focus (:focus-within ring), so the field's own global outline is redundant. */
+.vx-quick-ask textarea:focus-visible { outline: none !important; }
 
 .vx-quick-ask button {
   display: grid;
-  height: 34px;
-  border: 1px solid var(--vexa-border-subtle);
-  border-left: 0;
-  border-radius: 0 var(--vexa-radius-small) var(--vexa-radius-small) 0;
-  background: transparent;
-  color: var(--vexa-cyan);
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--vexa-text-primary);
+  color: #0B0D12;
   cursor: pointer;
   place-items: center;
+  transition: background var(--vexa-transition), transform var(--vexa-transition);
 }
 
-.vx-quick-ask button:disabled { color: var(--vexa-text-disabled); cursor: not-allowed; }
+.vx-quick-ask button:hover:not(:disabled) { transform: scale(1.06); }
+.vx-quick-ask button.is-stop { background: var(--vexa-cyan); }
+.vx-quick-ask button:disabled { background: rgba(157, 166, 181, .18); color: var(--vexa-text-disabled); cursor: not-allowed; }
 
 /* insights */
 .vx-insight-row { display: grid; min-height: 26px; align-items: center; gap: 10px; grid-template-columns: 104px minmax(0, 1fr) 58px; }
@@ -1262,6 +1315,9 @@ body.vx-resizing * { cursor: col-resize !important; user-select: none; }
 
 @keyframes vx-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 @keyframes vx-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+@keyframes vx-msg-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes vx-typing-dot { 0%, 60%, 100% { opacity: .3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-3px); } }
+@keyframes vx-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 @keyframes vx-orbit { to { transform: rotate(360deg); } }
 @keyframes vx-mic-pulse {
   0%, 100% { box-shadow: inset 0 0 28px rgba(54, 207, 251, 0.19), 0 0 34px rgba(54, 207, 251, 0.2); }
