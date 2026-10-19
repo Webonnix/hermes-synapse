@@ -58,4 +58,31 @@ describe('ConversationCard', () => {
     fireEvent.click(screen.getByRole('button', { name: copy.stop }));
     expect(props.onStop).toHaveBeenCalledOnce();
   });
+
+  it('reads a reply aloud and stops it from the same spot', () => {
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'Привет', id: 1 },
+      { role: 'system', content: 'скрыто', id: 2 },
+      { role: 'assistant', content: 'Здравствуйте!', id: 3 },
+    ];
+    const onSpeak = vi.fn();
+    const props = renderCard(messages, { onSpeak, onStopSpeech: vi.fn() });
+    fireEvent.click(screen.getByRole('button', { name: copy.playMessage }));
+    // The index is the reply's position in the full list, hidden system rows included.
+    expect(onSpeak).toHaveBeenCalledWith('Здравствуйте!', 2);
+    expect(props.onStopSpeech).not.toHaveBeenCalled();
+  });
+
+  it('offers stop while Vexa is talking', () => {
+    const onStopSpeech = vi.fn();
+    renderCard(
+      [{ role: 'assistant', content: 'Здравствуйте!', id: 3 }],
+      { onSpeak: vi.fn(), onStopSpeech, speaking: true, playingIndex: 0 },
+    );
+    const stops = screen.getAllByRole('button', { name: copy.stopSpeaking });
+    expect(stops).toHaveLength(2); // header pill + the playing reply's own button
+    fireEvent.click(stops[0]);
+    fireEvent.click(stops[1]);
+    expect(onStopSpeech).toHaveBeenCalledTimes(2);
+  });
 });

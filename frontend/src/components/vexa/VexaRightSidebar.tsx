@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowDown, ArrowUp, Check, Copy, LayoutGrid, MoreHorizontal, Square } from 'lucide-react';
+import { ArrowDown, ArrowUp, Check, Copy, LayoutGrid, MoreHorizontal, Square, Volume2, VolumeX } from 'lucide-react';
 import type { AgentModel, ChatMessage } from '../../types';
 import type { VexaCopy } from './vexaCopy';
 import type { InsightMetric, LineChartWidget } from './vexaDashboardTypes';
@@ -137,9 +137,13 @@ function CopyButton({ copy, text }: { copy: VexaCopy; text: string }) {
 interface MessageBubbleProps {
   copy: VexaCopy;
   message: ChatMessage;
+  /** This reply is the one being read aloud on request. */
+  playing: boolean;
+  onSpeak?: () => void;
+  onStopSpeech?: () => void;
 }
 
-function MessageBubble({ copy, message }: MessageBubbleProps) {
+function MessageBubble({ copy, message, playing, onSpeak, onStopSpeech }: MessageBubbleProps) {
   const isAssistant = message.role === 'assistant';
   const streaming = Boolean(message.streaming);
   const smooth = useSmoothText(message.content || '', isAssistant && streaming);
@@ -164,6 +168,19 @@ function MessageBubble({ copy, message }: MessageBubbleProps) {
       )}
       {widget && <MessageLineChart widget={widget} />}
       <footer>
+        {isAssistant && !streaming && message.content && onSpeak && (
+          playing
+            ? (
+              <button type="button" className="vx-msg-action is-playing" onClick={onStopSpeech} title={copy.stopSpeaking} aria-label={copy.stopSpeaking}>
+                <Square size={10} fill="currentColor" />
+              </button>
+            )
+            : (
+              <button type="button" className="vx-msg-action" onClick={onSpeak} title={copy.playMessage} aria-label={copy.playMessage}>
+                <Volume2 size={12} />
+              </button>
+            )
+        )}
         {isAssistant && !streaming && message.content && <CopyButton copy={copy} text={message.content} />}
         <time>{messageTime(message)}</time>
       </footer>
@@ -181,24 +198,38 @@ interface ConversationProps {
   onSend: (text: string) => boolean;
   onStop: () => void;
   onOpenFullChat: () => void;
+  /** Vexa is talking (or a spoken reply is being prepared) — shows a stop-voice button. */
+  speaking?: boolean;
+  /** Index into `messages` of the reply read aloud on request. */
+  playingIndex?: number | null;
+  /** Reads `messages[index]` aloud; omitted when the host has no voice output. */
+  onSpeak?: (text: string, index: number) => void;
+  onStopSpeech?: () => void;
 }
 
 /** Distance from the bottom (px) that still counts as "following the conversation". */
 const FOLLOW_THRESHOLD = 90;
 
-export function ConversationCard({ copy, messages, disabled, generating, onSend, onStop, onOpenFullChat }: ConversationProps) {
+export function ConversationCard({
+  copy, messages, disabled, generating, onSend, onStop, onOpenFullChat,
+  speaking = false, playingIndex = null, onSpeak, onStopSpeech,
+}: ConversationProps) {
   const [draft, setDraft] = useState('');
   const [following, setFollowing] = useState(true);
   const listRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const followingRef = useRef(true);
 
+  // Each entry keeps its index in `messages`: that is what the voice player tracks.
   const visible = useMemo(
-    () => messages.filter(message => message.role === 'user' || message.role === 'assistant').slice(-40),
+    () => messages
+      .map((message, index) => ({ message, index }))
+      .filter(({ message }) => message.role === 'user' || message.role === 'assistant')
+      .slice(-40),
     [messages],
   );
 
-  const last = visible[visible.length - 1] ?? null;
+  const last = visible[visible.length - 1]?.message ?? null;
   // Between sending and the first stream frame there is no assistant bubble yet; show a
   // standalone "thinking" line so the reply visibly starts the moment Enter is pressed.
   const pendingReply = generating && !(last?.role === 'assistant' && last.streaming);
@@ -254,6 +285,12 @@ export function ConversationCard({ copy, messages, disabled, generating, onSend,
     <section className="vx-panel is-flex is-grow vx-conversation">
       <div className="vx-panel-head">
         <h2 className="vx-panel-title">{copy.conversationTitle}</h2>
+        {speaking && onStopSpeech && (
+          <button type="button" className="vx-voice-stop" onClick={onStopSpeech} title={copy.stopSpeaking} aria-label={copy.stopSpeaking}>
+            <span className="vx-voice-bars" aria-hidden="true"><i /><i /><i /></span>
+            <VolumeX size={13} />
+          </button>
+        )}
         <button type="button" className="vx-icon-btn" onClick={onOpenFullChat} title={copy.openFullChat} aria-label={copy.openFullChat}>
           <MoreHorizontal size={13} />
         </button>
@@ -262,8 +299,15 @@ export function ConversationCard({ copy, messages, disabled, generating, onSend,
       <div className="vx-messages-wrap">
         <div className="vx-messages" ref={listRef} onScroll={onScroll} aria-live="polite">
           {visible.length === 0 && !pendingReply && <p className="vx-empty">{copy.conversationEmpty}</p>}
-          {visible.map((message, index) => (
-            <MessageBubble copy={copy} message={message} key={message.id ?? message.run_id ?? index} />
+          {visible.map(({ message, index }) => (
+            <MessageBubble
+              copy={copy}
+              message={message}
+              key={message.id ?? message.run_id ?? index}
+              playing={playingIndex === index}
+              onSpeak={onSpeak ? () => onSpeak(message.content, index) : undefined}
+              onStopSpeech={onStopSpeech}
+            />
           ))}
           {pendingReply && (
             <div className="vx-message is-assistant is-live">

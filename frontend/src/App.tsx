@@ -2900,6 +2900,9 @@ export default function App() {
                   isGenerating={isGenerating}
                   isSpeaking={isSpeaking}
                   isTtsPending={isTtsPending}
+                  playingMsgIndex={playingMsgIndex}
+                  onSpeakMessage={speakText}
+                  onStopSpeech={stopSpeech}
                   micState={micState}
                   micErrorMessage={micErrorMessage}
                   voiceIdleTick={voiceIdleTick}

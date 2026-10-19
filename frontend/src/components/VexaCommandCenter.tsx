@@ -67,6 +67,12 @@ interface VexaCommandCenterProps {
   micStreamRef: React.RefObject<MediaStream | null>;
   /** Currently playing TTS audio element — used to drive the core animation while Vexa speaks. */
   ttsAudioElRef: React.RefObject<HTMLAudioElement | null>;
+  /** Index (into `messages`) of the reply being read aloud on request, or null. */
+  playingMsgIndex?: number | null;
+  /** Reads one reply aloud; called again with the same index it stops instead. */
+  onSpeakMessage?: (text: string, msgIndex: number) => void;
+  /** Silences whatever Vexa is saying, auto-spoken or requested. */
+  onStopSpeech?: () => void;
   /** Opens the floating chat window; pass an agent id to switch to that agent's session first. */
   onOpenAgentChat: (agentId?: string) => void;
   chatSessions: ChatSession[];
@@ -121,6 +127,9 @@ export function VexaCommandCenter({
   onVoiceToggle,
   onCommand,
   onStop,
+  playingMsgIndex = null,
+  onSpeakMessage,
+  onStopSpeech,
   language,
   micStreamRef,
   ttsAudioElRef,
@@ -599,6 +608,10 @@ export function VexaCommandCenter({
             generating={isGenerating}
             onSend={submitCommand}
             onStop={onStop}
+            speaking={isSpeaking || Boolean(isTtsPending)}
+            playingIndex={playingMsgIndex ?? null}
+            onSpeak={onSpeakMessage}
+            onStopSpeech={onStopSpeech}
             onOpenFullChat={() => onOpenAgentChat()}
           />
           <SystemInsightsCard copy={copy} metrics={telemetry.insights} />

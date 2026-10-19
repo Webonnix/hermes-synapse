@@ -1083,9 +1083,18 @@ body.vx-resizing * { cursor: col-resize !important; user-select: none; }
 .vx-message time { color: var(--vexa-text-muted); font: .58rem var(--vexa-font-mono); }
 .vx-message .vx-cursor { display: inline-block; width: 7px; height: 13px; margin-left: 3px; border-radius: 1px; background: var(--vexa-cyan); vertical-align: -2px; animation: vx-blink 1s steps(2) infinite; }
 
-.vx-msg-action { display: grid; width: 22px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--vexa-text-muted); cursor: pointer; opacity: 0; place-items: center; transition: opacity var(--vexa-transition), color var(--vexa-transition), background var(--vexa-transition); }
+.vx-msg-action { display: grid; width: 22px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--vexa-text-muted); cursor: pointer; opacity: .5; place-items: center; transition: opacity var(--vexa-transition), color var(--vexa-transition), background var(--vexa-transition); }
 .vx-message:hover .vx-msg-action, .vx-msg-action:focus-visible { opacity: 1; }
 .vx-msg-action:hover { background: rgba(157, 166, 181, .12); color: var(--vexa-text-primary); }
+.vx-msg-action.is-playing { color: var(--vexa-cyan); opacity: 1; }
+
+/* stop-voice button in the conversation header while Vexa talks */
+.vx-voice-stop { display: inline-flex; height: 22px; align-items: center; gap: 6px; margin-left: auto; margin-right: 6px; padding: 0 8px; border: 1px solid rgba(54, 207, 251, .4); border-radius: 11px; background: rgba(54, 207, 251, .1); color: var(--vexa-cyan); cursor: pointer; animation: vx-msg-in .2s ease-out both; }
+.vx-voice-stop:hover { background: rgba(54, 207, 251, .2); color: #fff; }
+.vx-voice-bars { display: inline-flex; height: 10px; align-items: flex-end; gap: 2px; }
+.vx-voice-bars i { width: 2px; height: 100%; border-radius: 1px; background: currentColor; animation: vx-voice-bar .9s ease-in-out infinite; }
+.vx-voice-bars i:nth-child(2) { animation-delay: .15s; }
+.vx-voice-bars i:nth-child(3) { animation-delay: .3s; }
 
 /* typing indicator */
 .vx-typing { display: inline-flex; align-items: center; gap: 9px; padding: 2px 0; color: var(--vexa-text-secondary); font-size: .74rem; }
@@ -1315,6 +1324,7 @@ body.vx-resizing * { cursor: col-resize !important; user-select: none; }
 
 @keyframes vx-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 @keyframes vx-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+@keyframes vx-voice-bar { 0%, 100% { transform: scaleY(.35); } 50% { transform: scaleY(1); } }
 @keyframes vx-msg-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @keyframes vx-typing-dot { 0%, 60%, 100% { opacity: .3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-3px); } }
 @keyframes vx-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
