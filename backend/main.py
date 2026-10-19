@@ -284,6 +284,13 @@ async def lifespan(app: FastAPI):
         from backend import dev_runs
         dev_runs_worker_task = crash_visibility.spawn(dev_runs.worker_loop(), "dev_runs.worker_loop")
 
+    # Host metrics history for the «Метрики» charts: the host agent keeps only the
+    # latest snapshot, this loop accumulates it (see backend/host_metrics.py).
+    host_metrics_task = None
+    if os.getenv("HOST_METRICS_HISTORY_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
+        from backend import host_metrics
+        host_metrics_task = crash_visibility.spawn(host_metrics.sampler_loop(), "host_metrics.sampler_loop")
+
     # Content Factory: additive schema, its agent roster, and the pipeline
     # worker that resumes interrupted runs. Every step is guarded — a failure
     # here disables content production, it must not stop the whole backend.
@@ -469,6 +476,13 @@ async def lifespan(app: FastAPI):
         content_factory_worker_task.cancel()
         try:
             await content_factory_worker_task
+        except asyncio.CancelledError:
+            pass
+
+    if host_metrics_task is not None:
+        host_metrics_task.cancel()
+        try:
+            await host_metrics_task
         except asyncio.CancelledError:
             pass
 
@@ -3862,6 +3876,15 @@ async def get_system_stats_api():
     from backend.tools import get_system_stats
     import json
     return json.loads(get_system_stats())
+
+@app.get("/api/system/metrics/history")
+async def get_system_metrics_history_api(range: str = "24h"):
+    """Downsampled host metrics plus threshold alerts for the «Метрики» tab."""
+    from backend import host_metrics
+    try:
+        return await asyncio.to_thread(host_metrics.history, range)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 @app.get("/api/market/prices")
 async def get_market_prices_api(symbols: str):

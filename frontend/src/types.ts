@@ -716,6 +716,22 @@ export interface HostTelemetry {
       tx_bytes_per_second?: number;
     }>;
   };
+  /** Host agent v2+: summed over whole physical disks. */
+  disk_io?: {
+    read_bytes_per_second?: number;
+    write_bytes_per_second?: number;
+    devices?: Array<{
+      name?: string;
+      model?: string | null;
+      read_bytes_per_second?: number;
+      write_bytes_per_second?: number;
+    }>;
+  };
+  /** Host agent v2+: hwmon readings, °C. */
+  temperatures?: {
+    cpu_celsius?: number | null;
+    nvme?: Array<{ device?: string; model?: string | null; celsius?: number | null }>;
+  };
   gpus?: Array<{
     index?: number;
     name?: string;

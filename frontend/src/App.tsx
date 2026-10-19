@@ -71,6 +71,7 @@ const ProcessesTab = lazy(() => import('./components/ProcessesTab').then(module 
 import { HermesMark } from './components/HermesMark';
 import { VexaLogo } from './components/VexaLogo';
 const MetricsTab = lazy(() => import('./components/MetricsTab').then(module => ({ default: module.MetricsTab })));
+const ServerMetricsTab = lazy(() => import('./components/metrics/ServerMetricsTab').then(module => ({ default: module.ServerMetricsTab })));
 import { FloatingWindow } from './components/FloatingWindow';
 import { BrowserLiveView } from './components/BrowserLiveView';
 import { VexaCommandCenter } from './components/VexaCommandCenter';
@@ -1840,12 +1841,6 @@ export default function App() {
       });
   }, [fetchWithAuth]);
 
-  useEffect(() => {
-    if (activeTab === 'metrics') {
-      fetchMetrics();
-    }
-  }, [activeTab, fetchMetrics]);
-
   const fetchUploads = () => {
     fetch('/api/uploads')
       .then(res => res.json())
@@ -3283,13 +3278,8 @@ export default function App() {
           />
         )}
 
-        {activeTab === 'metrics' && (
-          <MetricsTab
-            metrics={metrics}
-            isLoading={isMetricsLoading}
-            onRefresh={fetchMetrics}
-          />
-        )}
+        {/* LLM run/cost metrics stay in the Vexa analytics panel; this tab is the GPU server. */}
+        {activeTab === 'metrics' && <ServerMetricsTab language={language} />}
 
         {activeTab === 'schedule' && (
           <ScheduleTab
