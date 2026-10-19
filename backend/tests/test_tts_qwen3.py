@@ -34,7 +34,8 @@ def offline_sidecars(monkeypatch):
     monkeypatch.setattr(tts_module, "_xtts_health", lambda config: None)
     monkeypatch.setattr(tts_module, "_qwen3_health", lambda config: None)
     monkeypatch.setenv("VOICE_TTS_ENABLED", "true")
-    for name in ("VOICE_TTS_QWEN3_VOICE", "VOICE_TTS_QWEN3_URL", "VOICE_TTS_QWEN3_REF_AUDIO", "VOICE_TTS_QWEN3_REF_TEXT"):
+    for name in ("VOICE_TTS_QWEN3_VOICE", "VOICE_TTS_QWEN3_URL", "VOICE_TTS_QWEN3_REF_AUDIO", "VOICE_TTS_QWEN3_REF_TEXT",
+                 "VOICE_TTS_QWEN3_X_VECTOR_ONLY", "VOICE_TTS_QWEN3_NORMALIZE_NUMBERS"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -101,11 +102,52 @@ def test_qwen3_clones_the_vexa_reference_in_the_detected_language(monkeypatch, t
     assert payload["language"] == language
     assert payload["response_format"] == "wav"
     assert payload["ref_audio"] == "file:///xtts-speakers/vexa-reference.wav"
-    assert payload["ref_text"] == QWEN3_REFERENCE_TEXT
+    # timbre only by default: in-context cloning of the English Piper clip gave Russian an accent
+    assert payload["x_vector_only_mode"] is True
+    assert "ref_text" not in payload
     assert "voice" not in payload
     assert "speed" not in payload
     assert result == {"provider": "qwen3", "voice": "vexa-reference.wav", "size_bytes": len(b"RIFFqwen-wav")}
     assert output.read_bytes() == b"RIFFqwen-wav"
+
+
+def _capture_qwen3_payload(monkeypatch):
+    sent = {}
+
+    def fake_urlopen(request, timeout=None):
+        sent["payload"] = json.loads(request.data.decode("utf-8"))
+        return _FakeResponse(b"RIFFqwen-wav")
+
+    monkeypatch.setattr(tts_module.urllib.request, "urlopen", fake_urlopen)
+    return sent
+
+
+def test_qwen3_in_context_cloning_can_be_switched_back_on(monkeypatch, tmp_path):
+    monkeypatch.setenv("VOICE_TTS_PROVIDER", "qwen3")
+    monkeypatch.setenv("VOICE_TTS_QWEN3_X_VECTOR_ONLY", "false")
+    _qwen3_serving(monkeypatch)
+    sent = _capture_qwen3_payload(monkeypatch)
+
+    synthesize_speech("Привет.", str(tmp_path / "answer.wav"))
+
+    assert sent["payload"]["ref_text"] == QWEN3_REFERENCE_TEXT
+    assert "x_vector_only_mode" not in sent["payload"]
+
+
+def test_qwen3_spells_out_russian_numbers_but_leaves_english_alone(monkeypatch, tmp_path):
+    monkeypatch.setenv("VOICE_TTS_PROVIDER", "qwen3")
+    _qwen3_serving(monkeypatch)
+    sent = _capture_qwen3_payload(monkeypatch)
+
+    synthesize_speech("Встреча 19 октября в 14:30.", str(tmp_path / "ru.wav"))
+    assert sent["payload"]["input"] == "Встреча девятнадцатое октября в четырнадцать тридцать."
+
+    synthesize_speech("The meeting is on October 19 at 2:30 PM.", str(tmp_path / "en.wav"))
+    assert sent["payload"]["input"] == "The meeting is on October 19 at 2:30 PM."
+
+    monkeypatch.setenv("VOICE_TTS_QWEN3_NORMALIZE_NUMBERS", "false")
+    synthesize_speech("Встреча 19 октября.", str(tmp_path / "raw.wav"))
+    assert sent["payload"]["input"] == "Встреча 19 октября."
 
 
 def test_qwen3_uses_an_uploaded_voice_instead_of_the_reference_when_configured(monkeypatch, tmp_path):

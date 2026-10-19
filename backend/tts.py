@@ -8,6 +8,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from backend.speech_numbers_ru import normalize_ru_numbers
+
 
 class VoiceSynthesisError(RuntimeError):
     """Raised when a configured local TTS provider cannot synthesize speech."""
@@ -24,6 +26,13 @@ QWEN3_REFERENCE_TEXT = (
     "Just say the word, and I will take care of the rest."
 )
 _QWEN3_LANGUAGES = {"ru": "Russian", "en": "English"}
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw not in ("0", "false", "no", "off")
 
 
 def _tts_config() -> Dict[str, Any]:
@@ -48,6 +57,13 @@ def _tts_config() -> Dict[str, Any]:
         "qwen3_ref_audio": os.getenv("VOICE_TTS_QWEN3_REF_AUDIO", "file:///xtts-speakers/vexa-reference.wav").strip()
         or "file:///xtts-speakers/vexa-reference.wav",
         "qwen3_ref_text": os.getenv("VOICE_TTS_QWEN3_REF_TEXT", "").strip() or QWEN3_REFERENCE_TEXT,
+        # Timbre only (speaker embedding), no in-context continuation of the clip.
+        # The reference is an English Piper voice: cloning it in context carried its
+        # English prosody and robotic artefacts into Russian (ASR word error rate
+        # 0.30-0.36, ~3x the clicks of XTTS); x-vector mode measured WER 0.10.
+        "qwen3_x_vector_only": _env_flag("VOICE_TTS_QWEN3_X_VECTOR_ONLY", True),
+        # Spell Russian numbers out first — the model reads «19 октября» as noise.
+        "qwen3_normalize_numbers": _env_flag("VOICE_TTS_QWEN3_NORMALIZE_NUMBERS", True),
         "qwen3_timeout_seconds": max(5, int(os.getenv("VOICE_TTS_QWEN3_TIMEOUT_SECONDS", "60"))),
         "piper_binary": os.getenv("VOICE_TTS_PIPER_BINARY", "piper").strip() or "piper",
         "piper_model": os.getenv("VOICE_TTS_PIPER_MODEL", "").strip(),
@@ -285,15 +301,21 @@ def _synthesize_with_xtts(text: str, output: str, config: Dict[str, Any], rate: 
 def _synthesize_with_qwen3(text: str, output: str, config: Dict[str, Any], rate: float) -> str:
     """POST to vLLM-Omni's OpenAI-style /v1/audio/speech (Base task = voice
     cloning) and write the wav it returns. Returns the voice label it used."""
+    language = _detect_language_for_text(text)
+    if language == "ru" and config["qwen3_normalize_numbers"]:
+        text = normalize_ru_numbers(text)
     body: Dict[str, Any] = {
         "model": config["qwen3_model"],
         "input": text,
         "task_type": "Base",
-        "language": _QWEN3_LANGUAGES[_detect_language_for_text(text)],
+        "language": _QWEN3_LANGUAGES[language],
         "response_format": "wav",
     }
     if config["qwen3_voice"]:
         body["voice"] = config["qwen3_voice"]
+    elif config["qwen3_x_vector_only"]:
+        body["ref_audio"] = config["qwen3_ref_audio"]
+        body["x_vector_only_mode"] = True
     else:
         body["ref_audio"] = config["qwen3_ref_audio"]
         body["ref_text"] = config["qwen3_ref_text"]
