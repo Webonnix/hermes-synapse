@@ -17,9 +17,10 @@ from __future__ import annotations
 import copy
 import json
 import logging
-from typing import Any, Callable, Dict, List
+from collections import OrderedDict
+from typing import Any, Callable, Dict, List, Tuple
 
-from backend.privacy import config
+from backend.privacy import config, keys
 from backend.privacy.detectors import local_llm
 from backend.privacy.detectors.regex import regex_redact
 from backend.privacy.vault import PLACEHOLDER_RE, PlaceholderVault
@@ -49,23 +50,33 @@ def _occurs_outside_placeholders(text: str, span: str) -> bool:
     return any(span in part for part in PLACEHOLDER_RE.split(text))
 
 
-async def _local_spans(text: str) -> List[str]:
+class _Pass:
+    """Whether every part of a message was actually checked."""
+
+    def __init__(self) -> None:
+        self.complete = True
+
+
+async def _local_spans(text: str, full_scan: bool, status: _Pass) -> List[str]:
     if not text.strip():
         return []
     try:
-        return await local_llm.find_spans(text)
+        return await local_llm.find_spans(text, full_scan=full_scan)
     except local_llm.LocalPassError as exc:
         if config.fail_mode() == config.FAIL_CLOSED:
             raise PrivacyCheckFailed(
                 f"Local privacy check unavailable ({exc}); request not sent to the external provider."
             ) from exc
-        logger.warning("privacy: local pass failed, regex-only for this message: %s", exc)
+        status.complete = False
+        logger.warning("privacy: local pass failed, regex-only for the unchecked part: %s", exc)
         return exc.spans
 
 
-async def _redact_leaves(leaves: List[str], vault: PlaceholderVault) -> List[str]:
+async def _redact_leaves(leaves: List[str], vault: PlaceholderVault, *,
+                         full_scan: bool = True, status: _Pass | None = None) -> List[str]:
+    status = status or _Pass()
     redacted = [regex_redact(leaf, vault) for leaf in leaves]
-    spans = await _local_spans(_LEAF_SEPARATOR.join(leaf for leaf in redacted if leaf))
+    spans = await _local_spans(_LEAF_SEPARATOR.join(leaf for leaf in redacted if leaf), full_scan, status)
     # Longest first, so "pass word123" is not pre-empted by its own "word123".
     for span in sorted(spans, key=len, reverse=True):
         if PLACEHOLDER_RE.search(span) or "[SECRET_" in span:
@@ -169,6 +180,8 @@ async def protect_messages(messages: List[Any], *, mark_key: str) -> Placeholder
         if isinstance(msg, dict) and isinstance(msg.get(mark_key), dict):
             vault.merge(msg[mark_key])
 
+    full_scan_roles = config.full_scan_roles()
+    version = local_llm._version()
     for msg in messages:
         if not isinstance(msg, dict) or isinstance(msg.get(mark_key), dict):
             continue
@@ -176,7 +189,17 @@ async def protect_messages(messages: List[Any], *, mark_key: str) -> Placeholder
         slots = _message_slots(msg)
         flat = [leaf for slot in slots for leaf in slot.leaves]
         if flat:
-            redacted = await _redact_leaves(flat, vault)
+            full_scan = msg.get("role") in full_scan_roles
+            memo_key = keys.cache_key(json.dumps([version, full_scan, flat], ensure_ascii=False))
+            hit = _memo_get(memo_key)
+            if hit is not None:
+                redacted, mapping = hit
+                vault.adopt(mapping)
+            else:
+                status = _Pass()
+                redacted = await _redact_leaves(flat, vault, full_scan=full_scan, status=status)
+                if status.complete:
+                    _memo_put(memo_key, redacted, vault.touched_mapping())
             offset = 0
             for slot in slots:
                 new = redacted[offset:offset + len(slot.leaves)]
@@ -185,6 +208,51 @@ async def protect_messages(messages: List[Any], *, mark_key: str) -> Placeholder
                     slot.write(new)
         msg[mark_key] = vault.touched_mapping()
     return vault
+
+
+# ── Whole-message memo ───────────────────────────────────────────────────────
+# A 1M-token history is rebuilt and re-sent every turn. The L2 cache already
+# spares the GPU; this spares the CPU too (regexes + trigger scan run ~1 s per
+# million chars): a message seen before, fully checked, is a dict lookup.
+# In-process only — the mapping it holds is real secrets — and bounded by
+# PRIVACY_MEMO_MB. Only complete passes are kept, so a fail-open partial
+# result is retried next time instead of being frozen in.
+
+_memo: "OrderedDict[str, Tuple[List[str], Dict[str, str]]]" = OrderedDict()
+_memo_sizes: Dict[str, int] = {}
+_memo_total = 0
+
+
+def _memo_get(key: str):
+    item = _memo.get(key)
+    if item is not None:
+        _memo.move_to_end(key)
+        return list(item[0]), dict(item[1])
+    return None
+
+
+def _memo_put(key: str, redacted: List[str], mapping: Dict[str, str]) -> None:
+    global _memo_total
+    limit = config.memo_bytes()
+    size = sum(len(s) for s in redacted) + sum(len(k) + len(v) for k, v in mapping.items()) + 64
+    if not limit or size > limit:
+        return
+    if key in _memo:
+        _memo_total -= _memo_sizes.pop(key, 0)
+        del _memo[key]
+    _memo[key] = (list(redacted), dict(mapping))
+    _memo_sizes[key] = size
+    _memo_total += size
+    while _memo_total > limit and _memo:
+        old, _ = _memo.popitem(last=False)
+        _memo_total -= _memo_sizes.pop(old, 0)
+
+
+def clear_memo() -> None:
+    global _memo_total
+    _memo.clear()
+    _memo_sizes.clear()
+    _memo_total = 0
 
 
 # ── Restore ──────────────────────────────────────────────────────────────────

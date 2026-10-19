@@ -1,18 +1,23 @@
 """Placeholder table for one external call.
 
-One vault spans every message of a call (and, through the per-message cache
-in llm_client, every call of a tool loop), so the same secret always maps to
-the same placeholder: two messages mentioning one key read as one key to the
-external model, not two.
+Placeholders are deterministic: [SECRET_<first 8 hex of HMAC(value)>], keyed
+by PRIVACY_KEY (see keys.py). The same secret gets the same placeholder in
+every message, every call and every turn, so a re-sent history is
+byte-identical and the provider's prompt cache stays warm. On the rare
+digest-prefix collision between two different values the later one gets a
+longer prefix.
 """
 
 from __future__ import annotations
 
 import re
-import secrets as _secrets
 from typing import Dict, Iterable, Optional, Set
 
-PLACEHOLDER_RE = re.compile(r"\[SECRET_[0-9a-f]{6}\]")
+from backend.privacy import keys
+
+# 6 hex: placeholders minted before stage 1a, still found in cached mappings.
+PLACEHOLDER_RE = re.compile(r"\[SECRET_[0-9a-f]{6,16}\]")
+_DIGEST_LENGTHS = (8, 12, 16)
 
 
 class PlaceholderVault:
@@ -31,7 +36,7 @@ class PlaceholderVault:
         """The placeholder for `value`, minting one on first sight."""
         placeholder = self._by_value.get(value)
         if placeholder is None:
-            placeholder = self._new_placeholder()
+            placeholder = self._new_placeholder(value)
             self._by_placeholder[placeholder] = value
             self._by_value[value] = placeholder
         self._touched.add(placeholder)
@@ -48,6 +53,11 @@ class PlaceholderVault:
             self._by_placeholder[placeholder] = value
             self._by_value.setdefault(value, placeholder)
 
+    def adopt(self, mapping: Dict[str, str]) -> None:
+        """merge() plus count those placeholders as used by this message."""
+        self.merge(mapping)
+        self._touched.update(p for p in mapping if p in self._by_placeholder)
+
     def start_message(self) -> None:
         self._touched = set()
 
@@ -61,8 +71,10 @@ class PlaceholderVault:
     def values(self) -> Iterable[str]:
         return self._by_value.keys()
 
-    def _new_placeholder(self) -> str:
-        while True:
-            candidate = f"[SECRET_{_secrets.token_hex(3)}]"
-            if candidate not in self._by_placeholder:
+    def _new_placeholder(self, value: str) -> str:
+        digest = keys.placeholder_digest(value)
+        for length in _DIGEST_LENGTHS:
+            candidate = f"[SECRET_{digest[:length]}]"
+            if self._by_placeholder.get(candidate, value) == value:
                 return candidate
+        raise RuntimeError("privacy: 64-bit placeholder collision")  # practically unreachable

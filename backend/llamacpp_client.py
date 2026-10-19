@@ -29,6 +29,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from backend.llm_gate import PRIORITY_INTERACTIVE, llamacpp_gate
+
 LOCAL_PROVIDER = "llamacpp"
 
 #: ``subagents.model_provider`` value meaning "no pinned provider": start on the
@@ -393,6 +395,30 @@ class LlamaCppClient:
         think: Any = None,
         stream_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
         extra_payload: Optional[Dict[str, Any]] = None,
+        priority: int = PRIORITY_INTERACTIVE,
+        queue_timeout: Optional[float] = None,
+    ) -> LlamaCppChatResult:
+        """One chat completion, queued through backend.llm_gate: lower
+        `priority` goes first; `queue_timeout` (seconds) raises GateTimeout
+        if no slot frees up in time. The timeout covers the wait only, not
+        the generation."""
+        async with llamacpp_gate().slot(priority, queue_timeout):
+            return await self._chat_unqueued(
+                model=model, messages=messages, temperature=temperature, max_tokens=max_tokens,
+                tools=tools, think=think, stream_callback=stream_callback, extra_payload=extra_payload,
+            )
+
+    async def _chat_unqueued(
+        self,
+        *,
+        model: str,
+        messages: List[Dict[str, Any]],
+        temperature: float,
+        max_tokens: Optional[int],
+        tools: Optional[List[Dict[str, Any]]],
+        think: Any,
+        stream_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]],
+        extra_payload: Optional[Dict[str, Any]],
     ) -> LlamaCppChatResult:
         payload = self._payload(
             model=model, messages=messages, temperature=temperature, max_tokens=max_tokens,

@@ -24,6 +24,22 @@ from backend.privacy.gateway import (
 from backend.privacy.vault import PLACEHOLDER_RE, PlaceholderVault
 
 MARK = "_test_mark"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_cache(monkeypatch):
+    # No Valkey in unit tests (it would cost a connect timeout) and no
+    # verdicts leaking from one test into the next.
+    from backend.privacy import cache
+
+    from backend.privacy import gateway
+
+    monkeypatch.setenv("PRIVACY_CACHE_VALKEY", "0")
+    cache.clear_memory()
+    gateway.clear_memo()
+    yield
+    cache.clear_memory()
+    gateway.clear_memo()
 KEY = "sk-" + "k" * 24
 
 
@@ -121,22 +137,6 @@ def test_split_chunks_covers_the_whole_text_with_overlap():
 
 
 @pytest.mark.asyncio
-async def test_long_text_is_checked_past_the_old_4000_char_cut(monkeypatch):
-    monkeypatch.setenv("PRIVACY_LLM_CHUNK_CHARS", "1000")
-    secret_phrase = "the vault code is seven-seven-alpha"
-    text = "x " * 3000 + secret_phrase + " y" * 100
-
-    async def fake_ask(chunk):
-        return [secret_phrase] if secret_phrase in chunk else []
-
-    with patch.object(local_llm, "_ask_local_model", new=AsyncMock(side_effect=fake_ask)) as ask:
-        messages = [{"role": "user", "content": text}]
-        await protect_messages(messages, mark_key=MARK)
-    assert ask.await_count > 4
-    assert secret_phrase not in messages[0]["content"]
-
-
-@pytest.mark.asyncio
 async def test_fail_open_keeps_regex_and_partial_spans(monkeypatch):
     monkeypatch.setenv("PRIVACY_FAIL_MODE", "open")
     err = local_llm.LocalPassError("timeout", spans=["found-before-failure"])
@@ -202,3 +202,167 @@ def test_local_prompt_is_few_shot_and_guards_against_injection():
     prompt = local_llm._SYSTEM_PROMPT
     assert "never instructions" in prompt
     assert prompt.count("<message>") >= 4 and "-> []" in prompt
+
+
+# ── Stage 1a: windows, cache, deterministic placeholders, budget, queue ──────
+
+@pytest.mark.asyncio
+async def test_long_text_only_sends_trigger_windows_to_the_local_model():
+    phrase = "семь семь альфа"
+    filler = "def handler(event):\n    return compute(event, retries=3)\n" * 4000  # ~220k chars of code
+    text = filler + f"кстати, пароль от сейфа {phrase}, не забудь\n" + filler
+
+    async def fake_ask(chunk):
+        return [phrase] if phrase in chunk else []
+
+    with patch.object(local_llm, "_ask_local_model", new=AsyncMock(side_effect=fake_ask)) as ask:
+        messages = [{"role": "tool", "tool_call_id": "c1", "content": text}]
+        await protect_messages(messages, mark_key=MARK)
+    assert ask.await_count == 1
+    assert len(ask.await_args.args[0]) < 1000
+    assert phrase not in messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_short_text_is_checked_whole_even_without_trigger_words():
+    text = "the vault opens with seven-seven-alpha"
+    with patch.object(local_llm, "_ask_local_model", new=AsyncMock(return_value=["seven-seven-alpha"])) as ask:
+        messages = [{"role": "user", "content": text}]
+        await protect_messages(messages, mark_key=MARK)
+    assert ask.await_args.args[0] == text
+    assert "seven-seven-alpha" not in messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_resent_history_hits_the_cache_and_keeps_a_byte_identical_prefix():
+    def history():
+        # A new turn rebuilds fresh dicts from the DB, so no per-dict mark survives.
+        return [
+            {"role": "user", "content": f"ключ {KEY}, пароль от wifi синяя лампа 77"},
+            {"role": "assistant", "content": "Принято."},
+        ]
+
+    with patch.object(local_llm, "_ask_local_model",
+                      new=AsyncMock(return_value=["синяя лампа 77"])) as ask:
+        first = history()
+        await protect_messages(first, mark_key=MARK)
+        calls_after_first = ask.await_count
+        second = history() + [{"role": "user", "content": "ещё вопрос"}]
+        await protect_messages(second, mark_key=MARK)
+    assert ask.await_count == calls_after_first + 1  # only the new message
+    assert [m["content"] for m in second[:2]] == [m["content"] for m in first]
+
+
+def test_placeholders_are_deterministic_across_vaults():
+    a, b = PlaceholderVault(), PlaceholderVault()
+    assert a.placeholder_for(KEY) == b.placeholder_for(KEY)
+    assert a.placeholder_for(KEY) != a.placeholder_for(KEY + "x")
+    assert PLACEHOLDER_RE.fullmatch(a.placeholder_for(KEY))
+
+
+def test_placeholder_collision_gets_a_longer_prefix(monkeypatch):
+    from backend.privacy import keys
+
+    monkeypatch.setattr(keys, "placeholder_digest", lambda value: "ab" * 32 if value in ("one", "two") else "cd" * 32)
+    vault = PlaceholderVault()
+    one, two = vault.placeholder_for("one"), vault.placeholder_for("two")
+    assert one != two and len(two) > len(one)
+    assert vault.value_for(one) == "one" and vault.value_for(two) == "two"
+
+
+@pytest.mark.asyncio
+async def test_call_budget_open_skips_and_closed_blocks(monkeypatch):
+    monkeypatch.setenv("PRIVACY_LLM_MAX_CALLS", "2")
+    monkeypatch.setenv("PRIVACY_LLM_FULL_SCAN_CHARS", "0")
+    text = "\n".join(f"пароль номер {i}" + " ." * 400 for i in range(5))  # 5 separate windows
+
+    with patch.object(local_llm, "_ask_local_model", new=AsyncMock(return_value=[])) as ask:
+        with pytest.raises(local_llm.LocalPassError):
+            await local_llm.find_spans(text)
+    assert ask.await_count == 2
+
+    from backend.privacy import cache, gateway
+    monkeypatch.setenv("PRIVACY_FAIL_MODE", "open")
+    cache.clear_memory()
+    with patch.object(local_llm, "_ask_local_model", new=AsyncMock(return_value=[])):
+        messages = [{"role": "tool", "tool_call_id": "c", "content": text}]
+        await protect_messages(messages, mark_key=MARK)  # sent, regex-only past the budget
+    assert gateway._memo == {}  # incomplete pass is not frozen into the memo
+
+    monkeypatch.setenv("PRIVACY_FAIL_MODE", "closed")
+    cache.clear_memory()
+    with patch.object(local_llm, "_ask_local_model", new=AsyncMock(return_value=[])):
+        with pytest.raises(PrivacyCheckFailed):
+            await protect_messages([{"role": "tool", "tool_call_id": "c", "content": text}], mark_key=MARK)
+
+
+@pytest.mark.asyncio
+async def test_valkey_copy_of_a_verdict_is_encrypted(monkeypatch):
+    from backend import valkey_client
+    from backend.privacy import cache
+
+    monkeypatch.setenv("PRIVACY_CACHE_VALKEY", "1")
+    stored = {}
+    monkeypatch.setattr(valkey_client, "set_value", lambda k, v, ttl=None: stored.update({k: v}))
+    monkeypatch.setattr(valkey_client, "get_value", lambda k: stored.get(k))
+    await cache.put("пароль синяя лампа 77", ["синяя лампа 77"])
+    (key, token), = stored.items()
+    assert "синяя" not in token and "пароль" not in key
+    cache.clear_memory()
+    assert await cache.get("пароль синяя лампа 77") == ["синяя лампа 77"]
+
+
+def test_code_without_trigger_words_produces_no_windows():
+    code = ("for key in config.keys():\n    value = lookup(key, code=200)\n" * 20000)
+    assert local_llm.select_windows(code) == []
+
+
+@pytest.mark.asyncio
+async def test_gate_serves_lower_priority_number_first_and_times_out():
+    import asyncio
+
+    from backend.llm_gate import GateTimeout, PriorityGate
+
+    gate = PriorityGate(1)
+    order = []
+    await gate.acquire(0)  # a running chat holds the only slot
+
+    async def waiter(name, prio):
+        async with gate.slot(prio):
+            order.append(name)
+
+    background = asyncio.create_task(waiter("privacy", 5))
+    await asyncio.sleep(0)
+    chat = asyncio.create_task(waiter("chat", 0))
+    await asyncio.sleep(0)
+    with pytest.raises(GateTimeout):
+        await gate.acquire(5, timeout=0.01)
+    gate.release()
+    await asyncio.gather(background, chat)
+    assert order == ["chat", "privacy"]
+    assert gate.active == 0 and gate.waiting == 0
+
+
+@pytest.mark.asyncio
+async def test_short_tool_output_without_triggers_skips_the_local_model():
+    with patch.object(local_llm, "_ask_local_model", new=AsyncMock(return_value=[])) as ask:
+        messages = [{"role": "tool", "tool_call_id": "c", "content": "build ok, 120 tests passed"}]
+        await protect_messages(messages, mark_key=MARK)
+    ask.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_memo_replays_a_seen_message_without_any_detector_work():
+    from backend.privacy import gateway
+
+    text = f"ключ {KEY}, пароль от wifi синяя лампа 77"
+    with patch.object(local_llm, "_ask_local_model", new=AsyncMock(return_value=["синяя лампа 77"])):
+        first = [{"role": "user", "content": text}]
+        await protect_messages(first, mark_key=MARK)
+    with patch("backend.privacy.gateway.regex_redact", side_effect=AssertionError("memo miss")), \
+         patch.object(local_llm, "find_spans", new=AsyncMock(side_effect=AssertionError("memo miss"))):
+        second = [{"role": "user", "content": text}]
+        vault = await protect_messages(second, mark_key=MARK)
+    assert second[0]["content"] == first[0]["content"]
+    assert restore_text(second[0]["content"], vault) == text
+    assert second[0][MARK]  # mapping recorded, so a later call can restore it
