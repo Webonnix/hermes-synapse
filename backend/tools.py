@@ -1388,7 +1388,7 @@ TOOLS_SCHEMA = [
                         "enum": ["fast", "strong"],
                         "description": "fast — быстрая модель (по умолчанию); strong — самая сильная, для рассуждений и сложного кода."
                     },
-                    "max_tokens": {"type": "integer", "description": "Предел длины ответа, по умолчанию 4096."}
+                    "max_tokens": {"type": "integer", "description": "Предел длины ответа (не меньше 4096: внешние модели тратят часть на рассуждения)."}
                 },
                 "required": ["task"]
             }

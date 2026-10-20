@@ -41,6 +41,7 @@ _SYSTEM = (
 )
 
 _MAX_TASK_CHARS = 60_000
+_MIN_TOKENS = 4096
 
 
 def external_tiers() -> List[Dict[str, Any]]:
@@ -94,7 +95,11 @@ async def delegate(task: str, context: str = "", level: str = "fast", max_tokens
     level = level if level in {"fast", "strong"} else "fast"
     content = task if not context.strip() else f"{task}\n\nКонтекст:\n{context.strip()}"
     content = content[:_MAX_TASK_CHARS]
-    max_tokens = max(256, min(int(max_tokens or 4096), 16384))
+    # DeepSeek-style tiers reason before they answer and the reasoning counts
+    # against max_tokens: the local model asked for 1024 on a live run and got
+    # "reasoning only, no visible answer" from both tiers. The model's number is
+    # a floor-clamped hint, not a hard cap below what a reasoning tier needs.
+    max_tokens = max(_MIN_TOKENS, min(int(max_tokens or _MIN_TOKENS), 16384))
 
     tiers = external_tiers()
     if not tiers:

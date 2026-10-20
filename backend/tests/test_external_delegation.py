@@ -101,3 +101,10 @@ def test_explicit_deepseek_request_escalates_without_the_classifier():
 
     assert _keyword_delegate("Сделай это через DeepSeek, пожалуйста")
     assert not _keyword_delegate("Сколько осталось квоты DeepSeek?")
+
+
+@pytest.mark.asyncio
+async def test_small_max_tokens_is_raised_for_reasoning_tiers(tiers, monkeypatch):
+    calls = _fake_llm(monkeypatch, {"ds/deepseek-flash": ("success", "ok")})
+    await external_delegation.delegate("x", max_tokens=1024)
+    assert calls[0]["max_tokens"] == 4096
