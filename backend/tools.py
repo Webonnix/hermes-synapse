@@ -1376,6 +1376,27 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "delegate_to_external_model",
+            "description": "Поручает одну самостоятельную подзадачу внешней сильной модели через AI Router (OmniRoute, например DeepSeek) и возвращает её ответ. Для сложного кода, глубокого анализа, длинного качественного текста, перевода, проверки рассуждений или когда пользователь просит DeepSeek/OmniRoute. Внешняя модель не видит переписку и инструменты — передай всё нужное в task и context. Личные данные псевдонимизируются автоматически. Платно: учитывается в бюджете агента.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Что именно сделать, сформулированное полностью."},
+                    "context": {"type": "string", "description": "Все данные, код и факты, без которых задачу не решить."},
+                    "level": {
+                        "type": "string",
+                        "enum": ["fast", "strong"],
+                        "description": "fast — быстрая модель (по умолчанию); strong — самая сильная, для рассуждений и сложного кода."
+                    },
+                    "max_tokens": {"type": "integer", "description": "Предел длины ответа, по умолчанию 4096."}
+                },
+                "required": ["task"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "request_mcp_connection",
             "description": "Создаёт безопасное предложение подключения OpenAPI-сервиса через MCP. Подключение требует двух подтверждений владельца; секрет передаётся только ссылкой на переменную окружения.",
             "parameters": {
@@ -3329,6 +3350,21 @@ def execute_tool(name: str, arguments: Dict[str, Any], chat_id: str = "default")
             )
         except KeyError:
             return json.dumps({"error": "Unknown or unreviewed capability"}, ensure_ascii=False)
+
+    elif name == "delegate_to_external_model":
+        from backend.external_delegation import delegate
+        result = _run_async(
+            delegate(
+                arguments.get("task", ""),
+                arguments.get("context", "") or "",
+                arguments.get("level", "fast") or "fast",
+                arguments.get("max_tokens") or 4096,
+            ),
+            timeout=600,
+        )
+        if result is None:
+            result = {"status": "failed", "error": "External delegation crashed; see backend logs."}
+        return json.dumps(result, ensure_ascii=False)
 
     elif name == "request_mcp_connection":
         from backend.mcp_governance import build_openapi_config, create_connection_proposal

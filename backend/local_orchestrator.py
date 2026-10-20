@@ -32,7 +32,8 @@ request should stay with the local model, or is worth escalating to a stronger (
 
 Escalate ("yes") only for: substantial code generation/refactoring across multiple files, deep multi-step
 analysis or research synthesis, long-form writing requiring top-tier quality, or anything the user
-explicitly asks to be done "as well as possible" / "thoroughly". Keep it local ("no") for: greetings,
+explicitly asks to be done "as well as possible" / "thoroughly", or explicitly asks for DeepSeek, OmniRoute
+or "the external/strong model". Keep it local ("no") for: greetings,
 short questions, tool calls (weather, timers, search, calendar), simple explanations, casual conversation.
 
 Respond with ONLY one word: yes or no."""
@@ -42,6 +43,8 @@ _DELEGATE_KEYWORDS = [
     "напиши код", "рефактор", "проанализируй подробно", "глубокий анализ", "исследуй подробно",
     "как можно лучше", "максимально качественно", "полный отчёт", "write code", "refactor",
     "in-depth analysis", "thorough analysis", "comprehensive",
+    "через deepseek", "в deepseek", "попроси deepseek", "через дипсик", "попроси дипсик",
+    "через omniroute", "через омнироут", "через роутер", "внешней моделью", "сильной моделью",
 ]
 _DELEGATE_LENGTH_THRESHOLD = 600  # chars — a long ask is itself a complexity signal
 

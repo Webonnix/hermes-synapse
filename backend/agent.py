@@ -341,6 +341,7 @@ TOOL_INTENT_BUNDLES: Dict[str, Dict[str, List[str]]] = {
             "комбо", "combo", "fallback", "фолбэк",
             "расход", "потрат", "стоимост", "сколько стоил", "cost",
             "провайдер", "provider", "каталог модел", "какие модели",
+            "внешн модел", "внешней модел", "сильн модел", "облачн модел",
         ],
         "tools": [
             "omniroute_get_health", "omniroute_list_combos", "omniroute_get_combo_metrics",
@@ -352,6 +353,7 @@ TOOL_INTENT_BUNDLES: Dict[str, Dict[str, List[str]]] = {
             "omniroute_switch_combo", "omniroute_create_combo",
             "omniroute_set_routing_strategy", "omniroute_set_resilience_profile",
             "omniroute_set_budget_guard", "omniroute_cache_flush",
+            "delegate_to_external_model",
         ],
     },
 }
@@ -582,7 +584,7 @@ def _provider_cost(
 # here, right where each tool loop already has the calling agent's id in
 # scope, instead of retrofitting the multi-exit-point turn-level cost
 # bookkeeping.
-PAID_TOOLS = {"generate_image", "browser_read", "browser_task"}
+PAID_TOOLS = {"generate_image", "browser_read", "browser_task", "delegate_to_external_model"}
 
 def _paid_tool_budget_block(agent_id: str, tool_name: str) -> Optional[str]:
     """Returns a JSON error string if agent_id has no budget left, else None."""
@@ -2313,6 +2315,19 @@ class VexaAgent:
         system_info += _local_model_system_hint(self.model, self.api_base, self.local_think)
         system_info += _address_directive()
         system_info += _chat_system_addendum()
+        # The local model is told which external AI Router models it has and is
+        # always handed the tool to use them (backend/external_delegation.py) —
+        # without both it can only hope the per-turn gate escalated for it.
+        if self.provider == LOCAL_PROVIDER:
+            from backend.external_delegation import TOOL_NAME as _DELEGATE_TOOL, delegation_hint
+
+            _hint = delegation_hint()
+            if _hint:
+                system_info += _hint
+                if not any(t["function"]["name"] == _DELEGATE_TOOL for t in selected_tools):
+                    selected_tools = selected_tools + [
+                        t for t in TOOLS_SCHEMA if t["function"]["name"] == _DELEGATE_TOOL
+                    ]
         messages = [{"role": "system", "content": system_prompt + system_info}]
         for msg in history:
             messages.append(msg)

@@ -129,6 +129,11 @@ TOOL_RISKS = {
     # matches add_calendar_event/create_subagent's R3 (one owner approval
     # before it runs).
     "browser_task": "R3",
+    # Sends one subtask to an external AI Router tier (backend/external_delegation.py).
+    # Costs money per call like generate_image, and is gated the same way:
+    # agent.py's per-agent $ budget check (PAID_TOOLS) rather than an approval
+    # click per call. Personal data goes through the privacy gateway.
+    "delegate_to_external_model": "R2",
 }
 
 _SECRET_KEY = re.compile(r"(password|passwd|secret|token|api[_-]?key|authorization|cookie|private[_-]?key)", re.I)
