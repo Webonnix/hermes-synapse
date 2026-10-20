@@ -189,3 +189,12 @@ def test_retired_router_host_bindings_are_repointed(tmp_path, monkeypatch):
     assert digest == provider_governance._digest(
         provider_governance.validate_binding_config("router", "openai_compatible", api_base)
     )
+
+
+def test_router_questions_select_omniroute_tools():
+    from backend.agent import _select_tools_for_query
+
+    schema = [{"type": "function", "function": {"name": n, "parameters": {}}}
+              for n in ("omniroute_check_quota", "omniroute_cost_report", "web_search")]
+    names = {t["function"]["name"] for t in _select_tools_for_query("Сколько осталось квоты DeepSeek в роутере?", schema)}
+    assert {"omniroute_check_quota", "omniroute_cost_report"} <= names

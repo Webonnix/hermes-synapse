@@ -282,6 +282,9 @@ services:
       - INITIAL_PASSWORD=${OMNIROUTE_INITIAL_PASSWORD:?Set OMNIROUTE_INITIAL_PASSWORD in .env}
       - BASE_URL=${ROUTER_PUBLIC_BASE_URL:-http://localhost:20128}
       - NEXT_PUBLIC_BASE_URL=${ROUTER_PUBLIC_BASE_URL:-http://localhost:20128}
+      # MCP tools call OmniRoute's own API; left to auto-detect they use BASE_URL,
+      # which may be a public hostname behind an auth proxy.
+      - OMNIROUTE_BASE_URL=http://127.0.0.1:20128
       - NODE_OPTIONS=--max-old-space-size=2048
     ports:
       - "${ROUTER_PUBLISH_HOST:-127.0.0.1}:20128:20128"

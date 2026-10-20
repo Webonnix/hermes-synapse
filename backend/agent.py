@@ -331,6 +331,29 @@ TOOL_INTENT_BUNDLES: Dict[str, Dict[str, List[str]]] = {
             "save_subagent_memory", "get_subagent_memory",
         ],
     },
+    # OmniRoute's MCP tools (backend/omniroute_mcp.py). They only exist while
+    # its MCP server is connected; a name that isn't registered is simply not
+    # offered, because selection filters against the live TOOLS_SCHEMA.
+    "ai_router": {
+        "keywords": [
+            "omniroute", "омнироут", "роутер", "router", "маршрутиз", "routing",
+            "квот", "quota", "лимит провайдер", "deepseek", "дипсик",
+            "комбо", "combo", "fallback", "фолбэк",
+            "расход", "потрат", "стоимост", "сколько стоил", "cost",
+            "провайдер", "provider", "каталог модел", "какие модели",
+        ],
+        "tools": [
+            "omniroute_get_health", "omniroute_list_combos", "omniroute_get_combo_metrics",
+            "omniroute_check_quota", "omniroute_cost_report", "omniroute_list_models_catalog",
+            "omniroute_simulate_route", "omniroute_get_provider_metrics",
+            "omniroute_best_combo_for_task", "omniroute_explain_route",
+            "omniroute_get_session_snapshot", "omniroute_cache_stats",
+            "omniroute_compression_status", "omniroute_test_combo",
+            "omniroute_switch_combo", "omniroute_create_combo",
+            "omniroute_set_routing_strategy", "omniroute_set_resilience_profile",
+            "omniroute_set_budget_guard", "omniroute_cache_flush",
+        ],
+    },
 }
 
 
