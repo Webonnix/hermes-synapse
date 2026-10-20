@@ -10,7 +10,6 @@ import {
   Cpu, 
   Database,
   Layers,
-  Wrench,
   BookOpen,
   Network,
   Server,
@@ -33,7 +32,7 @@ import {
   BarChart3,
 } from 'lucide-react';
 
-import type { AppSettings, ChatMessage, ChatSession, DecisionLog, ActivityLog, SystemConfig, AgentModel, Project, SystemStats } from './types';
+import type { AppSettings, ChatMessage, ChatSession, DecisionLog, ActivityLog, SystemConfig, AgentModel, Project } from './types';
 import { styles } from './styles';
 import { translate, normalizeLanguage, type Language } from './i18n';
 import { 
@@ -52,7 +51,6 @@ const ConfigTab = lazy(() => import('./components/ConfigTab').then(module => ({ 
 const LogsTab = lazy(() => import('./components/LogsTab').then(module => ({ default: module.LogsTab })));
 const ActivityTab = lazy(() => import('./components/ActivityTab').then(module => ({ default: module.ActivityTab })));
 const MemoryTab = lazy(() => import('./components/MemoryTab').then(module => ({ default: module.MemoryTab })));
-const ToolsTab = lazy(() => import('./components/ToolsTab').then(module => ({ default: module.ToolsTab })));
 const ScheduleTab = lazy(() => import('./components/ScheduleTab').then(module => ({ default: module.ScheduleTab })));
 const SubagentsTab = lazy(() => import('./components/SubagentsTab').then(module => ({ default: module.SubagentsTab })));
 const ObsidianTab = lazy(() => import('./components/ObsidianTab').then(module => ({ default: module.ObsidianTab })));
@@ -148,19 +146,22 @@ export const normalizeTab = (value: string | null): AppTab => {
 };
 
 export default function App() {
-  const legacySettingsTabs = ['config', 'logs', 'activity', 'memory', 'tools', 'subagents', 'obsidian', 'mcp'];
+  const legacySettingsTabs = ['config', 'logs', 'activity', 'memory', 'subagents', 'obsidian', 'mcp'];
   const [activeTab, setActiveTab] = useState<'vexa' | 'processes' | 'devruns' | 'kanban' | 'clients' | 'agents' | 'schedule' | 'contentfactory' | 'smm' | 'settings' | 'network' | 'metrics'>(() => {
     const saved = localStorage.getItem('vexa_active_tab');
     const requested = new URLSearchParams(window.location.hash.slice(1)).get('tab') ?? saved;
     if (requested === 'inbox') localStorage.setItem('smm_factory_view', 'dialogs');
     if (!window.location.hash && saved === 'chat') return 'vexa';
+    // Settings → «Сервер и мониторинг» was folded into «Метрики».
+    const requestedSection = new URLSearchParams(window.location.hash.slice(1)).get('section') ?? localStorage.getItem('vexa_settings_section');
+    if (requested === 'tools' || (requested === 'settings' && requestedSection === 'tools')) return 'metrics';
     if (!window.location.hash && (saved === 'settings' || (saved && legacySettingsTabs.includes(saved)))) return 'settings';
     return normalizeTab(new URLSearchParams(window.location.hash.slice(1)).get('tab') ?? saved);
   });
   // 'channels' is deliberately absent: the messenger/social channels are now the
   // SMM Factory section, and a saved 'channels' from before that move falls back
   // to the first settings page instead of rendering an empty one.
-  const [settingsSection, setSettingsSection] = useState<'config' | 'currency' | 'tools' | 'subagents' | 'mcp' | 'obsidian' | 'memory' | 'logs' | 'activity' | 'keys'>(() => {
+  const [settingsSection, setSettingsSection] = useState<'config' | 'currency' | 'subagents' | 'mcp' | 'obsidian' | 'memory' | 'logs' | 'activity' | 'keys'>(() => {
     const savedSection = new URLSearchParams(window.location.hash.slice(1)).get('section') ?? localStorage.getItem('vexa_settings_section');
     if (savedSection && [...legacySettingsTabs, 'keys', 'currency'].includes(savedSection)) return savedSection as any;
     const savedTab = localStorage.getItem('vexa_active_tab');
@@ -303,9 +304,7 @@ export default function App() {
 
   // Tools and system stats states
   const [timers, setTimers] = useState<{ id: string; label: string; duration?: number; time_left: number; status: string; created_at: string; type?: string; target_time?: string; interval_hours?: number; fire_count?: number; agent_id?: string; prompt?: string }[]>([]);
-  const [systemStats, setSystemStats] = useState<SystemStats | null>(null);
 
-  const [uploads, setUploads] = useState<{ name: string; size_bytes: number }[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   // File attached to the current chat message (text context, not dataset upload)
   const [attachedFile, setAttachedFile] = useState<{ name: string; content: string; type?: string; pages?: number; truncated?: boolean } | null>(null);
@@ -475,7 +474,7 @@ export default function App() {
       const params = new URLSearchParams(window.location.hash.slice(1));
       setActiveTab(normalizeTab(params.get('tab')));
       const section = params.get('section');
-      setSettingsSection(section && ['config', 'currency', 'tools', 'subagents', 'mcp', 'obsidian', 'memory', 'logs', 'activity', 'keys'].includes(section) ? section as any : 'config');
+      setSettingsSection(section && ['config', 'currency', 'subagents', 'mcp', 'obsidian', 'memory', 'logs', 'activity', 'keys'].includes(section) ? section as any : 'config');
     };
     window.addEventListener('popstate', restoreRoute);
     window.addEventListener('hashchange', restoreRoute);
@@ -1842,13 +1841,6 @@ export default function App() {
       });
   }, [fetchWithAuth]);
 
-  const fetchUploads = () => {
-    fetch('/api/uploads')
-      .then(res => res.json())
-      .then(data => { if (Array.isArray(data)) setUploads(data); })
-      .catch(err => console.log('Error fetching uploads:', err));
-  };
-
   const fetchChatSessions = () => {
     fetch('/api/history/sessions')
       .then(res => res.json())
@@ -2236,7 +2228,6 @@ export default function App() {
     fetchMetrics();
       
     fetchDocuments();
-    fetchUploads();
     fetchSubagents();
     fetchProjects();
     fetchChatSessions();
@@ -2263,71 +2254,6 @@ export default function App() {
     // These fetch helpers and selectChat are intentionally initialized once per auth session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthenticated]);
-
-  // Fetch system stats and timers when the "tools" (Server & Monitoring) tab is active
-  useEffect(() => {
-    if (!isAuthenticated || activeTab !== 'settings' || settingsSection !== 'tools') return;
-
-    const fetchStats = () => {
-      fetch('/api/system/stats')
-        .then(async res => {
-          const contentType = res.headers.get('content-type') || '';
-          if (!res.ok || !contentType.includes('application/json')) {
-            throw new Error(`Telemetry API unavailable (${res.status})`);
-          }
-          return res.json();
-        })
-        .then(data => setSystemStats(data))
-        .catch(err => {
-          console.log('Error fetching system stats:', err);
-          setSystemStats({
-            available: false,
-            cpu_load_percent: null,
-            ram_used_percent: null,
-            ram_total_gb: null,
-            disk_used_percent: null,
-            disk_total_gb: null,
-            disk_used_gb: null,
-            status: 'unavailable',
-            source: 'backend telemetry API',
-            unavailable: ['cpu', 'ram', 'disk'],
-            error: err instanceof Error ? err.message : 'Telemetry API unavailable'
-          });
-        });
-    };
-
-    const fetchTimersData = () => {
-      fetch('/api/timers')
-        .then(async res => {
-          const contentType = res.headers.get('content-type') || '';
-          if (!res.ok || !contentType.includes('application/json')) {
-            throw new Error(`Timers API unavailable (${res.status})`);
-          }
-          const data = await res.json();
-          if (!Array.isArray(data)) {
-            throw new Error('Timers API returned an invalid payload');
-          }
-          return data;
-        })
-        .then(data => setTimers(data))
-        .catch(err => console.log('Error fetching timers:', err));
-    };
-
-    fetchStats();
-    fetchTimersData();
-    fetchUploads();
-
-    const statsInterval = setInterval(() => {
-      fetchStats();
-      fetchUploads();
-    }, 5000);
-    const timersInterval = setInterval(fetchTimersData, 2000);
-
-    return () => {
-      clearInterval(statsInterval);
-      clearInterval(timersInterval);
-    };
-  }, [activeTab, settingsSection, isAuthenticated]);
 
   // Local smooth countdown for timers in state
   useEffect(() => {
@@ -3327,10 +3253,6 @@ export default function App() {
                 <KeyRound size={15} />
                 <span>{t('navApiKeys')}</span>
               </button>
-              <button type="button" className={settingsSection === 'tools' ? 'is-active' : ''} onClick={() => setSettingsSection('tools')}>
-                <Wrench size={15} />
-                <span>{t('navTools')}</span>
-              </button>
               <button type="button" className={settingsSection === 'subagents' ? 'is-active' : ''} onClick={() => { setSettingsSection('subagents'); selectChat(currentChatId === 'dashboard' ? 'dashboard' : currentChatId); }}>
                 <Layers size={15} />
                 <span>{t('navSubagents')}</span>
@@ -3420,14 +3342,6 @@ export default function App() {
                 handleSearchMemory={handleSearchMemory}
                 handleClearMemorySearch={handleClearMemorySearch}
                 handleDeleteDocument={handleDeleteDocument}
-              />
-            )}
-
-            {settingsSection === 'tools' && (
-              <ToolsTab
-                systemStats={systemStats}
-                uploads={uploads}
-                language={language}
               />
             )}
 
