@@ -8,6 +8,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from backend.speech_abbrev_ru import expand_ru_abbreviations
 from backend.speech_numbers_ru import normalize_ru_numbers
 
 
@@ -71,6 +72,9 @@ def _tts_config() -> Dict[str, Any]:
         # way RHVoice's Russian voice does) — an optional English model lets
         # synthesize_speech pick per reply, mirroring voice/voice_en below.
         "piper_model_en": os.getenv("VOICE_TTS_PIPER_MODEL_EN", "").strip(),
+        # Spell Russian abbreviations and numbers out first: the ru_RU model read
+        # «ООО» as «а у» and «ИНН» as «Энен» (faster-whisper check, 2026-10-25).
+        "piper_normalize": _env_flag("VOICE_TTS_PIPER_NORMALIZE", True),
         "rhvoice_binary": os.getenv("VOICE_TTS_RHVOICE_BINARY", "RHVoice-test").strip() or "RHVoice-test",
         "voice": os.getenv("VOICE_TTS_VOICE", "").strip(),
         # RHVoice's Russian voices mangle English text (and vice versa) — a second,
@@ -400,6 +404,8 @@ def _synthesize_with(
         }
     if provider == "piper":
         piper_model = _select_piper_model(clean_text, config)
+        if config["piper_normalize"] and _detect_language_for_text(clean_text) == "ru":
+            clean_text = normalize_ru_numbers(expand_ru_abbreviations(clean_text))
         command = [
             config["piper_binary"],
             "-m",

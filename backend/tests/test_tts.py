@@ -194,3 +194,35 @@ def test_failing_xtts_falls_back_to_piper_instead_of_going_mute(monkeypatch, tmp
 
     assert result["provider"] == "piper"
     assert output.read_bytes() == b"RIFFpiper-wav"
+
+
+def _piper_input(monkeypatch, tmp_path, text, normalize="true"):
+    monkeypatch.setenv("VOICE_TTS_ENABLED", "true")
+    monkeypatch.setenv("VOICE_TTS_PROVIDER", "piper")
+    monkeypatch.setenv("VOICE_TTS_PIPER_NORMALIZE", normalize)
+    piper_model = tmp_path / "ru.onnx"
+    piper_model.write_bytes(b"model")
+    monkeypatch.setenv("VOICE_TTS_PIPER_MODEL", str(piper_model))
+    monkeypatch.setattr(tts_module.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    output = tmp_path / "answer.wav"
+    sent = {}
+
+    def fake_run(command, **kwargs):
+        sent["input"] = kwargs["input"]
+        Path(output).write_bytes(b"RIFFpiper-wav")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(tts_module.subprocess, "run", fake_run)
+    synthesize_speech(text, str(output))
+    return sent["input"]
+
+
+def test_piper_gets_russian_abbreviations_and_numbers_spelled_out(monkeypatch, tmp_path):
+    spoken = _piper_input(monkeypatch, tmp_path, "ООО «Ромашка» оплатило через СБП 12 500 рублей в 14:30.")
+    assert spoken == ("о-о-о «Ромашка» оплатило через эс-бэ-пэ двенадцать тысяч пятьсот рублей "
+                      "в четырнадцать тридцать.")
+
+
+def test_piper_normalization_can_be_switched_off(monkeypatch, tmp_path):
+    text = "ООО «Ромашка» оплатило через СБП."
+    assert _piper_input(monkeypatch, tmp_path, text, normalize="false") == text
