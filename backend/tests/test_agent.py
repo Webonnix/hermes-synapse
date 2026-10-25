@@ -890,6 +890,24 @@ def test_agent_management_request_offers_delegation_tools():
     assert {"list_subagents", "call_subagent", "create_subagent"} <= names
 
 
+@pytest.mark.parametrize("message", [
+    "Запиши встречу с Ивановым на завтра в 15:00",
+    "Запиши созвон с бухгалтером на пятницу",
+    "Поставь встречу с Мариной на 28 октября в 18:30",
+])
+def test_owner_meeting_request_offers_add_calendar_event(message):
+    """"Запиши встречу" matched only get_calendar_events, so the model searched with
+    list_tools and sometimes picked the call-only propose_meeting instead."""
+    assert "add_calendar_event" in _selected(message)
+
+
+def test_phone_meeting_tools_say_they_are_call_only():
+    from backend.phone_context import TOOLS_SCHEMA as PHONE_TOOLS
+    descriptions = {t["function"]["name"]: t["function"]["description"] for t in PHONE_TOOLS}
+    for name in ("propose_meeting", "calendar_free_slots"):
+        assert descriptions[name].startswith("Только во время телефонного звонка")
+
+
 def test_google_phrasings_reach_web_search():
     for message in ("загугли что нового в Qwen", "look up the release notes"):
         assert "web_search" in _selected(message), message
