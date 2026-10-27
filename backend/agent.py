@@ -1045,6 +1045,21 @@ def _extract_memory_facts(user_message: str) -> List[Dict[str, str]]:
     return list(deduped.values())
 
 
+def _autonomy_directive() -> str:
+    """The owner's autonomy mode (backend/autonomy_mode.py) as a prompt fragment.
+
+    Empty in supervised mode. Otherwise it tells the agent that approvals are
+    waived and to finish the task on its own instead of asking at every step.
+    A read failure means no fragment, never a broken turn."""
+    try:
+        from backend.autonomy_mode import prompt_directive
+
+        return prompt_directive()
+    except Exception:
+        logger.exception("Could not build the autonomy directive")
+        return ""
+
+
 def _address_directive() -> str:
     """System-prompt fragment governing how an agent refers to the user.
 
@@ -2318,6 +2333,7 @@ class VexaAgent:
         system_prompt = FAST_SYSTEM_PROMPT if self.fast_mode else self.system_prompt
         system_info += _local_model_system_hint(self.model, self.api_base, self.local_think)
         system_info += _address_directive()
+        system_info += _autonomy_directive()
         system_info += _chat_system_addendum()
         # The local model is told which external AI Router models it has and is
         # always handed the tool to use them (backend/external_delegation.py) —
@@ -3106,6 +3122,7 @@ class VexaAgent:
         # chat's per-turn pick).
         system_info += _local_model_system_hint(subagent_model, subagent_api_base, self.local_think)
         system_info += _address_directive()
+        system_info += _autonomy_directive()
         # Operator whispers from the inbox (backend/inbox.py). System message only:
         # never the user's turn and never the stored history, so a note to the
         # agent is neither presented as the customer's words nor replayed later.

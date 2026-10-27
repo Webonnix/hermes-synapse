@@ -595,8 +595,11 @@ export interface ControlPlaneSummary {
     risk_levels: string[];
     unknown_tools: string;
     r4_double_confirmation: boolean;
+    autonomy_mode?: AgentAutonomyMode;
   };
 }
+
+export type AgentAutonomyMode = 'supervised' | 'auto' | 'full';
 
 export interface AutonomyCapability {
   id: string;

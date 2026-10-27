@@ -14,8 +14,9 @@ import {
   ShieldCheck,
   Wrench,
   X,
+  Zap,
 } from 'lucide-react';
-import type { AutonomySummary, ControlPlaneSummary, WorkflowTask } from '../types';
+import type { AgentAutonomyMode, AutonomySummary, ControlPlaneSummary, WorkflowTask } from '../types';
 import { DiffViewer, looksLikeUnifiedDiff } from './DiffViewer';
 
 type Props = { language: 'ru' | 'en' };
@@ -38,6 +39,13 @@ const COPY = {
     broker: 'Брокер возможностей', brokerHint: 'Только проверенные рецепты, изолированная установка и approval владельца',
     available: 'Готово', missing: 'Не установлено', request: 'Запросить', requested: 'Запрошено',
     managed: 'Управляемый рецепт', noInstall: 'Ручная настройка', installerOff: 'Исполнение отключено политикой',
+    modeTitle: 'Режим автономии агентов', modeHint: 'Действует сразу для Vexa и всех субагентов. Аварийная остановка, лимиты и запреты для шелла работают в любом режиме.',
+    modes: {
+      supervised: ['Под контролем', 'R3 — одно подтверждение, R4 — два. Как было раньше.'],
+      auto: ['Авто, кроме чувствительного', 'Всё выполняется само. Подтверждение только для шелла, удалений, звонков, браузера на чужих сайтах, установки ПО и настройки роутера.'],
+      full: ['Полный контроль', 'Агенты выполняют всё сами, без подтверждений. Торговые операции всё равно ждут вашего подтверждения.'],
+    },
+    fullConfirm: 'Включить полный контроль? Агенты смогут выполнять шелл-команды, удалять данные, звонить и действовать в браузере без вашего подтверждения.',
   },
   en: {
     title: 'Processes & Control', subtitle: 'Tasks, approvals, limits and execution evidence',
@@ -55,6 +63,13 @@ const COPY = {
     broker: 'Capability broker', brokerHint: 'Reviewed recipes, isolated installation and explicit owner approval',
     available: 'Ready', missing: 'Not installed', request: 'Request', requested: 'Requested',
     managed: 'Managed recipe', noInstall: 'Manual setup', installerOff: 'Execution disabled by policy',
+    modeTitle: 'Agent autonomy', modeHint: 'Applies at once to Vexa and every sub-agent. Emergency stop, budgets and the shell deny-list hold in every mode.',
+    modes: {
+      supervised: ['Supervised', 'R3 needs one approval, R4 two. The previous behaviour.'],
+      auto: ['Auto except sensitive', 'Everything runs on its own. Approval only for shell, deletions, calls, browser actions on third-party sites, installs and router changes.'],
+      full: ['Full control', 'Agents do everything on their own, no approvals. Trading still waits for your approval.'],
+    },
+    fullConfirm: 'Enable full control? Agents will be able to run shell commands, delete data, place calls and act in the browser without your approval.',
   },
 } as const;
 
@@ -150,6 +165,22 @@ export function ProcessesTab({ language }: Props) {
     if (!window.confirm(copy.rejectConfirm)) return;
     void post(`/api/control-plane/tasks/${encodeURIComponent(task.id)}/reject`, 'Rejected by owner');
   };
+  const setAutonomyMode = async (mode: AgentAutonomyMode) => {
+    if (mode === 'full' && !window.confirm(copy.fullConfirm)) return;
+    setBusy('autonomy-mode');
+    try {
+      const response = await fetch('/api/agent-autonomy', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+      await load(true);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      setBusy('');
+    }
+  };
   const kill = () => {
     if (!window.confirm(copy.stopConfirm)) return;
     void post('/api/control-plane/kill', 'Emergency stop from web console');
@@ -192,6 +223,7 @@ export function ProcessesTab({ language }: Props) {
   if (loading && !summary) return <div className="control-loading"><RefreshCw className="spin-slow" size={20} />Control Plane</div>;
 
   const stopped = Boolean(summary?.state.kill_switch);
+  const autonomyMode: AgentAutonomyMode = summary?.policy.autonomy_mode || 'supervised';
   return (
     <div className="control-page">
       <header className="control-header">
@@ -207,6 +239,23 @@ export function ProcessesTab({ language }: Props) {
 
       {error && <div className="control-alert"><AlertTriangle size={15} />{copy.failedLoad} {error}</div>}
       {stopped && <div className="control-stop-reason"><Ban size={15} /><strong>{copy.stoppedReason}:</strong> {summary?.state.reason || '—'}</div>}
+
+      <section className="control-mode" aria-labelledby="control-mode-title">
+        <div className="control-mode-head"><Zap size={16} /><div><h3 id="control-mode-title">{copy.modeTitle}</h3><small>{copy.modeHint}</small></div></div>
+        <div className="control-mode-options" role="radiogroup" aria-labelledby="control-mode-title">
+          {(['supervised', 'auto', 'full'] as AgentAutonomyMode[]).map(mode => (
+            <button
+              key={mode}
+              type="button"
+              role="radio"
+              aria-checked={autonomyMode === mode}
+              className={`control-mode-option is-${mode}${autonomyMode === mode ? ' is-active' : ''}`}
+              disabled={Boolean(busy) || autonomyMode === mode}
+              onClick={() => void setAutonomyMode(mode)}
+            ><strong>{copy.modes[mode][0]}</strong><small>{copy.modes[mode][1]}</small></button>
+          ))}
+        </div>
+      </section>
 
       <section className="control-metrics" aria-label="Control Plane metrics">
         <div><span>{copy.approvals}</span><strong>{summary?.counts.awaiting_approval || 0}</strong></div>

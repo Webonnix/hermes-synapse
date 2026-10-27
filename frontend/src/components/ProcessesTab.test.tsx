@@ -67,4 +67,26 @@ describe('ProcessesTab', () => {
     expect(window.confirm).toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it('switches the agent autonomy mode, confirming full control first', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => (
+      String(input) === '/api/autonomy/summary'
+        ? { ok: true, json: async () => autonomySummary }
+        : { ok: true, json: async () => summary }
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    render(<ProcessesTab language="en" />);
+    expect(await screen.findByRole('radio', { name: /supervised/i })).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(screen.getByRole('radio', { name: /full control/i }));
+    expect(confirm).toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/agent-autonomy', expect.anything());
+
+    fireEvent.click(screen.getByRole('radio', { name: /auto except sensitive/i }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      '/api/agent-autonomy',
+      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ mode: 'auto' }) }),
+    ));
+  });
 });

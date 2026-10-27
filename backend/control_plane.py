@@ -242,8 +242,15 @@ def set_kill_switch(enabled: bool, reason: str = "", actor: str = "owner") -> Di
 
 
 def create_tool_task(tool_name: str, arguments: Dict[str, Any], chat_id: str) -> Dict[str, Any]:
+    from backend import autonomy_mode
+
     risk_class = classify_tool_risk(tool_name)
-    approvals_required = 1 if risk_class == "R3" else 2 if risk_class == "R4" else 0
+    # The owner's autonomy mode (backend/autonomy_mode.py) may waive the R3/R4
+    # approvals; the waiver is recorded as its own evidence event below.
+    mode = autonomy_mode.get_mode()
+    supervised_approvals = 1 if risk_class == "R3" else 2 if risk_class == "R4" else 0
+    approvals_required = autonomy_mode.approvals_required(tool_name, risk_class, mode)
+    auto_approved = approvals_required < supervised_approvals
     status = "awaiting_approval" if approvals_required else "queued"
     safe_arguments = _redact(arguments)
     canonical = json.dumps([chat_id, tool_name, safe_arguments], ensure_ascii=False, sort_keys=True)
@@ -257,6 +264,18 @@ def create_tool_task(tool_name: str, arguments: Dict[str, Any], chat_id: str) ->
             (idempotency_key, *OPEN_STATUSES),
         ).fetchone()
         if existing:
+            # Asked again after the owner loosened the mode: the queued request
+            # must not keep waiting for approvals the new mode no longer needs.
+            if existing["status"] == "awaiting_approval" and approvals_required < existing["approvals_required"]:
+                conn.execute(
+                    "UPDATE workflow_tasks SET approvals_required = ?, status = ?, updated_at = ? WHERE id = ?",
+                    (approvals_required, status if approvals_required > existing["approval_count"] else "approved",
+                     now, existing["id"]),
+                )
+                _event(conn, existing["id"], "auto_approved", f"autonomy:{mode}",
+                       f"Owner approval waived by autonomy mode '{mode}'", risk_class,
+                       metadata={"tool": tool_name, "waived_approvals": existing["approvals_required"] - approvals_required})
+                existing = conn.execute("SELECT * FROM workflow_tasks WHERE id = ?", (existing["id"],)).fetchone()
             return _task_from_row(existing)
 
         task_id = f"T-{uuid.uuid4().hex[:12]}"
@@ -275,13 +294,17 @@ def create_tool_task(tool_name: str, arguments: Dict[str, Any], chat_id: str) ->
                VALUES (?, 'agent', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task_id, chat_id, f"Execute {tool_name}", tool_name, _safe_json(arguments), MAIN_AGENT_ID, risk_class,
-                _autonomy_for_risk(risk_class), status, approvals_required,
+                "L4" if auto_approved else _autonomy_for_risk(risk_class), status, approvals_required,
                 json.dumps(["Tool returns a valid result", "No policy or budget violation"], ensure_ascii=False),
                 rollback, idempotency_key, now, now,
             ),
         )
         _event(conn, task_id, "task_created", "control-plane", f"Tool request classified as {risk_class}", risk_class,
                metadata={"tool": tool_name, "approval_count": approvals_required})
+        if auto_approved:
+            _event(conn, task_id, "auto_approved", f"autonomy:{mode}",
+                   f"Owner approval waived by autonomy mode '{mode}'", risk_class,
+                   metadata={"tool": tool_name, "waived_approvals": supervised_approvals - approvals_required})
         row = conn.execute("SELECT * FROM workflow_tasks WHERE id = ?", (task_id,)).fetchone()
     return _task_from_row(row)
 
@@ -539,6 +562,8 @@ def execute_governed_tool(
 
 
 def get_summary(limit: int = 100) -> Dict[str, Any]:
+    from backend import autonomy_mode
+
     tasks = list_tasks(limit=limit)
     counts: Dict[str, int] = {}
     for task in tasks:
@@ -549,5 +574,8 @@ def get_summary(limit: int = 100) -> Dict[str, Any]:
         "pending_approvals": [task for task in tasks if task["status"] == "awaiting_approval"],
         "tasks": tasks,
         "events": list_events(limit=50),
-        "policy": {"risk_levels": list(RISK_ORDER), "unknown_tools": "R4", "r4_double_confirmation": True},
+        "policy": {
+            "risk_levels": list(RISK_ORDER), "unknown_tools": "R4", "r4_double_confirmation": True,
+            "autonomy_mode": autonomy_mode.get_mode(),
+        },
     }

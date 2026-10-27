@@ -783,6 +783,15 @@ except Exception:
     logger.exception("Phone API not mounted")
 
 
+# AGENT AUTONOMY: the owner's one switch for how many approvals every agent's
+# tool calls need (backend/autonomy_mode.py).
+try:
+    from backend.autonomy_mode import router as autonomy_mode_router
+    app.include_router(autonomy_mode_router)
+except Exception:
+    logger.exception("Agent autonomy API not mounted")
+
+
 @app.get("/health/live", include_in_schema=False)
 async def health_live():
     return {"status": "ok"}
