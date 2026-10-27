@@ -792,6 +792,15 @@ except Exception:
     logger.exception("Agent autonomy API not mounted")
 
 
+# SAVED BROWSER LOGINS: the owner signs in to a site in a remote login window and
+# agents reuse the session (backend/browser_sessions.py, browser_runner/server.py).
+try:
+    from backend.browser_sessions import router as browser_sessions_router
+    app.include_router(browser_sessions_router)
+except Exception:
+    logger.exception("Browser sessions API not mounted")
+
+
 @app.get("/health/live", include_in_schema=False)
 async def health_live():
     return {"status": "ok"}

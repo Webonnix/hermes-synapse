@@ -79,6 +79,8 @@ class RunRequest(BaseModel):
     mode: Literal["read_only", "interactive"] = "read_only"
     start_url: Optional[str] = None
     allowed_domains: Optional[List[str]] = None
+    # A saved login (see "Saved logins" below). Absent = a throwaway profile, as before.
+    profile: Optional[str] = Field(default=None, max_length=32)
 
 
 def _build_llm():
@@ -114,7 +116,7 @@ def _build_llm():
     return ChatOpenAI(model=model, base_url=base_url, api_key=api_key)
 
 
-def _build_browser_profile(requested_allowed_domains: Optional[List[str]]):
+def _build_browser_profile(requested_allowed_domains: Optional[List[str]], profile: Optional[str] = None):
     from browser_use import BrowserProfile
 
     # `allowed_domains` takes precedence over `prohibited_domains` in
@@ -127,17 +129,28 @@ def _build_browser_profile(requested_allowed_domains: Optional[List[str]]):
             if not any(host in d.lower() for host in INTERNAL_HOSTS)
         ]
 
+    extra: Dict[str, Any] = {}
+    if profile:
+        # The owner's own login lives in this directory. Same user agent and
+        # window as the login window, so the site sees the same browser.
+        extra = {
+            "user_data_dir": _profile_dir(profile),
+            "user_agent": _read_meta(profile).get("user_agent") or _user_agent(),
+            "viewport": dict(LOGIN_VIEWPORT),
+            "args": list(STEALTH_ARGS),
+        }
     return BrowserProfile(
         headless=True,
         allowed_domains=safe_allowed,
         prohibited_domains=INTERNAL_HOSTS,
         block_ip_addresses=True,
+        **extra,
     )
 
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "busy": _run_lock.locked(), "max_steps": MAX_STEPS}
+    return {"status": "ok", "busy": _run_lock.locked(), "login_open": bool(_login), "max_steps": MAX_STEPS}
 
 
 @app.get("/live-frame", dependencies=[Depends(_require_token)])
@@ -170,6 +183,13 @@ async def _on_step(state: Any, output: Any, step_number: int) -> None:
 async def run(req: RunRequest) -> dict:
     if _run_lock.locked():
         raise HTTPException(status_code=429, detail="Another browser task is already running.")
+    if _login:
+        raise HTTPException(status_code=409, detail="The owner's login window is open; close it before running a task.")
+    if req.profile:
+        _check_profile_name(req.profile)
+        if not os.path.isdir(_profile_dir(req.profile)):
+            raise HTTPException(status_code=404, detail=f"No saved login named '{req.profile}'. The owner has to sign in first.")
+        _touch_profile(req.profile, "last_used_at")
 
     async with _run_lock:
         try:
@@ -180,7 +200,7 @@ async def run(req: RunRequest) -> dict:
         from browser_use import Agent, Tools
 
         tools = Tools(exclude_actions=READ_ONLY_EXCLUDED_ACTIONS) if req.mode == "read_only" else Tools()
-        profile = _build_browser_profile(req.allowed_domains)
+        profile = _build_browser_profile(req.allowed_domains, req.profile)
 
         task_text = req.task.strip()
         if req.start_url:
@@ -223,6 +243,332 @@ async def run(req: RunRequest) -> dict:
             "errors": errors,
             "cost_usd": history.usage.total_cost if history.usage else 0.0,
         }
+
+
+# ── Saved logins ─────────────────────────────────────────────────────────────
+# The owner signs in to a site *themselves* in a remote-controlled browser
+# window (the dashboard shows screenshots and forwards clicks and keystrokes),
+# and the cookies stay in a persistent Chromium profile on a volume. Agent runs
+# that name the profile reuse that session. No password ever reaches the LLM,
+# the chat or a log: typed text goes straight to the page and is never logged.
+#
+# One browser at a time: a login window and an agent run never share a profile
+# directory (Chromium locks it), so /run refuses while a window is open and the
+# window refuses while a run is in flight.
+
+PROFILES_ROOT = os.getenv("BROWSER_PROFILES_ROOT", "/profiles")
+_PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+_META_FILE = ".hermes-profile.json"
+LOGIN_VIEWPORT = {"width": 1280, "height": 800}
+LOGIN_IDLE_SECONDS = max(60.0, float(os.getenv("BROWSER_LOGIN_IDLE_SECONDS", "600")))
+# Without it every page can read navigator.webdriver = true and many sign-in
+# pages refuse outright.
+STEALTH_ARGS = ["--disable-blink-features=AutomationControlled"]
+_ALLOWED_KEYS = {
+    "Enter", "Tab", "Backspace", "Delete", "Escape", "Space",
+    "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End",
+}
+
+_login: Dict[str, Any] = {}
+_login_guard = asyncio.Lock()
+_ua_cache: Dict[str, str] = {}
+
+
+def _check_profile_name(name: str) -> str:
+    if not _PROFILE_RE.match(name or ""):
+        raise HTTPException(status_code=422, detail="Profile name: 1-32 chars, a-z 0-9 _ -, starting with a letter or digit.")
+    return name
+
+
+def _profile_dir(name: str) -> str:
+    return os.path.join(PROFILES_ROOT, _check_profile_name(name))
+
+
+def _read_meta(name: str) -> Dict[str, Any]:
+    try:
+        with open(os.path.join(_profile_dir(name), _META_FILE), encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_meta(name: str, data: Dict[str, Any]) -> None:
+    path = os.path.join(_profile_dir(name), _META_FILE)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False)
+
+
+def _touch_profile(name: str, field: str) -> None:
+    try:
+        meta = _read_meta(name)
+        meta[field] = time.time()
+        _write_meta(name, meta)
+    except OSError:
+        logger.warning("Could not update metadata of profile %s", name)
+
+
+def _user_agent() -> str:
+    """A normal desktop Chrome UA for the bundled Chromium's real version:
+    headless Chromium announces itself as "HeadlessChrome", which sign-in
+    pages reject. BROWSER_USER_AGENT overrides it."""
+    configured = os.getenv("BROWSER_USER_AGENT", "").strip()
+    if configured:
+        return configured
+    if "ua" not in _ua_cache:
+        _ua_cache["ua"] = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{v} Safari/537.36"
+    return _ua_cache["ua"].format(v=_ua_cache.get("version", "141.0.0.0"))
+
+
+async def _detect_chrome_version(pw: Any) -> None:
+    if "version" in _ua_cache:
+        return
+    try:
+        browser = await pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+        try:
+            _ua_cache["version"] = browser.version
+        finally:
+            await browser.close()
+    except Exception:  # noqa: BLE001 — the fallback version string still works
+        logger.warning("Could not read the bundled Chromium version", exc_info=True)
+
+
+def _blocked_url(url: str) -> bool:
+    """True for anything inside the Docker network or on a private address —
+    the same boundary INTERNAL_HOSTS/block_ip_addresses draw for agent runs."""
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    if parts.scheme in ("data", "blob", "about"):
+        return False
+    if parts.scheme not in ("http", "https", "ws", "wss"):
+        return True
+    host = (parts.hostname or "").lower().rstrip(".")
+    if not host or host in INTERNAL_HOSTS or host.endswith((".internal", ".local", ".localhost")):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified
+
+
+async def _guard_route(route: Any) -> None:
+    if _blocked_url(route.request.url):
+        await route.abort()
+    else:
+        await route.continue_()
+
+
+def _current_page() -> Any:
+    pages = [page for page in _login["context"].pages if not page.is_closed()]
+    if not pages:
+        return None
+    page = _login.get("page")
+    return page if page in pages else pages[-1]
+
+
+async def _close_login() -> None:
+    session = dict(_login)
+    _login.clear()
+    watchdog = session.get("watchdog")
+    if watchdog and watchdog is not asyncio.current_task():
+        watchdog.cancel()
+    try:
+        if session.get("context") is not None:
+            await session["context"].close()  # flushes cookies to the profile directory
+    except Exception:  # noqa: BLE001 — cleanup only
+        logger.warning("Error while closing the login window", exc_info=True)
+    try:
+        if session.get("pw") is not None:
+            await session["pw"].stop()
+    except Exception:  # noqa: BLE001 — cleanup only
+        logger.warning("Error while stopping Playwright", exc_info=True)
+    if session.get("profile"):
+        _touch_profile(session["profile"], "last_login_at")
+
+
+async def _login_watchdog() -> None:
+    while _login:
+        await asyncio.sleep(15)
+        if _login and time.time() - _login.get("last_active", 0) > LOGIN_IDLE_SECONDS:
+            logger.info("Closing an idle login window (profile %s)", _login.get("profile"))
+            async with _login_guard:
+                await _close_login()
+
+
+class LoginStart(BaseModel):
+    profile: str = Field(min_length=1, max_length=32)
+    url: str = Field(min_length=1, max_length=2000)
+    label: Optional[str] = Field(default=None, max_length=80)
+
+
+class LoginInput(BaseModel):
+    type: Literal["click", "type", "key", "scroll", "navigate", "back"]
+    x: Optional[float] = Field(default=None, ge=0, le=1)
+    y: Optional[float] = Field(default=None, ge=0, le=1)
+    text: Optional[str] = Field(default=None, max_length=500)
+    key: Optional[str] = Field(default=None, max_length=20)
+    dy: Optional[float] = Field(default=None, ge=-5000, le=5000)
+    url: Optional[str] = Field(default=None, max_length=2000)
+
+
+@app.get("/profiles", dependencies=[Depends(_require_token)])
+async def list_profiles() -> dict:
+    items = []
+    if os.path.isdir(PROFILES_ROOT):
+        for name in sorted(os.listdir(PROFILES_ROOT)):
+            if not _PROFILE_RE.match(name) or not os.path.isdir(os.path.join(PROFILES_ROOT, name)):
+                continue
+            meta = _read_meta(name)
+            items.append({
+                "name": name,
+                "label": meta.get("label") or name,
+                "start_url": meta.get("start_url") or "",
+                "created_at": meta.get("created_at"),
+                "last_login_at": meta.get("last_login_at"),
+                "last_used_at": meta.get("last_used_at"),
+            })
+    return {"profiles": items, "login_open": _login.get("profile")}
+
+
+@app.delete("/profiles/{name}", dependencies=[Depends(_require_token)])
+async def delete_profile(name: str) -> dict:
+    import shutil
+
+    path = _profile_dir(name)
+    if _login.get("profile") == name or _run_lock.locked():
+        raise HTTPException(status_code=409, detail="The profile is in use.")
+    if not os.path.isdir(path):
+        raise HTTPException(status_code=404, detail="No such profile.")
+    shutil.rmtree(path)
+    return {"deleted": name}
+
+
+@app.post("/login/start", dependencies=[Depends(_require_token)])
+async def login_start(req: LoginStart) -> dict:
+    if _run_lock.locked():
+        raise HTTPException(status_code=429, detail="A browser task is running; try again when it finishes.")
+    if not req.url.startswith(("http://", "https://")) or _blocked_url(req.url):
+        raise HTTPException(status_code=422, detail="Only public http(s) addresses can be opened.")
+    path = _profile_dir(req.profile)
+    async with _login_guard:
+        if _login:
+            await _close_login()
+        from playwright.async_api import async_playwright
+
+        os.makedirs(path, exist_ok=True)
+        meta = _read_meta(req.profile)
+        meta.setdefault("created_at", time.time())
+        meta["start_url"] = req.url
+        meta["label"] = req.label or meta.get("label") or req.profile
+        _write_meta(req.profile, meta)
+
+        pw = await async_playwright().start()
+        try:
+            await _detect_chrome_version(pw)
+            meta["user_agent"] = _user_agent()
+            _write_meta(req.profile, meta)
+            context = await pw.chromium.launch_persistent_context(
+                path,
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage", *STEALTH_ARGS],
+                viewport=dict(LOGIN_VIEWPORT),
+                user_agent=_user_agent(),
+                locale="ru-RU",
+            )
+        except Exception as exc:
+            await pw.stop()
+            logger.exception("Could not open the login window")
+            raise HTTPException(status_code=500, detail=f"Could not start the browser: {type(exc).__name__}") from exc
+        await context.route("**/*", _guard_route)
+
+        def _on_page(page: Any) -> None:
+            # Sign-in popups ("Continue with Facebook") become the visible page.
+            _login["page"] = page
+
+        context.on("page", _on_page)
+        page = context.pages[0] if context.pages else await context.new_page()
+        _login.update({"pw": pw, "context": context, "page": page, "profile": req.profile, "last_active": time.time()})
+        _login["watchdog"] = asyncio.create_task(_login_watchdog())
+        try:
+            await page.goto(req.url, wait_until="domcontentloaded", timeout=30000)
+        except Exception:  # noqa: BLE001 — the owner sees whatever loaded and can retry
+            logger.warning("Initial navigation of the login window failed", exc_info=True)
+    return {"profile": req.profile, "open": True}
+
+
+@app.get("/login/frame", dependencies=[Depends(_require_token)])
+async def login_frame() -> dict:
+    if not _login:
+        return {"open": False}
+    page = _current_page()
+    if page is None:
+        return {"open": True, "profile": _login.get("profile"), "screenshot_b64": None, "url": "", "title": ""}
+    try:
+        shot = await page.screenshot(type="jpeg", quality=70, timeout=10000)
+        title = await page.title()
+    except Exception:  # noqa: BLE001 — mid-navigation; the next poll gets a frame
+        return {"open": True, "profile": _login.get("profile"), "screenshot_b64": None, "url": page.url, "title": ""}
+    return {
+        "open": True,
+        "profile": _login.get("profile"),
+        "url": page.url,
+        "title": title,
+        "width": LOGIN_VIEWPORT["width"],
+        "height": LOGIN_VIEWPORT["height"],
+        "screenshot_b64": base64.b64encode(shot).decode("ascii"),
+    }
+
+
+@app.post("/login/input", dependencies=[Depends(_require_token)])
+async def login_input(event: LoginInput) -> dict:
+    if not _login:
+        raise HTTPException(status_code=409, detail="No login window is open.")
+    page = _current_page()
+    if page is None:
+        raise HTTPException(status_code=409, detail="The login window has no open page.")
+    _login["last_active"] = time.time()
+    try:
+        if event.type == "click":
+            if event.x is None or event.y is None:
+                raise HTTPException(status_code=422, detail="click needs x and y")
+            await page.mouse.click(event.x * LOGIN_VIEWPORT["width"], event.y * LOGIN_VIEWPORT["height"])
+        elif event.type == "type":
+            # Never logged: this is where the owner types passwords and codes.
+            await page.keyboard.type(event.text or "", delay=25)
+        elif event.type == "key":
+            if event.key not in _ALLOWED_KEYS:
+                raise HTTPException(status_code=422, detail="Unsupported key")
+            await page.keyboard.press(" " if event.key == "Space" else event.key)
+        elif event.type == "scroll":
+            await page.mouse.move(LOGIN_VIEWPORT["width"] / 2, LOGIN_VIEWPORT["height"] / 2)
+            await page.mouse.wheel(0, event.dy or 0)
+        elif event.type == "navigate":
+            url = (event.url or "").strip()
+            if not url.startswith(("http://", "https://")):
+                url = f"https://{url}"
+            if _blocked_url(url):
+                raise HTTPException(status_code=422, detail="Only public http(s) addresses can be opened.")
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        elif event.type == "back":
+            await page.go_back(wait_until="domcontentloaded", timeout=15000)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — a failed click must not kill the window
+        logger.warning("Login window input %s failed: %s", event.type, type(exc).__name__)
+        return {"ok": False, "error": type(exc).__name__}
+    return {"ok": True}
+
+
+@app.post("/login/stop", dependencies=[Depends(_require_token)])
+async def login_stop() -> dict:
+    async with _login_guard:
+        profile = _login.get("profile")
+        if _login:
+            await _close_login()
+    return {"open": False, "saved": profile}
 
 
 # ── Deterministic static-site audit ──────────────────────────────────────────

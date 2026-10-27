@@ -280,6 +280,25 @@ TOOL_INTENT_KEYWORDS = {
 # Names that aren't in the caller's pool are dropped by the final filter in
 # _select_tools_for_query, so a bundle can never widen a principal's rights.
 TOOL_INTENT_BUNDLES: Dict[str, Dict[str, List[str]]] = {
+    # Acting on a website or inside the owner's account on one. Without this
+    # "зайди в мой инстаграм" matched nothing, the turn had no browser, and the
+    # model answered that it was a text-only assistant.
+    "web_accounts": {
+        "keywords": [
+            "инстаграм", "instagram", "инсту", "инсте", "фейсбук", "facebook", "вконтакте", "vk.com",
+            "тикток", "tiktok", "linkedin", "линкедин", "твиттер", "twitter", "threads", "youtube",
+            "ютуб", "pinterest", "reddit", "телеграм-канал", "авито", "avito", "ozon", "озон",
+            "wildberries", "вайлдберриз", "aliexpress", "алиэкспресс", "amazon", "ebay", "booking",
+            "airbnb", "госуслуг",
+            "зарегистрир", "регистрац", "войди в", "войти в", "зайди в", "зайти в", "зайди на",
+            "зайди под", "зайти под", "под моим", "мой аккаунт", "моём аккаунте", "моем аккаунте",
+            "моего аккаунта", "мой профиль", "залогин", "авторизуй", "личный кабинет", "личном кабинете",
+            "на сайте", "опубликуй пост", "выложи пост", "запости", "поставь лайк", "подпишись на",
+            "отпишись от", "директ", "закажи на", "оформи заказ",
+            "log in to", "login to", "sign up", "sign in", "my account",
+        ],
+        "tools": ["browser_read", "browser_task"],
+    },
     "dev": {
         "keywords": [
             "код", "репозитор", "исходник", "codebase", "коммит", "commit", "git",
@@ -1043,6 +1062,42 @@ def _extract_memory_facts(user_message: str) -> List[Dict[str, str]]:
     for fact in facts:
         deduped[fact["key"]] = fact
     return list(deduped.values())
+
+
+def _browser_directive(tool_names: set) -> str:
+    """What the agent must know when it holds the browser tools: that it has a
+    real browser, which saved logins exist (backend/browser_sessions.py), and
+    that the owner — never the chat — handles passwords, SMS codes and captchas."""
+    if not tool_names & {"browser_read", "browser_task"}:
+        return ""
+    try:
+        from backend.browser_sessions import list_profiles_cached
+
+        profiles = list_profiles_cached()
+    except Exception:
+        profiles = []
+    if profiles:
+        saved = ", ".join(
+            f"{item['name']} ({item.get('start_url') or item.get('label') or ''})".replace(" ()", "")
+            for item in profiles
+        )
+        sessions = (
+            f"Сохранённые входы владельца: {saved}. Чтобы действовать под его аккаунтом, передай имя "
+            f"в параметре profile (browser_read — читать, browser_task — действовать)."
+        )
+    else:
+        sessions = "Сохранённых входов пока нет."
+    return (
+        "\n\n[Браузер]: У тебя есть настоящий браузер на сервере: browser_read читает сайты, "
+        "browser_task кликает, заполняет формы, публикует и отправляет. Никогда не говори, что ты "
+        "только текстовый ассистент или что у тебя нет доступа к сайтам — используй браузер.\n"
+        f"{sessions}\n"
+        "Если нужного входа нет — не проси пароль в чате. Скажи владельцу открыть «Настройки → "
+        "Браузер: сохранённые входы», нажать «Новый вход» и войти на сайт самому; потом повтори задачу "
+        "с этим profile. Регистрацию нового аккаунта (телефон, SMS-код, капча) владелец проходит сам "
+        "в том же окне — ты помогаешь подготовить данные и дальше работаешь в его сессии. "
+        "Не регистрируй аккаунты массово и не обходи капчи."
+    )
 
 
 def _autonomy_directive() -> str:
@@ -2313,6 +2368,7 @@ class VexaAgent:
                 f"Если инструмент вернул status=awaiting_approval, действие НЕ выполнено. "
                 f"Сообщи ID задачи и попроси владельца подтвердить её в разделе «Процессы» или Telegram."
                 + _work_discipline({t["function"]["name"] for t in matched_tools})
+                + _browser_directive({t["function"]["name"] for t in matched_tools})
             )
         elif selected_tools:
             # Nothing matched by keyword, so the turn carries only the list_tools
@@ -2323,7 +2379,9 @@ class VexaAgent:
                 f"Отвечай кратко и напрямую. Не показывай ход рассуждений.\n"
                 f"Если для ответа нужны свежие данные, файлы проекта, другие агенты или любое "
                 f"действие — сначала вызови list_tools с описанием задачи, нужные инструменты "
-                f"подключатся сразу. Не отказывайся и не выдумывай результат."
+                f"подключатся сразу. Не отказывайся и не выдумывай результат. "
+                f"У тебя есть настоящий браузер на сервере (сайты, соцсети, личные кабинеты) — "
+                f"никогда не говори, что ты только текстовый ассистент."
             )
         else:
             system_info = (

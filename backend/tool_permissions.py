@@ -235,6 +235,23 @@ def denial_payload(principal: Optional[str], tool_name: str) -> str:
     )
 
 
+# ── Saved browser logins ─────────────────────────────────────────────────────
+# browser_read/browser_task may name a saved login (backend/browser_sessions.py)
+# and then act inside the owner's own account. browser_read is open to
+# sub-agents and, optionally, to public channels, so the argument — not the
+# tool — is what needs the owner principal.
+BROWSER_PROFILE_TOOLS = frozenset({"browser_read", "browser_task"})
+
+
+def check_tool_arguments(principal: Optional[str], tool_name: str, arguments: Optional[dict]) -> Optional[str]:
+    """A refusal reason when the arguments reach further than the principal may,
+    or None when the call may proceed."""
+    if tool_name in BROWSER_PROFILE_TOOLS and str((arguments or {}).get("profile") or "").strip():
+        if normalize_principal(principal) != OWNER:
+            return "Saved browser logins (the owner's own accounts) are available only to the main agent."
+    return None
+
+
 # ── The owner's own shell, kept "limited" ────────────────────────────────────
 # execute_command stays available to Vexa (R4 → two owner approvals in the
 # Control Plane), but a set of irreversible / host-wrecking shapes is refused

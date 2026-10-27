@@ -1603,7 +1603,8 @@ TOOLS_SCHEMA = [
                 "type": "object",
                 "properties": {
                     "task": {"type": "string", "description": "Что нужно найти/прочитать на сайте, на естественном языке."},
-                    "start_url": {"type": "string", "description": "Необязательный стартовый URL. Если не указан, агент сам найдёт нужную страницу."}
+                    "start_url": {"type": "string", "description": "Необязательный стартовый URL. Если не указан, агент сам найдёт нужную страницу."},
+                    "profile": {"type": "string", "description": "Имя сохранённого входа (например 'instagram'), в который владелец вошёл сам. С ним браузер работает под аккаунтом владельца; без него — чистый браузер без входа. Список входов есть в системной подсказке."}
                 },
                 "required": ["task"]
             }
@@ -1623,7 +1624,8 @@ TOOLS_SCHEMA = [
                 "type": "object",
                 "properties": {
                     "task": {"type": "string", "description": "Пошаговая задача на естественном языке: что открыть, что заполнить, что нажать."},
-                    "allowed_domains": {"type": "string", "description": "Необязательный список доменов через запятую, к которым ограничена навигация, например 'example.com,another.com'."}
+                    "allowed_domains": {"type": "string", "description": "Необязательный список доменов через запятую, к которым ограничена навигация, например 'example.com,another.com'."},
+                    "profile": {"type": "string", "description": "Имя сохранённого входа (например 'instagram'), в который владелец вошёл сам. С ним браузер работает под аккаунтом владельца; без него — чистый браузер без входа. Список входов есть в системной подсказке."}
                 },
                 "required": ["task"]
             }
@@ -2934,13 +2936,17 @@ def _browser_runner_request(payload: Dict[str, Any], timeout: float = 300.0) -> 
     return json.dumps(response.json(), ensure_ascii=False)
 
 
-def browser_read(task: str, start_url: Optional[str] = None) -> str:
-    return _browser_runner_request({"task": task, "mode": "read_only", "start_url": start_url or None})
+def browser_read(task: str, start_url: Optional[str] = None, profile: str = "") -> str:
+    return _browser_runner_request({
+        "task": task, "mode": "read_only", "start_url": start_url or None, "profile": (profile or "").strip() or None,
+    })
 
 
-def browser_task(task: str, allowed_domains: str = "") -> str:
+def browser_task(task: str, allowed_domains: str = "", profile: str = "") -> str:
     domains = [d.strip() for d in allowed_domains.split(",") if d.strip()] if allowed_domains else None
-    return _browser_runner_request({"task": task, "mode": "interactive", "allowed_domains": domains}, timeout=300.0)
+    return _browser_runner_request({
+        "task": task, "mode": "interactive", "allowed_domains": domains, "profile": (profile or "").strip() or None,
+    }, timeout=300.0)
 
 
 # ── Site review: what the dev-run actually built ────────────────────────────
@@ -3610,10 +3616,10 @@ def execute_tool(name: str, arguments: Dict[str, Any], chat_id: str = "default")
         return dev_review_demo()
 
     elif name == "browser_read":
-        return browser_read(arguments.get("task", ""), arguments.get("start_url"))
+        return browser_read(arguments.get("task", ""), arguments.get("start_url"), arguments.get("profile") or "")
 
     elif name == "browser_task":
-        return browser_task(arguments.get("task", ""), arguments.get("allowed_domains", ""))
+        return browser_task(arguments.get("task", ""), arguments.get("allowed_domains", ""), arguments.get("profile") or "")
 
     else:
         # Check if it is an MCP tool

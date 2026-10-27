@@ -521,6 +521,11 @@ def execute_governed_tool(
             logger.warning("Refused shell command for principal '%s': %s", principal, refusal)
             return json.dumps({"status": "forbidden", "error": refusal}, ensure_ascii=False)
 
+    refusal = tool_permissions.check_tool_arguments(principal, tool_name, arguments)
+    if refusal:
+        logger.warning("Refused %s arguments for principal '%s': %s", tool_name, principal, refusal)
+        return json.dumps({"status": "forbidden", "error": refusal}, ensure_ascii=False)
+
     if approved_task_id:
         task = get_task(approved_task_id)
         if not task:

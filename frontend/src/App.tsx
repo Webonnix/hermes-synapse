@@ -7,6 +7,7 @@ import {
   Settings,
   Terminal, 
   Activity, 
+  Globe,
   Cpu, 
   Database,
   Layers,
@@ -66,6 +67,7 @@ import {
   splitForSpeech,
   takeSpeechBatch,
 } from './speechChunks';
+const BrowserSessionsTab = lazy(() => import('./components/BrowserSessionsTab').then(module => ({ default: module.BrowserSessionsTab })));
 const ProcessesTab = lazy(() => import('./components/ProcessesTab').then(module => ({ default: module.ProcessesTab })));
 import { HermesMark } from './components/HermesMark';
 import { VexaLogo } from './components/VexaLogo';
@@ -161,9 +163,9 @@ export default function App() {
   // 'channels' is deliberately absent: the messenger/social channels are now the
   // SMM Factory section, and a saved 'channels' from before that move falls back
   // to the first settings page instead of rendering an empty one.
-  const [settingsSection, setSettingsSection] = useState<'config' | 'currency' | 'subagents' | 'mcp' | 'obsidian' | 'memory' | 'logs' | 'activity' | 'keys'>(() => {
+  const [settingsSection, setSettingsSection] = useState<'config' | 'currency' | 'subagents' | 'mcp' | 'obsidian' | 'memory' | 'logs' | 'activity' | 'keys' | 'browser'>(() => {
     const savedSection = new URLSearchParams(window.location.hash.slice(1)).get('section') ?? localStorage.getItem('vexa_settings_section');
-    if (savedSection && [...legacySettingsTabs, 'keys', 'currency'].includes(savedSection)) return savedSection as any;
+    if (savedSection && [...legacySettingsTabs, 'keys', 'currency', 'browser'].includes(savedSection)) return savedSection as any;
     const savedTab = localStorage.getItem('vexa_active_tab');
     return (savedTab && legacySettingsTabs.includes(savedTab) ? savedTab : 'config') as any;
   });
@@ -3261,6 +3263,10 @@ export default function App() {
                 <Server size={15} />
                 <span>{t('navMcp')}</span>
               </button>
+              <button type="button" className={settingsSection === 'browser' ? 'is-active' : ''} onClick={() => setSettingsSection('browser')}>
+                <Globe size={15} />
+                <span>{language === 'ru' ? 'Браузер' : 'Browser'}</span>
+              </button>
               <button type="button" className={settingsSection === 'obsidian' ? 'is-active' : ''} onClick={() => setSettingsSection('obsidian')}>
                 <BookOpen size={15} />
                 <span>{t('navObsidian')}</span>
@@ -3307,6 +3313,8 @@ export default function App() {
             )}
 
             {settingsSection === 'currency' && <CurrencySettingsTab />}
+
+            {settingsSection === 'browser' && <BrowserSessionsTab language={language === 'ru' ? 'ru' : 'en'} />}
 
             {settingsSection === 'keys' && <ApiKeysTab />}
 
