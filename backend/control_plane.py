@@ -151,6 +151,14 @@ TOOL_RISKS = {
     "agent_desktop_execute": "R2",
     "agent_desktop_switch_mode": "R2",
     "agent_desktop_delete": "R3",
+    # The agents' browser tools (Playwright MCP on the desktop's own Chromium,
+    # see sessions.BROWSER_READ_TOOLS). Looking at pages matches browser_read's
+    # R1. Acting on them (click, type, upload) is R2 like agent_desktop_execute:
+    # the same sandbox, the same internet, the same cookies are already within
+    # reach of the agent's shell, and the owner watches the screen live. A
+    # browser tool outside both lists is agent_desktop_other (R3).
+    "agent_desktop_browser_read": "R1",
+    "agent_desktop_browser_act": "R2",
     "agent_desktop_other": "R3",
 }
 

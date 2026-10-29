@@ -23,11 +23,23 @@ x11vnc -display "$DISPLAY" -rfbport 5900 -localhost -forever -shared -noshm -nop
 
 # The agent's own browser, on screen so the owner sees what it does. Chromium's
 # own sandbox needs kernel features gVisor does not offer; the container is the
-# sandbox here. CDP stays on loopback for agents that drive the browser.
-chromium --no-sandbox --no-first-run --no-default-browser-check --disable-dev-shm-usage \
-    --user-data-dir="$HOME/.config/chromium-agent" \
-    --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 \
-    --window-position=0,0 --window-size=1440,860 about:blank >/dev/null 2>&1 &
+# sandbox here. CDP stays on loopback: the browser MCP server attaches to it.
+#
+# Kept alive: if the agent or the owner closes the window, the agents' browser
+# tools would lose their browser (they then start a headless one of their own,
+# invisible to the owner). The lock files are removed first because they name
+# the previous container's hostname — a recreated desktop shares the profile,
+# and Chromium refuses a profile "in use on another computer", without CDP.
+(
+    while true; do
+        rm -f "$HOME/.config/chromium-agent/"Singleton*
+        chromium --no-sandbox --no-first-run --no-default-browser-check --disable-dev-shm-usage \
+            --user-data-dir="$HOME/.config/chromium-agent" \
+            --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 \
+            --window-position=0,0 --window-size=1440,860 about:blank >/dev/null 2>&1
+        sleep 2
+    done
+) &
 
 # A terminal for the owner: signing a CLI agent in (`grok login`) happens here.
 xterm -geometry 120x30+80+80 -e bash -l >/dev/null 2>&1 &

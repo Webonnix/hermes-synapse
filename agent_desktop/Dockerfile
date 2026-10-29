@@ -10,12 +10,17 @@ ARG NODE_VERSION=22.20.0
 # an agent's ACP behaviour is part of what the backend relies on.
 ARG OPENCODE_VERSION=1.19.3
 ARG GROK_VERSION=1.0.70
+# The agents' hands in the visible browser: an MCP server that attaches to the
+# desktop's own Chromium over CDP (backend/agent_runtimes/sessions.py passes it
+# to every ACP session). Never downloads a browser of its own.
+ARG PLAYWRIGHT_MCP_VERSION=0.0.83
 
 ENV PYTHONUNBUFFERED=1 \
     DISPLAY=:1 \
     HOME=/home/agent \
     AGENT_WORKSPACE=/home/agent/workspace \
-    NPM_CONFIG_UPDATE_NOTIFIER=false
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl git xz-utils procps \
@@ -26,6 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
     | tar -xJ -C /usr/local --strip-components=1 \
     && npm install -g "opencode-ai@${OPENCODE_VERSION}" "@xai-official/grok@${GROK_VERSION}" \
+       "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" \
     && npm cache clean --force
 
 RUN pip install --no-cache-dir "fastapi>=0.100.0" "uvicorn[standard]>=0.22.0"

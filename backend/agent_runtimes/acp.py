@@ -221,8 +221,8 @@ class AcpConnection:
         self.auth_methods = result.get("authMethods") or []
         return result
 
-    async def new_session(self, cwd: str) -> str:
-        result = await self.request("session/new", {"cwd": cwd, "mcpServers": []},
+    async def new_session(self, cwd: str, mcp_servers: Optional[list] = None) -> str:
+        result = await self.request("session/new", {"cwd": cwd, "mcpServers": mcp_servers or []},
                                     timeout=SESSION_TIMEOUT_S) or {}
         session_id = result.get("sessionId")
         if not session_id:

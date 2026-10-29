@@ -53,6 +53,44 @@ KIND_TOOLS = {
 }
 UNKNOWN_KIND_TOOL = "agent_desktop_unknown"
 
+# The browser MCP server every session gets: Playwright MCP (pinned in
+# agent_desktop/Dockerfile) attached over CDP to the desktop's visible
+# Chromium, so the agent clicks where the owner is watching.
+BROWSER_MCP_NAME = "browser"
+BROWSER_MCP_SERVER = {
+    "name": BROWSER_MCP_NAME,
+    "command": "/usr/local/bin/playwright-mcp",
+    "args": ["--cdp-endpoint", "http://127.0.0.1:9222", "--output-dir", "/tmp/playwright-mcp"],
+    "env": [],
+}
+# Agents report an MCP tool call as kind "other" titled "<server>_<tool>".
+# These Playwright MCP tools only look; everything else in BROWSER_ACT_TOOLS
+# acts on the page. A browser tool in neither set stays agent_desktop_other.
+BROWSER_READ_TOOLS = frozenset({
+    "browser_navigate", "browser_navigate_back", "browser_snapshot", "browser_take_screenshot",
+    "browser_tabs", "browser_find", "browser_console_messages", "browser_network_requests",
+    "browser_wait_for", "browser_resize", "browser_hover", "browser_close",
+})
+BROWSER_ACT_TOOLS = frozenset({
+    "browser_click", "browser_type", "browser_fill_form", "browser_select_option", "browser_press_key",
+    "browser_drag", "browser_file_upload", "browser_handle_dialog", "browser_evaluate",
+    "browser_run_code", "browser_mouse_click_xy", "browser_mouse_move_xy", "browser_mouse_drag_xy",
+})
+
+
+def classify_tool_call(tool_call: Dict[str, Any]) -> str:
+    """Control Plane tool name for an ACP permission request."""
+    kind = str(tool_call.get("kind") or "")
+    title = str(tool_call.get("title") or "")
+    prefix = f"{BROWSER_MCP_NAME}_"
+    if kind == "other" and title.startswith(prefix):
+        tool = title[len(prefix):]
+        if tool in BROWSER_READ_TOOLS:
+            return "agent_desktop_browser_read"
+        if tool in BROWSER_ACT_TOOLS:
+            return "agent_desktop_browser_act"
+    return KIND_TOOLS.get(kind, UNKNOWN_KIND_TOOL)
+
 PERMISSION_POLL_S = 2.0
 PERMISSION_TIMEOUT_S = 15 * 60
 EVENT_LOG_SIZE = 1000
@@ -146,7 +184,7 @@ class DesktopAgentSession:
         conn.start()
         try:
             await conn.initialize()
-            self.session_id = await conn.new_session(WORKSPACE)
+            self.session_id = await conn.new_session(WORKSPACE, [BROWSER_MCP_SERVER])
         except BaseException:
             await conn.close("setup failed")
             raise
@@ -168,7 +206,7 @@ class DesktopAgentSession:
     async def _on_permission(self, params: Dict[str, Any]) -> Dict[str, Any]:
         tool_call = params.get("toolCall") or {}
         options = params.get("options") or []
-        tool_name = KIND_TOOLS.get(str(tool_call.get("kind") or ""), UNKNOWN_KIND_TOOL)
+        tool_name = classify_tool_call(tool_call)
         title = str(tool_call.get("title") or tool_name)[:TEXT_PREVIEW]
         allowed, task_id, reason = await self._decide(tool_name, title, str(tool_call.get("toolCallId") or ""))
         self._emit({"type": "permission", "runtime": self.runtime, "run_id": self.run_id, "tool": tool_name,

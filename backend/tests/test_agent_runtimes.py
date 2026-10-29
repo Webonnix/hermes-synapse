@@ -486,3 +486,47 @@ def test_new_home_makes_opencode_ask_but_keeps_an_owner_edited_config(monkeypatc
     config.write_text('{"permission": {"bash": "allow"}}')
     desktop._prepare_home("alice")
     assert json.loads(config.read_text()) == {"permission": {"bash": "allow"}}
+
+
+# ── the agents' browser ─────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("tool_call,expected", [
+    ({"kind": "other", "title": "browser_browser_navigate"}, "agent_desktop_browser_read"),
+    ({"kind": "other", "title": "browser_browser_take_screenshot"}, "agent_desktop_browser_read"),
+    ({"kind": "other", "title": "browser_browser_click"}, "agent_desktop_browser_act"),
+    ({"kind": "other", "title": "browser_browser_file_upload"}, "agent_desktop_browser_act"),
+    # A browser tool nobody classified yet, and another server's tool, stay "other".
+    ({"kind": "other", "title": "browser_browser_install"}, "agent_desktop_other"),
+    ({"kind": "other", "title": "evil_browser_click"}, "agent_desktop_other"),
+    # The title only matters for "other": an edit titled like a browser tool is an edit.
+    ({"kind": "edit", "title": "browser_browser_snapshot"}, "agent_desktop_edit"),
+    ({"kind": "teleport", "title": "browser_browser_click"}, "agent_desktop_unknown"),
+])
+def test_browser_tool_calls_are_classified_by_what_they_do(tool_call, expected):
+    assert sessions.classify_tool_call(tool_call) == expected
+
+
+def test_browser_reads_are_r1_and_actions_r2(control_db):
+    assert control_plane.classify_tool_risk("agent_desktop_browser_read") == "R1"
+    assert control_plane.classify_tool_risk("agent_desktop_browser_act") == "R2"
+
+
+async def test_every_session_gets_the_desktop_browser(control_db, fake_desktop):
+    fake_desktop["agent"] = FakeAcpAgent().start()
+    manager = sessions.AgentDesktopManager()
+    manager.start_turn("alice", "grok", "x")
+    await _finish(manager, "alice")
+    new = next(m for m in fake_desktop["agent"].received if m.get("method") == "session/new")
+    [server] = new["params"]["mcpServers"]
+    assert server["name"] == "browser" and server["command"].startswith("/")
+    assert server["args"][:2] == ["--cdp-endpoint", "http://127.0.0.1:9222"]
+
+
+@pytest.mark.parametrize("networks", [None, {"p_web": {"IPAddress": "172.20.0.2"}}])
+def test_opencode_must_ask_for_every_tool_including_mcp(monkeypatch, tmp_path, networks):
+    _docker(monkeypatch, tmp_path, backend_networks=networks)
+    desktop._blocking_ensure("alice")
+    config = json.loads((tmp_path / "alice" / "home" / ".config" / "hermes" / "opencode.json").read_text())
+    assert config["permission"]["*"] == "ask"
+    assert all(value in ("ask", "allow") for value in config["permission"].values())
+    assert config["permission"].get("bash", "ask") == "ask" and config["permission"].get("edit", "ask") == "ask"

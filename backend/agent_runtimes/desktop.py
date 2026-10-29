@@ -154,6 +154,13 @@ OPENCODE_CONFIG = {
 }
 
 
+OPENCODE_PERMISSIONS = {
+    "*": "ask",
+    "read": "allow", "glob": "allow", "grep": "allow", "lsp": "allow",
+    "todowrite": "allow", "question": "allow", "skill": "allow",
+}
+
+
 def _write_resolv_conf() -> str:
     """Writes the desktops' resolv.conf and returns its host path.
 
@@ -198,6 +205,11 @@ def managed_opencode_config(key: str) -> Dict[str, Any]:
             },
         },
         "model": f"hermes/{model}",
+        # Hermes-enforced, so it lives here rather than in the owner's file:
+        # "*" also covers MCP tools (the browser), which OpenCode otherwise runs
+        # without asking — every such call would have bypassed the Control
+        # Plane. Pure lookups inside the workspace stay unasked.
+        "permission": OPENCODE_PERMISSIONS,
     }
 
 
@@ -213,8 +225,10 @@ def _prepare_home(key: str, with_local_model: bool = False) -> None:
     if with_local_model:
         managed.write_text(json.dumps(managed_opencode_config(key), indent=2) + "\n")
     else:
-        # No route to the backend: no provider that could only fail.
-        managed.write_text(json.dumps({"$schema": "https://opencode.ai/config.json"}) + "\n")
+        # No route to the backend: no provider that could only fail — but the
+        # permission policy applies either way.
+        managed.write_text(json.dumps({"$schema": "https://opencode.ai/config.json",
+                                       "permission": OPENCODE_PERMISSIONS}) + "\n")
     # The backend is root; the desktop drops to uid 10001 and must own its home,
     # or the very first write (the X authority file, the workspace) fails.
     subprocess.run(["chown", "-R", f"{DESKTOP_UID}:{DESKTOP_GID}", str(home)],
