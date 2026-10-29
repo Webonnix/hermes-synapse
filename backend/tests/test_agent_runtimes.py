@@ -308,23 +308,43 @@ def test_desktops_need_gvisor_unless_runc_is_opted_into(monkeypatch, runtime, al
             desktop.check_runtime(client)
 
 
-def test_new_desktop_is_locked_down_and_mounts_only_its_own_home(monkeypatch, tmp_path):
+def _docker(monkeypatch, tmp_path, *, existing=None, backend_networks=None):
+    """A fake Docker client: the dev-runner on p_dev-net + p_dev-egress-net, this
+    backend (looked up by hostname) and optionally an existing desktop."""
     monkeypatch.delenv("AGENT_DESKTOP_NETWORK_SOURCE", raising=False)
+    monkeypatch.delenv("AGENT_LLM_BACKEND_IP", raising=False)
     monkeypatch.setenv("DEV_RUNNER_CONTAINER_NAME", "proj-dev-runner")
     monkeypatch.setenv("AGENT_DESKTOP_HOST_ROOT", "/srv/desktops")
     monkeypatch.setenv("AGENT_DESKTOP_ROOT", str(tmp_path))
     monkeypatch.setenv("AGENT_DESKTOP_TOKEN_SECRET", "s3cret")
     monkeypatch.setenv("AGENT_DESKTOP_RUNTIME", "runsc")
-    monkeypatch.setattr(desktop, "_prepare_home", lambda key: None)
+    monkeypatch.setenv("LLM_MODEL", "qwen-local")
+    monkeypatch.setattr(desktop.subprocess, "run", lambda *a, **k: None)
+    monkeypatch.setattr(desktop.socket, "gethostname", lambda: "backend-ctr")
+    if backend_networks is None:
+        backend_networks = {"p_dev-net": {"IPAddress": "172.23.0.4"}, "p_web": {"IPAddress": "172.20.0.2"}}
+    containers = {
+        "proj-dev-runner": MagicMock(attrs={"NetworkSettings": {"Networks": {"p_dev-net": {}, "p_dev-egress-net": {}}}}),
+        "backend-ctr": MagicMock(attrs={"NetworkSettings": {"Networks": backend_networks}}),
+    }
+    if existing is not None:
+        containers["hermes-agent-desktop-alice"] = existing
     client = MagicMock()
     client.info.return_value = {"Runtimes": {"runsc": {}}}
     client.containers.list.return_value = []
-    client.containers.get.side_effect = lambda name: (
-        MagicMock(attrs={"NetworkSettings": {"Networks": {"p_dev-net": {}, "p_dev-egress-net": {}}}})
-        if name == "proj-dev-runner" else (_ for _ in ()).throw(LookupError(name))
-    )
-    monkeypatch.setattr(desktop, "_docker_client", lambda: client)
 
+    def get(name):
+        if name in containers:
+            return containers[name]
+        raise LookupError(name)
+
+    client.containers.get.side_effect = get
+    monkeypatch.setattr(desktop, "_docker_client", lambda: client)
+    return client
+
+
+def test_new_desktop_is_locked_down_and_mounts_only_its_own_home(monkeypatch, tmp_path):
+    client = _docker(monkeypatch, tmp_path)
     order = MagicMock()
     order.attach_mock(client.networks.get.return_value.connect, "connect")
     order.attach_mock(client.containers.create.return_value.start, "start")
@@ -344,18 +364,63 @@ def test_new_desktop_is_locked_down_and_mounts_only_its_own_home(monkeypatch, tm
     assert kwargs["environment"]["AGENT_DESKTOP_TOKEN"] == desktop.desktop_token("alice")
     assert kwargs["network"] == "p_dev-net"
     client.networks.get.assert_called_once_with("p_dev-egress-net")
+    # The backend's address on the network it shares with the desktop, not another one.
+    assert kwargs["extra_hosts"] == {"hermes-backend": "172.23.0.4"}
 
 
-def test_concurrency_cap_refuses_another_desktop(monkeypatch):
-    monkeypatch.setenv("AGENT_DESKTOP_HOST_ROOT", "/srv/desktops")
+def test_new_desktop_gets_the_local_model_provider_with_its_own_token(monkeypatch, tmp_path):
+    client = _docker(monkeypatch, tmp_path)
+    desktop._blocking_ensure("alice")
+    env = client.containers.create.call_args.kwargs["environment"]
+    assert env["OPENCODE_CONFIG"] == "/home/agent/.config/hermes/opencode.json"
+    config = json.loads((tmp_path / "alice" / "home" / ".config" / "hermes" / "opencode.json").read_text())
+    provider = config["provider"]["hermes"]
+    assert provider["options"] == {"baseURL": "http://hermes-backend:8000/agent-llm/v1",
+                                   "apiKey": desktop.llm_token("alice")}
+    assert config["model"] == "hermes/qwen-local" and "qwen-local" in provider["models"]
+    # The token is not in the container's environment, only in the agent's own file.
+    assert desktop.llm_token("alice") not in json.dumps(env)
+
+
+def test_without_a_shared_network_the_desktop_gets_no_local_model(monkeypatch, tmp_path):
+    client = _docker(monkeypatch, tmp_path, backend_networks={"p_web": {"IPAddress": "172.20.0.2"}})
+    desktop._blocking_ensure("alice")
+    assert client.containers.create.call_args.kwargs["extra_hosts"] == {}
+    config = json.loads((tmp_path / "alice" / "home" / ".config" / "hermes" / "opencode.json").read_text())
+    assert "provider" not in config
+
+
+def test_running_desktop_is_recreated_when_the_backend_address_changed(monkeypatch, tmp_path):
+    stale = MagicMock(status="running", attrs={"HostConfig": {"ExtraHosts": ["hermes-backend:172.23.0.9"]}})
+    client = _docker(monkeypatch, tmp_path, existing=stale)
+    desktop._blocking_ensure("alice")
+    stale.remove.assert_called_once_with(force=True)
+    assert client.containers.create.call_args.kwargs["extra_hosts"] == {"hermes-backend": "172.23.0.4"}
+
+
+def test_running_desktop_with_current_address_is_reused(monkeypatch, tmp_path):
+    current = MagicMock(status="running", attrs={"HostConfig": {"ExtraHosts": ["hermes-backend:172.23.0.4"]}})
+    client = _docker(monkeypatch, tmp_path, existing=current)
+    desktop._blocking_ensure("alice")
+    current.remove.assert_not_called()
+    client.containers.create.assert_not_called()
+
+
+def test_stopped_desktop_is_recreated_not_restarted(monkeypatch, tmp_path):
+    stopped = MagicMock(status="exited", attrs={"HostConfig": {"ExtraHosts": []}})
+    client = _docker(monkeypatch, tmp_path, existing=stopped)
+    desktop._blocking_ensure("alice")
+    stopped.start.assert_not_called()
+    stopped.remove.assert_called_once_with(force=True)
+    client.containers.create.assert_called_once()
+
+
+def test_concurrency_cap_refuses_another_desktop(monkeypatch, tmp_path):
+    client = _docker(monkeypatch, tmp_path)
     monkeypatch.setenv("AGENT_DESKTOP_MAX_CONCURRENT", "1")
-    client = MagicMock()
-    client.info.return_value = {"Runtimes": {"runsc": {}}}
     other = MagicMock()
     other.name = "hermes-agent-desktop-bob"
     client.containers.list.return_value = [other]
-    client.containers.get.side_effect = LookupError
-    monkeypatch.setattr(desktop, "_docker_client", lambda: client)
     with pytest.raises(desktop.DesktopUnavailable):
         desktop._blocking_ensure("alice")
     client.containers.create.assert_not_called()

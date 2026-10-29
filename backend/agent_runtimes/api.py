@@ -17,12 +17,15 @@ from fastapi import APIRouter, HTTPException, Request, WebSocket
 from pydantic import BaseModel, Field
 
 from backend import permissions
-from backend.agent_runtimes import desktop
+from backend.agent_runtimes import desktop, llm_proxy
 from backend.agent_runtimes.sessions import RUNTIMES, SessionBusy, manager
 
 logger = logging.getLogger("hermes.agent_runtimes.api")
 
 router = APIRouter()
+# The desktops' door to the local model rides on this router, so main.py
+# mounts both with one include (it authenticates itself, see llm_proxy.py).
+router.include_router(llm_proxy.router)
 
 VNC_SUBPROTOCOL = "hermes-vnc"
 
@@ -61,6 +64,7 @@ async def list_agent_desktops(request: Request):
         raise HTTPException(status_code=502, detail=f"Docker is unreachable ({type(exc).__name__}).")
     for item in desktops:
         item["busy"] = manager.busy(item["key"])
+        item["llm_usage"] = llm_proxy.usage_by_desktop.get(item["key"])
     return {"enabled": True, "runtimes": runtimes, "desktops": desktops}
 
 

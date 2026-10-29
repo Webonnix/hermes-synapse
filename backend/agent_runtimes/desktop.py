@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import re
+import socket
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -83,6 +84,26 @@ def desktop_token(key: str) -> str:
     if not secret:
         raise DesktopUnavailable("AGENT_DESKTOP_TOKEN_SECRET is not configured")
     return hmac.new(secret.encode(), _safe_key(key).encode(), hashlib.sha256).hexdigest()
+
+
+def llm_token(key: str) -> str:
+    """The desktop's credential for /agent-llm (llm_proxy.py): ``<key>.<hmac>``.
+
+    Domain-separated from desktop_token, so the token an agent can read in its
+    own home never opens the bridge, and vice versa."""
+    secret = os.getenv("AGENT_DESKTOP_TOKEN_SECRET", "")
+    if not secret:
+        raise DesktopUnavailable("AGENT_DESKTOP_TOKEN_SECRET is not configured")
+    key = _safe_key(key)
+    return f"{key}.{hmac.new(secret.encode(), f'llm:{key}'.encode(), hashlib.sha256).hexdigest()}"
+
+
+def verify_llm_token(token: str) -> Optional[str]:
+    """The desktop key a /agent-llm token belongs to, or None."""
+    key, _, _mac = (token or "").partition(".")
+    if not _KEY_RE.match(key) or not os.getenv("AGENT_DESKTOP_TOKEN_SECRET", ""):
+        return None
+    return key if hmac.compare_digest(token, llm_token(key)) else None
 
 
 def _image() -> str:
@@ -149,13 +170,51 @@ def _write_resolv_conf() -> str:
     return f"{_host_root()}/resolv.conf"
 
 
-def _prepare_home(key: str) -> None:
+# Where a desktop finds the backend: an /etc/hosts entry, because a desktop
+# resolves nothing internal (see _write_resolv_conf).
+BACKEND_HOST = "hermes-backend"
+# Hermes-managed OpenCode config, re-written at every desktop creation and
+# pointed to by OPENCODE_CONFIG, which OpenCode merges over the owner's own
+# ~/.config/opencode/opencode.json: the local-model provider stays current
+# (address, model, token) without overwriting what the owner edited there.
+MANAGED_OPENCODE_CONFIG = ".config/hermes/opencode.json"
+
+
+def managed_opencode_config(key: str) -> Dict[str, Any]:
+    model = os.getenv("AGENT_LLM_MODEL") or os.getenv("LLM_MODEL") or "local"
+    port = os.getenv("AGENT_LLM_BACKEND_PORT", "8000")
+    return {
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {
+            "hermes": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Hermes (local model)",
+                "options": {"baseURL": f"http://{BACKEND_HOST}:{port}/agent-llm/v1", "apiKey": llm_token(key)},
+                "models": {model: {
+                    "name": f"{model} (local)",
+                    "limit": {"context": int(os.getenv("AGENT_LLM_CONTEXT", "131072")),
+                              "output": int(os.getenv("AGENT_LLM_MAX_TOKENS", "8192"))},
+                }},
+            },
+        },
+        "model": f"hermes/{model}",
+    }
+
+
+def _prepare_home(key: str, with_local_model: bool = False) -> None:
     home = _local_root() / _safe_key(key) / "home"
     home.mkdir(parents=True, exist_ok=True)
     opencode_config = home / ".config" / "opencode" / "opencode.json"
     if not opencode_config.exists():
         opencode_config.parent.mkdir(parents=True, exist_ok=True)
         opencode_config.write_text(json.dumps(OPENCODE_CONFIG, indent=2) + "\n")
+    managed = home / MANAGED_OPENCODE_CONFIG
+    managed.parent.mkdir(parents=True, exist_ok=True)
+    if with_local_model:
+        managed.write_text(json.dumps(managed_opencode_config(key), indent=2) + "\n")
+    else:
+        # No route to the backend: no provider that could only fail.
+        managed.write_text(json.dumps({"$schema": "https://opencode.ai/config.json"}) + "\n")
     # The backend is root; the desktop drops to uid 10001 and must own its home,
     # or the very first write (the X authority file, the workspace) fails.
     subprocess.run(["chown", "-R", f"{DESKTOP_UID}:{DESKTOP_GID}", str(home)],
@@ -172,6 +231,34 @@ def _networks(client) -> List[str]:
     if not names:
         raise DesktopUnavailable(f"{source} is on no network to copy")
     return names
+
+
+def _backend_ip(client, networks: List[str]) -> Optional[str]:
+    """This backend's address on a network the desktop joins, or None."""
+    override = os.getenv("AGENT_LLM_BACKEND_IP", "").strip()
+    if override:
+        return override
+    try:
+        me = client.containers.get(socket.gethostname())
+    except Exception as exc:
+        logger.warning("Agent desktops: cannot find the backend's own container (%s)", type(exc).__name__)
+        return None
+    mine = me.attrs.get("NetworkSettings", {}).get("Networks", {}) or {}
+    for name in networks:
+        address = (mine.get(name) or {}).get("IPAddress")
+        if address:
+            return address
+    logger.warning("Agent desktops: the backend shares no network with the desktops; no local model for them")
+    return None
+
+
+def _extra_hosts(backend_ip: Optional[str]) -> Dict[str, str]:
+    return {BACKEND_HOST: backend_ip} if backend_ip else {}
+
+
+def _hosts_current(container, backend_ip: Optional[str]) -> bool:
+    current = container.attrs.get("HostConfig", {}).get("ExtraHosts") or []
+    return sorted(current) == sorted(f"{host}:{ip}" for host, ip in _extra_hosts(backend_ip).items())
 
 
 def _state(container) -> Dict[str, Any]:
@@ -196,17 +283,24 @@ def _blocking_ensure(key: str) -> str:
         existing = client.containers.get(name)
     except Exception:
         existing = None
+    networks = _networks(client)
+    backend_ip = _backend_ip(client, networks)
     if existing is not None and existing.status == "running":
-        return name
-    if len(running) >= _max_concurrent():
+        if _hosts_current(existing, backend_ip):
+            return name
+        # The backend came back with another address (recreated): the
+        # desktop's hosts entry is fixed at creation, so recreate it.
+        logger.info("Agent desktop %s: backend address changed, recreating", key)
+    elif len(running) >= _max_concurrent():
         raise DesktopUnavailable(f"{len(running)} desktops are already running (limit {_max_concurrent()})")
     if existing is not None:
-        existing.start()
-        return name
+        # A stopped desktop is recreated rather than restarted: everything worth
+        # keeping is in its home, and a fresh container picks up the current
+        # image, backend address and settings.
+        existing.remove(force=True)
 
-    _prepare_home(key)
+    _prepare_home(key, with_local_model=backend_ip is not None)
     resolv_conf = _write_resolv_conf()
-    networks = _networks(client)
     # Created, wired to every network, and only then started: gVisor builds
     # the sandbox's network stack once, at start, so a network connected to a
     # running desktop never shows up inside it (the desktop came up with no
@@ -216,7 +310,9 @@ def _blocking_ensure(key: str) -> str:
         name=name,
         runtime=runtime,
         labels={LABEL: "1", f"{LABEL}.key": key},
-        environment={"AGENT_DESKTOP_TOKEN": desktop_token(key)},
+        environment={"AGENT_DESKTOP_TOKEN": desktop_token(key),
+                     "OPENCODE_CONFIG": f"/home/agent/{MANAGED_OPENCODE_CONFIG}"},
+        extra_hosts=_extra_hosts(backend_ip),
         # Built from the fixed host root and a validated key only.
         volumes={
             f"{_host_root()}/{key}/home": {"bind": "/home/agent", "mode": "rw"},
