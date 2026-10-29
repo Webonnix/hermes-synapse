@@ -810,6 +810,13 @@ except Exception:
     logger.exception("Agent desktops API not mounted")
 
 
+# Sandboxes on the dev network (dev-runner, agent desktops) may reach only the
+# desktops' model door, never /api (backend/agent_runtimes/net_guard.py).
+# Registered after every @app.middleware above, so it is the outermost layer.
+from backend.agent_runtimes.net_guard import SandboxNetworkGuard
+app.add_middleware(SandboxNetworkGuard)
+
+
 @app.get("/health/live", include_in_schema=False)
 async def health_live():
     return {"status": "ok"}
