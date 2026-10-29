@@ -309,6 +309,8 @@ def test_desktops_need_gvisor_unless_runc_is_opted_into(monkeypatch, runtime, al
 
 
 def test_new_desktop_is_locked_down_and_mounts_only_its_own_home(monkeypatch, tmp_path):
+    monkeypatch.delenv("AGENT_DESKTOP_NETWORK_SOURCE", raising=False)
+    monkeypatch.setenv("DEV_RUNNER_CONTAINER_NAME", "proj-dev-runner")
     monkeypatch.setenv("AGENT_DESKTOP_HOST_ROOT", "/srv/desktops")
     monkeypatch.setenv("AGENT_DESKTOP_ROOT", str(tmp_path))
     monkeypatch.setenv("AGENT_DESKTOP_TOKEN_SECRET", "s3cret")
@@ -319,7 +321,7 @@ def test_new_desktop_is_locked_down_and_mounts_only_its_own_home(monkeypatch, tm
     client.containers.list.return_value = []
     client.containers.get.side_effect = lambda name: (
         MagicMock(attrs={"NetworkSettings": {"Networks": {"p_dev-net": {}, "p_dev-egress-net": {}}}})
-        if name == "hermes-dev-runner" else (_ for _ in ()).throw(LookupError(name))
+        if name == "proj-dev-runner" else (_ for _ in ()).throw(LookupError(name))
     )
     monkeypatch.setattr(desktop, "_docker_client", lambda: client)
 

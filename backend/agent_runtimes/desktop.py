@@ -163,7 +163,10 @@ def _prepare_home(key: str) -> None:
 
 
 def _networks(client) -> List[str]:
-    source = os.getenv("AGENT_DESKTOP_NETWORK_SOURCE", "hermes-dev-runner")
+    # The dev-runner's container name differs per deployment (compose project
+    # prefix), and the backend already knows it from DEV_RUNNER_CONTAINER_NAME.
+    source = (os.getenv("AGENT_DESKTOP_NETWORK_SOURCE")
+              or os.getenv("DEV_RUNNER_CONTAINER_NAME", "hermes-dev-runner"))
     base = client.containers.get(source)
     names = list(base.attrs.get("NetworkSettings", {}).get("Networks", {}).keys())
     if not names:
