@@ -122,6 +122,18 @@ server {
         proxy_read_timeout 120s;
     }
 
+    # Live view of an agent desktop (VNC over WebSocket). A screen that is not
+    # changing sends nothing for a while, so the /api/ 120s read timeout would
+    # cut the owner's view mid-watch.
+    location ~ ^/api/agent-desktops/[a-z0-9-]+/vnc$ {
+        proxy_pass $backend_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 3600s;
+    }
+
     # Proxy WebSocket connections
     location /api/ws {
         proxy_pass $backend_upstream;

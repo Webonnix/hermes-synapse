@@ -60,6 +60,14 @@ services:
       # mount lives at a different host path (this is deliberately not derived
       # from a project-root guess, see dev_sandbox.py).
       - DEV_SANDBOX_HOST_RUNS_ROOT=${DEV_SANDBOX_HOST_RUNS_ROOT:-${PWD}/backend/data/dev-repo-runs}
+      # backend/agent_runtimes/desktop.py: one gVisor desktop container per agent
+      # (image built by the agent-desktop service below). Off unless enabled;
+      # the host root is a HOST path for the same reason as the dev sandboxes.
+      - AGENT_DESKTOPS_ENABLED=${AGENT_DESKTOPS_ENABLED:-false}
+      - AGENT_DESKTOP_TOKEN_SECRET=${AGENT_DESKTOP_TOKEN_SECRET:-}
+      - AGENT_DESKTOP_HOST_ROOT=${AGENT_DESKTOP_HOST_ROOT:-${PWD}/backend/data/agent-desktops}
+      - AGENT_DESKTOP_RUNTIME=${AGENT_DESKTOP_RUNTIME:-runsc}
+      - AGENT_DESKTOP_MAX_CONCURRENT=${AGENT_DESKTOP_MAX_CONCURRENT:-4}
       - DEV_SANDBOX_MAX_CONCURRENT=${DEV_SANDBOX_MAX_CONCURRENT:-3}
       # Picked up automatically by docker.from_env() in dev_sandbox.py — routes
       # Docker API calls through the access-controlled proxy below instead of
@@ -169,6 +177,17 @@ services:
       retries: 3
       start_period: 15s
     logging: *default-logging
+
+  # Image of the per-agent desktops (agent_desktop/Dockerfile). Build-only: the
+  # profile keeps `up` from ever starting it — backend/agent_runtimes/desktop.py
+  # starts one container of this image per agent, under gVisor.
+  #   docker compose build agent-desktop
+  agent-desktop:
+    build:
+      context: .
+      dockerfile: agent_desktop/Dockerfile
+    image: hermes-agent-desktop:local
+    profiles: ["build-only"]
 
   # One multilingual voice for Vexa: XTTS-v2 reads both Russian and English with
   # the same speaker, cloned on first boot from the Piper English voice below.

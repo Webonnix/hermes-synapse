@@ -31,6 +31,7 @@ import {
   Shuffle,
   ExternalLink,
   BarChart3,
+  MonitorPlay,
 } from 'lucide-react';
 
 import type { AppSettings, ChatMessage, ChatSession, DecisionLog, ActivityLog, SystemConfig, AgentModel, Project } from './types';
@@ -73,6 +74,7 @@ import { HermesMark } from './components/HermesMark';
 import { VexaLogo } from './components/VexaLogo';
 const MetricsTab = lazy(() => import('./components/MetricsTab').then(module => ({ default: module.MetricsTab })));
 const ServerMetricsTab = lazy(() => import('./components/metrics/ServerMetricsTab').then(module => ({ default: module.ServerMetricsTab })));
+const AgentDesktopsTab = lazy(() => import('./components/desktops/AgentDesktopsTab').then(module => ({ default: module.AgentDesktopsTab })));
 import { FloatingWindow } from './components/FloatingWindow';
 import { BrowserLiveView } from './components/BrowserLiveView';
 import { VexaCommandCenter } from './components/VexaCommandCenter';
@@ -138,7 +140,7 @@ interface SpeechStream {
   frozen: boolean;
 }
 
-const tabs = ['vexa', 'processes', 'devruns', 'kanban', 'clients', 'agents', 'schedule', 'contentfactory', 'smm', 'settings', 'network', 'metrics'] as const;
+const tabs = ['vexa', 'processes', 'devruns', 'kanban', 'clients', 'agents', 'schedule', 'contentfactory', 'smm', 'settings', 'network', 'metrics', 'desktops'] as const;
 type AppTab = typeof tabs[number];
 // «Входящие» used to be a top-level tab; it is SMM Factory → Диалоги now, so a
 // bookmarked #tab=inbox (or a saved tab from an older build) lands there.
@@ -149,7 +151,7 @@ export const normalizeTab = (value: string | null): AppTab => {
 
 export default function App() {
   const legacySettingsTabs = ['config', 'logs', 'activity', 'memory', 'subagents', 'obsidian', 'mcp'];
-  const [activeTab, setActiveTab] = useState<'vexa' | 'processes' | 'devruns' | 'kanban' | 'clients' | 'agents' | 'schedule' | 'contentfactory' | 'smm' | 'settings' | 'network' | 'metrics'>(() => {
+  const [activeTab, setActiveTab] = useState<'vexa' | 'processes' | 'devruns' | 'kanban' | 'clients' | 'agents' | 'schedule' | 'contentfactory' | 'smm' | 'settings' | 'network' | 'metrics' | 'desktops'>(() => {
     const saved = localStorage.getItem('vexa_active_tab');
     const requested = new URLSearchParams(window.location.hash.slice(1)).get('tab') ?? saved;
     if (requested === 'inbox') localStorage.setItem('smm_factory_view', 'dialogs');
@@ -2837,6 +2839,15 @@ export default function App() {
           </button>
 
           <button
+            style={navStyle('desktops')}
+            onClick={() => { setActiveTab('desktops'); setSidebarOpen(false); }}
+            title={t('navAgentDesktops')}
+          >
+            <MonitorPlay size={18} />
+            <span>{t('navAgentDesktops')}</span>
+          </button>
+
+          <button
             style={navStyle('devruns')}
             onClick={() => { setActiveTab('devruns'); setSidebarOpen(false); }}
             title="Dev Runs"
@@ -3218,6 +3229,8 @@ export default function App() {
 
         {/* LLM run/cost metrics stay in the Vexa analytics panel; this tab is the GPU server. */}
         {activeTab === 'metrics' && <ServerMetricsTab language={language} />}
+
+        {activeTab === 'desktops' && <AgentDesktopsTab language={language} />}
 
         {activeTab === 'schedule' && (
           <ScheduleTab

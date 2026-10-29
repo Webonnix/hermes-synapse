@@ -1,0 +1,134 @@
+/* «Десктопы агентов». Uses the :root VEXA tokens from index.css. */
+
+.ad-root {
+  display: flex; flex-direction: column; gap: 14px;
+  padding: 4px 4px 24px;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  min-width: 0;
+}
+
+.ad-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, .25);
+  min-width: 0;
+}
+
+.ad-eyebrow {
+  display: flex; align-items: center; gap: 6px;
+  color: var(--accent-cyan); font-size: 11px; font-weight: 600; letter-spacing: 1.4px; text-transform: uppercase;
+}
+.ad-title { margin: 4px 0 2px; font-size: 26px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; }
+.ad-subtitle { margin: 0; color: var(--text-secondary); font-size: 13px; max-width: 760px; }
+.ad-muted { color: var(--text-secondary); font-size: 12px; }
+.ad-notice { padding: 16px; color: var(--text-secondary); }
+.ad-error {
+  padding: 8px 12px; border-radius: 7px; font-size: 13px;
+  background: rgba(240, 93, 117, .1); border: 1px solid rgba(240, 93, 117, .35); color: var(--danger);
+}
+
+.ad-layout {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr) 360px;
+  gap: 14px;
+  align-items: start;
+}
+
+.ad-button, .ad-input, .ad-icon {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+.ad-button {
+  height: 32px; padding: 0 10px;
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap;
+}
+.ad-button.is-primary { background: var(--accent-violet); border-color: var(--accent-violet); }
+.ad-button.is-active { border-color: var(--accent-cyan); color: var(--accent-cyan); }
+.ad-icon { width: 30px; height: 30px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.ad-button:hover:not(:disabled), .ad-icon:hover:not(:disabled) { border-color: var(--accent-violet); }
+.ad-button.is-primary:hover:not(:disabled) { background: var(--accent-violet-hover); }
+.ad-button:disabled, .ad-icon:disabled { opacity: .5; cursor: default; }
+.ad-button:focus-visible, .ad-input:focus-visible, .ad-icon:focus-visible { outline: 2px solid var(--accent-cyan); outline-offset: 1px; }
+.ad-input { padding: 7px 9px; min-width: 0; }
+
+/* --- desktops list --- */
+.ad-list { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.ad-new { display: flex; gap: 6px; }
+.ad-new .ad-input { flex: 1; }
+.ad-desktops { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.ad-desktop { display: flex; align-items: center; gap: 6px; border-radius: 7px; padding: 2px; }
+.ad-desktop.is-selected { background: var(--bg-elevated); }
+.ad-desktop-main {
+  flex: 1; min-width: 0; display: grid; grid-template-columns: 10px 1fr; column-gap: 8px; align-items: center;
+  background: none; border: 0; color: inherit; font: inherit; text-align: left; padding: 6px; cursor: pointer;
+}
+.ad-desktop-main .ad-muted { grid-column: 2; }
+.ad-desktop-name { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ad-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); }
+.ad-dot.is-on { background: var(--success); box-shadow: 0 0 8px var(--success); }
+
+/* --- screen --- */
+.ad-viewer { padding: 10px; display: flex; flex-direction: column; gap: 10px; }
+.ad-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ad-toolbar-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.ad-viewer-title { font-size: 14px; }
+.ad-screen-wrap {
+  position: relative;
+  aspect-ratio: 1440 / 900;
+  background: var(--bg-deep);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.ad-screen { position: absolute; inset: 0; }
+.ad-screen.is-interactive { outline: 2px solid var(--accent-cyan); outline-offset: -2px; }
+.ad-screen-overlay {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px;
+  color: var(--text-secondary); font-size: 13px; text-align: center;
+}
+
+/* --- agent panel --- */
+.ad-agent { padding: 12px; display: flex; flex-direction: column; gap: 10px; max-height: calc(100vh - 160px); }
+.ad-agent-form { display: flex; flex-direction: column; gap: 8px; }
+.ad-label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-secondary); }
+.ad-task { resize: vertical; min-height: 84px; line-height: 1.4; }
+.ad-agent-actions { display: flex; justify-content: flex-end; }
+.ad-section-title { margin: 4px 0 0; font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: uppercase; color: var(--text-secondary); }
+.ad-transcript { overflow: auto; display: flex; flex-direction: column; gap: 6px; min-height: 120px; }
+.ad-row {
+  font-size: 13px; line-height: 1.45; padding: 7px 9px; border-radius: 7px;
+  background: var(--bg-surface); border: 1px solid var(--border-color);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.ad-row.is-task { border-color: color-mix(in srgb, var(--accent-violet) 45%, var(--border-color)); }
+.ad-row.is-message { background: transparent; }
+.ad-row.is-tool { font-size: 12px; }
+.ad-row.is-tool.status-failed { border-color: rgba(240, 93, 117, .4); }
+.ad-row.is-plan { margin: 0; padding-left: 26px; font-size: 12px; }
+.ad-row.is-plan .status-completed { color: var(--text-secondary); text-decoration: line-through; }
+.ad-row.is-permission.state-pending { border-color: rgba(246, 184, 74, .5); color: var(--warning); }
+.ad-row.is-permission.state-refused { border-color: rgba(240, 93, 117, .4); color: var(--danger); }
+.ad-row.is-permission.state-granted { color: var(--success); }
+.ad-row.is-error { border-color: rgba(240, 93, 117, .4); color: var(--danger); }
+.ad-row.is-end { color: var(--text-secondary); font-size: 12px; }
+.ad-row code { background: var(--bg-elevated); padding: 1px 5px; border-radius: 4px; }
+.ad-tag {
+  display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 4px;
+  background: var(--bg-elevated); color: var(--accent-cyan); font-size: 11px; font-weight: 600;
+}
+
+@media (max-width: 1400px) {
+  .ad-layout { grid-template-columns: 200px minmax(0, 1fr); }
+  .ad-agent { grid-column: 1 / -1; max-height: none; }
+}
+@media (max-width: 760px) {
+  .ad-layout { grid-template-columns: minmax(0, 1fr); }
+  .ad-title { font-size: 20px; }
+}

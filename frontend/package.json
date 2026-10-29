@@ -12,6 +12,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@novnc/novnc": "1.7.0",
     "@types/marked": "^5.0.2",
     "lucide-react": "^0.400.0",
     "marked": "^18.0.5",

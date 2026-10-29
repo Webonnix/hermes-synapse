@@ -134,6 +134,24 @@ TOOL_RISKS = {
     # agent.py's per-agent $ budget check (PAID_TOOLS) rather than an approval
     # click per call. Personal data goes through the privacy gateway.
     "delegate_to_external_model": "R2",
+    # Permission requests from CLI coding agents in agent desktops
+    # (backend/agent_runtimes/sessions.py), one entry per ACP tool kind. The
+    # agent acts inside its own gVisor desktop, so its reads are R0/R1 and its
+    # writes and commands match dev_exec's R2 (the desktop has internet egress,
+    # like the dev-runner). Deleting work in the agent's persistent home and
+    # the catch-all "other" (MCP tools, anything the agent cannot categorize)
+    # take one approval. A kind outside this list is agent_desktop_unknown and
+    # falls through to the R4 default.
+    "agent_desktop_read": "R0",
+    "agent_desktop_search": "R0",
+    "agent_desktop_think": "R0",
+    "agent_desktop_fetch": "R1",
+    "agent_desktop_edit": "R2",
+    "agent_desktop_move": "R2",
+    "agent_desktop_execute": "R2",
+    "agent_desktop_switch_mode": "R2",
+    "agent_desktop_delete": "R3",
+    "agent_desktop_other": "R3",
 }
 
 _SECRET_KEY = re.compile(r"(password|passwd|secret|token|api[_-]?key|authorization|cookie|private[_-]?key)", re.I)

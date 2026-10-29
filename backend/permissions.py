@@ -93,6 +93,10 @@ PHONE_CALL = "phone.call"
 # web-derived text into an agent's context. Both are owner-only by default.
 AGENTS_LEARNING_VIEW = "agents.learning.view"
 AGENTS_LEARNING_MANAGE = "agents.learning.manage"
+# Agent desktops (backend/agent_runtimes/): starting one runs CLI agents with
+# internet access, and watching one shows — and lets you drive — everything
+# the agent sees. Owner only by default.
+AGENT_DESKTOPS_MANAGE = "agents.desktops.manage"
 
 ALL_PERMISSIONS: tuple = (
     CLIENTS_VIEW, CLIENTS_CREATE, CLIENTS_EDIT, CLIENTS_ARCHIVE,
@@ -112,6 +116,7 @@ ALL_PERMISSIONS: tuple = (
     INBOX_VIEW, INBOX_REPLY, INBOX_RULES_EDIT, VOICE_PROVIDERS_MANAGE,
     PHONE_MANAGE, PHONE_CALL,
     AGENTS_LEARNING_VIEW, AGENTS_LEARNING_MANAGE,
+    AGENT_DESKTOPS_MANAGE,
 )
 
 OWNER_ROLE = "owner"

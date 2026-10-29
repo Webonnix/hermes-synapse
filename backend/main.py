@@ -801,6 +801,15 @@ except Exception:
     logger.exception("Browser sessions API not mounted")
 
 
+# AGENT DESKTOPS: CLI coding agents (Grok Build, OpenCode) in per-agent gVisor
+# desktops the owner can watch live (backend/agent_runtimes/, agent_desktop/).
+try:
+    from backend.agent_runtimes.api import router as agent_desktops_router
+    app.include_router(agent_desktops_router)
+except Exception:
+    logger.exception("Agent desktops API not mounted")
+
+
 @app.get("/health/live", include_in_schema=False)
 async def health_live():
     return {"status": "ok"}
