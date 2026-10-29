@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
 import os
 import re
@@ -122,9 +123,39 @@ def check_runtime(client) -> str:
     return runtime
 
 
+# Seeded into a new desktop's home when absent (the owner may edit it later).
+# OpenCode allows edits and shell commands without asking by default, which
+# would keep every one of its actions away from the Control Plane; "ask" turns
+# each into a session/request_permission that sessions.py routes there.
+OPENCODE_CONFIG = {
+    "$schema": "https://opencode.ai/config.json",
+    "permission": {"edit": "ask", "bash": "ask", "webfetch": "ask"},
+}
+
+
+def _write_resolv_conf() -> str:
+    """Writes the desktops' resolv.conf and returns its host path.
+
+    Docker's embedded DNS (127.0.0.11) works through iptables rules in the
+    container's network namespace, which gVisor's own network stack never
+    applies — every lookup in a desktop failed while plain IP traffic worked.
+    Public resolvers instead; as a side effect a desktop cannot resolve
+    internal service names (backend, llama, qdrant) at all."""
+    servers = [s.strip() for s in os.getenv("AGENT_DESKTOP_DNS", "1.1.1.1,8.8.8.8").split(",") if s.strip()]
+    local = _local_root() / "resolv.conf"
+    local.parent.mkdir(parents=True, exist_ok=True)
+    local.write_text("".join(f"nameserver {server}\n" for server in servers) + "options edns0\n")
+    local.chmod(0o644)
+    return f"{_host_root()}/resolv.conf"
+
+
 def _prepare_home(key: str) -> None:
     home = _local_root() / _safe_key(key) / "home"
     home.mkdir(parents=True, exist_ok=True)
+    opencode_config = home / ".config" / "opencode" / "opencode.json"
+    if not opencode_config.exists():
+        opencode_config.parent.mkdir(parents=True, exist_ok=True)
+        opencode_config.write_text(json.dumps(OPENCODE_CONFIG, indent=2) + "\n")
     # The backend is root; the desktop drops to uid 10001 and must own its home,
     # or the very first write (the X authority file, the workspace) fails.
     subprocess.run(["chown", "-R", f"{DESKTOP_UID}:{DESKTOP_GID}", str(home)],
@@ -171,16 +202,23 @@ def _blocking_ensure(key: str) -> str:
         return name
 
     _prepare_home(key)
+    resolv_conf = _write_resolv_conf()
     networks = _networks(client)
-    container = client.containers.run(
+    # Created, wired to every network, and only then started: gVisor builds
+    # the sandbox's network stack once, at start, so a network connected to a
+    # running desktop never shows up inside it (the desktop came up with no
+    # route to the internet, only the internal dev-net).
+    container = client.containers.create(
         _image(),
         name=name,
-        detach=True,
         runtime=runtime,
         labels={LABEL: "1", f"{LABEL}.key": key},
         environment={"AGENT_DESKTOP_TOKEN": desktop_token(key)},
         # Built from the fixed host root and a validated key only.
-        volumes={f"{_host_root()}/{key}/home": {"bind": "/home/agent", "mode": "rw"}},
+        volumes={
+            f"{_host_root()}/{key}/home": {"bind": "/home/agent", "mode": "rw"},
+            resolv_conf: {"bind": "/etc/resolv.conf", "mode": "ro"},
+        },
         read_only=True,
         tmpfs={"/tmp": "size=1g,mode=1777"},
         shm_size="1g",
@@ -194,6 +232,7 @@ def _blocking_ensure(key: str) -> str:
     )
     for extra in networks[1:]:
         client.networks.get(extra).connect(container)
+    container.start()
     return name
 
 

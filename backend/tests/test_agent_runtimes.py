@@ -323,11 +323,22 @@ def test_new_desktop_is_locked_down_and_mounts_only_its_own_home(monkeypatch, tm
     )
     monkeypatch.setattr(desktop, "_docker_client", lambda: client)
 
+    order = MagicMock()
+    order.attach_mock(client.networks.get.return_value.connect, "connect")
+    order.attach_mock(client.containers.create.return_value.start, "start")
+
     assert desktop._blocking_ensure("alice") == "hermes-agent-desktop-alice"
-    kwargs = client.containers.run.call_args.kwargs
+    # gVisor only sees networks attached before start.
+    assert [c[0] for c in order.mock_calls] == ["connect", "start"]
+    kwargs = client.containers.create.call_args.kwargs
     assert kwargs["runtime"] == "runsc"
     assert kwargs["read_only"] is True and kwargs["cap_drop"] == ["ALL"]
-    assert kwargs["volumes"] == {"/srv/desktops/alice/home": {"bind": "/home/agent", "mode": "rw"}}
+    assert kwargs["volumes"] == {
+        "/srv/desktops/alice/home": {"bind": "/home/agent", "mode": "rw"},
+        "/srv/desktops/resolv.conf": {"bind": "/etc/resolv.conf", "mode": "ro"},
+    }
+    # gVisor ignores Docker's embedded DNS: public resolvers, written per deployment.
+    assert (tmp_path / "resolv.conf").read_text().startswith("nameserver 1.1.1.1\n")
     assert kwargs["environment"]["AGENT_DESKTOP_TOKEN"] == desktop.desktop_token("alice")
     assert kwargs["network"] == "p_dev-net"
     client.networks.get.assert_called_once_with("p_dev-egress-net")
@@ -345,7 +356,7 @@ def test_concurrency_cap_refuses_another_desktop(monkeypatch):
     monkeypatch.setattr(desktop, "_docker_client", lambda: client)
     with pytest.raises(desktop.DesktopUnavailable):
         desktop._blocking_ensure("alice")
-    client.containers.run.assert_not_called()
+    client.containers.create.assert_not_called()
 
 
 def test_audit_record_keeps_the_title_but_not_secrets(control_db):
@@ -397,3 +408,14 @@ def test_vnc_needs_a_live_session_with_the_permission(api_client, monkeypatch, p
         with api_client.websocket_connect("/api/agent-desktops/alice/vnc", subprotocols=protocols) as ws:
             ws.receive_bytes()
     assert exc.value.code == 1008
+
+
+def test_new_home_makes_opencode_ask_but_keeps_an_owner_edited_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_DESKTOP_ROOT", str(tmp_path))
+    monkeypatch.setattr(desktop.subprocess, "run", lambda *a, **k: None)
+    desktop._prepare_home("alice")
+    config = tmp_path / "alice" / "home" / ".config" / "opencode" / "opencode.json"
+    assert json.loads(config.read_text())["permission"] == {"edit": "ask", "bash": "ask", "webfetch": "ask"}
+    config.write_text('{"permission": {"bash": "allow"}}')
+    desktop._prepare_home("alice")
+    assert json.loads(config.read_text()) == {"permission": {"bash": "allow"}}
