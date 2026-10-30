@@ -1,3 +1,8 @@
+# Log route paths, never query credentials or public share capabilities.
+map $uri $hermes_log_uri { default $uri; ~^/share/ "/share/[redacted]"; }
+log_format hermes_safe '$remote_addr $request_method $hermes_log_uri $status $body_bytes_sent';
+access_log /var/log/nginx/access.log hermes_safe;
+
 # AI Router (OmniRoute) dashboard, reachable at https://${ROUTER_HOSTNAME}/ — a
 # separate server block keyed on Host/SNI rather than a location prefix under
 # the main site, because OmniRoute is its own Next.js app: its HTML/JS reference
@@ -18,6 +23,10 @@
 # recognize) the moment this block appears first in the file. The main site's
 # block carries `default_server` for exactly this reason; don't remove it,
 # and don't reorder these two blocks without keeping that in mind.
+# Bounded per-peer protection before requests reach the application. The backend
+# also has installation-wide limits and never trusts forwarded IPs for quotas.
+limit_req_zone $binary_remote_addr zone=hermes_auth:10m rate=10r/m;
+
 server {
     listen 80;
     listen 443 ssl;
@@ -67,7 +76,7 @@ server {
     gzip_types text/plain text/css application/javascript application/json
                application/wasm image/svg+xml text/xml application/xml;
 
-    add_header Permissions-Policy "microphone=(self)" always;
+    include /etc/nginx/snippets/hermes-security.conf;
 
     # Redirect true plain-HTTP browser traffic to the encrypted port, but
     # exempt three things that also arrive as plain HTTP on :80 and must NOT
@@ -111,7 +120,20 @@ server {
     # its own. Adding a literal suffix like "$backend_upstream/api/" silently
     # drops everything past the location prefix (e.g. /api/auth/request-code
     # was proxied as bare /api/), breaking every REST endpoint.
+    location ^~ /api/auth/ {
+        include /etc/nginx/snippets/hermes-security.conf;
+        limit_req zone=hermes_auth burst=10 nodelay;
+        limit_req_status 429;
+        proxy_pass $backend_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 120s;
+    }
+
     location /api/ {
+        include /etc/nginx/snippets/hermes-security.conf;
         proxy_pass $backend_upstream;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -126,6 +148,7 @@ server {
     # changing sends nothing for a while, so the /api/ 120s read timeout would
     # cut the owner's view mid-watch.
     location ~ ^/api/agent-desktops/[a-z0-9-]+/vnc$ {
+        include /etc/nginx/snippets/hermes-security.conf;
         proxy_pass $backend_upstream;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
@@ -136,6 +159,7 @@ server {
 
     # Proxy WebSocket connections
     location /api/ws {
+        include /etc/nginx/snippets/hermes-security.conf;
         proxy_pass $backend_upstream;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
@@ -153,6 +177,7 @@ server {
     # /llm/ prefix, and private source addresses only, so the catalogue is not
     # exposed to whatever sits in front of this nginx.
     location = /llm/v1/models {
+        include /etc/nginx/snippets/hermes-security.conf;
         allow 127.0.0.0/8;
         allow 10.0.0.0/8;
         allow 172.16.0.0/12;
@@ -176,6 +201,7 @@ server {
     # suffix silently drops the rest of the path) — rewrite ... break followed by
     # a bare proxy_pass $var forwards the *rewritten* URI, not the original one.
     location /llm/ {
+        include /etc/nginx/snippets/hermes-security.conf;
         if ($http_authorization != "Bearer ${LLM_PROXY_TOKEN}") {
             return 401;
         }
@@ -207,6 +233,7 @@ server {
     # does not speak the Ollama API, so tell a stale client where to go instead
     # of letting the SPA fallback answer 200 with index.html.
     location /ollama/ {
+        include /etc/nginx/snippets/hermes-security.conf;
         default_type text/plain;
         return 410 "Moved: the local model is now served by llama.cpp at /llm/v1 (OpenAI-compatible, same bearer token).\n";
     }
@@ -216,6 +243,8 @@ server {
     # Populated by backend/tools.py's dev_publish_demo tool into
     # backend/data/dev-previews/<run_id>/, mounted read-only below.
     location /demo/ {
+        include /etc/nginx/snippets/hermes-security-common.conf;
+        add_header Content-Security-Policy "sandbox allow-scripts; default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; media-src 'self' blob:; connect-src 'none'; frame-ancestors 'self'" always;
         alias /usr/share/nginx/dev-previews/;
         autoindex off;
         add_header Cache-Control "no-cache" always;
@@ -226,6 +255,7 @@ server {
     # URL's bytes can never change — cache it hard and skip the revalidation
     # round-trip entirely. A new build produces new filenames, not new contents.
     location /assets/ {
+        include /etc/nginx/snippets/hermes-security.conf;
         add_header Cache-Control "public, max-age=31536000, immutable" always;
         try_files $uri =404;
     }
@@ -243,7 +273,7 @@ server {
     # inherited by a location that declares none of its own, so without this line
     # the microphone grant would be silently dropped from the HTML document.
     location = /index.html {
-        add_header Permissions-Policy "microphone=(self)" always;
+        include /etc/nginx/snippets/hermes-security.conf;
         add_header Cache-Control "no-cache" always;
     }
 
@@ -252,12 +282,14 @@ server {
     # installed when the byte content at this exact URL changes, and it cannot
     # change if the response came from cache. Same reasoning as index.html.
     location = /sw.js {
+        include /etc/nginx/snippets/hermes-security.conf;
         add_header Cache-Control "no-cache, no-store, must-revalidate" always;
         add_header Service-Worker-Allowed "/" always;
         try_files $uri =404;
     }
 
     location = /manifest.json {
+        include /etc/nginx/snippets/hermes-security.conf;
         add_header Cache-Control "no-cache" always;
         try_files $uri =404;
     }
@@ -272,6 +304,7 @@ server {
 
     # SPA fallback — all other routes serve index.html
     location / {
+        include /etc/nginx/snippets/hermes-security.conf;
         try_files $uri $uri/ /index.html;
     }
 }

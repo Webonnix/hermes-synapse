@@ -12,26 +12,13 @@ import {
   Database,
   Layers,
   BookOpen,
-  Network,
   Server,
-  Clock,
   Menu,
   X,
-  UserCog,
   ChevronsLeft,
   ChevronsRight,
-  ShieldCheck,
-  AudioWaveform,
   KeyRound,
-  Trello,
-  Briefcase,
   Coins,
-  Factory,
-  Megaphone,
-  Shuffle,
-  ExternalLink,
-  BarChart3,
-  MonitorPlay,
 } from 'lucide-react';
 
 import type { AppSettings, ChatMessage, ChatSession, DecisionLog, ActivityLog, SystemConfig, AgentModel, Project } from './types';
@@ -91,6 +78,11 @@ const ContentFactoryTab = lazy(() => import('./components/ContentFactoryTab').th
 const SMMFactoryTab = lazy(() => import('./components/SMMFactoryTab').then(module => ({ default: module.SMMFactoryTab })));
 import type { CFEvent } from './components/content-factory/types';
 import { authEndpointFetch, authErrorMessage } from './accessSession';
+import { csrfToken } from './sessionAuth';
+import { ReauthDialog } from './components/ReauthDialog';
+import { AppNavigation } from './components/AppNavigation';
+import { normalizeTab, type AppTab, type SmmView } from './navigation/routes';
+export { normalizeTab } from './navigation/routes';
 import { composeWithAttachment } from './components/simple/chatApi';
 
 // Initialize global fetch interceptor
@@ -141,24 +133,17 @@ interface SpeechStream {
   frozen: boolean;
 }
 
-const tabs = ['vexa', 'processes', 'devruns', 'kanban', 'clients', 'agents', 'schedule', 'contentfactory', 'smm', 'settings', 'network', 'metrics', 'earner', 'desktops'] as const;
-type AppTab = typeof tabs[number];
-// «Входящие» used to be a top-level tab; it is SMM Factory → Диалоги now, so a
-// bookmarked #tab=inbox (or a saved tab from an older build) lands there.
-export const normalizeTab = (value: string | null): AppTab => {
-  if (value === 'inbox') return 'smm';
-  return tabs.includes(value as AppTab) ? value as AppTab : 'vexa';
-};
 
 export default function App() {
   const legacySettingsTabs = ['config', 'logs', 'activity', 'memory', 'subagents', 'obsidian', 'mcp'];
-  const [activeTab, setActiveTab] = useState<'vexa' | 'processes' | 'devruns' | 'kanban' | 'clients' | 'agents' | 'schedule' | 'contentfactory' | 'smm' | 'settings' | 'network' | 'metrics' | 'earner' | 'desktops'>(() => {
+  const [activeTab, setActiveTab] = useState<AppTab>(() => {
     const saved = localStorage.getItem('vexa_active_tab');
     const requested = new URLSearchParams(window.location.hash.slice(1)).get('tab') ?? saved;
     if (requested === 'inbox') localStorage.setItem('smm_factory_view', 'dialogs');
     if (!window.location.hash && saved === 'chat') return 'vexa';
     // Settings → «Сервер и мониторинг» was folded into «Метрики».
     const requestedSection = new URLSearchParams(window.location.hash.slice(1)).get('section') ?? localStorage.getItem('vexa_settings_section');
+    if (requested === 'subagents' || (requested === 'settings' && requestedSection === 'subagents')) return 'agents';
     if (requested === 'tools' || (requested === 'settings' && requestedSection === 'tools')) return 'metrics';
     if (!window.location.hash && (saved === 'settings' || (saved && legacySettingsTabs.includes(saved)))) return 'settings';
     return normalizeTab(new URLSearchParams(window.location.hash.slice(1)).get('tab') ?? saved);
@@ -172,6 +157,13 @@ export default function App() {
     const savedTab = localStorage.getItem('vexa_active_tab');
     return (savedTab && legacySettingsTabs.includes(savedTab) ? savedTab : 'config') as any;
   });
+  const [smmView, setSmmView] = useState<SmmView>(() => {
+    const params = new URLSearchParams(window.location.hash.slice(1));
+    if (params.get('tab') === 'inbox') return 'dialogs';
+    const value = params.get('view') || localStorage.getItem('smm_factory_view');
+    return ['publications', 'designer', 'connections', 'dialogs', 'drafts', 'activity', 'settings'].includes(value || '') ? value as SmmView : 'publications';
+  });
+  const [processesView, setProcessesView] = useState<'all' | 'approval'>(() => new URLSearchParams(window.location.hash.slice(1)).get('filter') === 'approval' ? 'approval' : 'all');
   /** Overdue-task count for the Клиенты nav badge — polled independently
    *  of ClientsTab (same reason AppHeader polls its own approvals count):
    *  the badge has to stay live while the user is on an entirely different
@@ -246,7 +238,7 @@ export default function App() {
     { id: 'dashboard', title: 'Main Terminal', agent_id: 'vexa' },
   ]);
   const [isConnected, setIsConnected] = useState(false);
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(!!localStorage.getItem('vexa_auth_token'));
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(Boolean(csrfToken()));
   const [otpCode, setOtpCode] = useState('');
   const [otpSent, setOtpSent] = useState(false);
   const lastAttemptedOtp = useRef('');
@@ -429,20 +421,12 @@ export default function App() {
   useEffect(() => {
     // Protected endpoint — never poll it from the login screen.
     if (!isAuthenticated) return;
-    const authToken = localStorage.getItem('vexa_auth_token');
-    fetch('/api/router/stats', {
-      headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
-    })
+    fetch('/api/router/stats')
       .then(response => (response.ok ? response.json() : null))
       .then(data => setRouterDashboardUrl(data?.dashboard_url || null))
       .catch(() => setRouterDashboardUrl(null));
   }, [isAuthenticated]);
 
-  const navStyle = useCallback((tab: typeof activeTab) => ({
-    ...styles.navBtn,
-    ...(isSidebarCollapsed ? styles.navBtnCollapsed : {}),
-    ...(activeTab === tab ? styles.navBtnActive : {})
-  }), [activeTab, isSidebarCollapsed]);
 
   useEffect(() => {
     currentChatIdRef.current = currentChatId;
@@ -470,16 +454,21 @@ export default function App() {
     params.set('tab', activeTab);
     if (activeTab === 'settings') params.set('section', settingsSection);
     else params.delete('section');
+    if (activeTab === 'smm') params.set('view', smmView); else params.delete('view');
+    if (activeTab === 'processes' && processesView === 'approval') params.set('filter', 'approval'); else params.delete('filter');
     const hash = `#${params}`;
     if (window.location.hash !== hash) window.history.pushState(null, '', hash);
-  }, [activeTab, settingsSection]);
+  }, [activeTab, settingsSection, smmView, processesView]);
 
   useEffect(() => {
     const restoreRoute = () => {
       const params = new URLSearchParams(window.location.hash.slice(1));
-      setActiveTab(normalizeTab(params.get('tab')));
+      setActiveTab(params.get('tab') === 'settings' && params.get('section') === 'subagents' ? 'agents' : normalizeTab(params.get('tab')));
+      if (params.get('tab') === 'inbox') setSmmView('dialogs');
+      else if (params.get('tab') === 'smm' && params.get('view')) setSmmView(params.get('view') as SmmView);
+      setProcessesView(params.get('filter') === 'approval' ? 'approval' : 'all');
       const section = params.get('section');
-      setSettingsSection(section && ['config', 'currency', 'subagents', 'mcp', 'obsidian', 'memory', 'logs', 'activity', 'keys'].includes(section) ? section as any : 'config');
+      setSettingsSection(section && ['config', 'currency', 'subagents', 'mcp', 'obsidian', 'memory', 'logs', 'activity', 'keys', 'browser'].includes(section) ? section as any : 'config');
     };
     window.addEventListener('popstate', restoreRoute);
     window.addEventListener('hashchange', restoreRoute);
@@ -679,8 +668,7 @@ export default function App() {
       let lookahead: Promise<Blob | null> | null = null;
 
       try {
-        const authToken = localStorage.getItem('vexa_auth_token');
-        const authHeaders: Record<string, string> = authToken ? { 'Authorization': `Bearer ${authToken}` } : {};
+        const authHeaders: Record<string, string> = {};
         if (serverTtsAvailableRef.current === null) {
           const statusResponse = await fetch('/api/voice/tts/status', { headers: authHeaders });
           const status = statusResponse.ok ? await statusResponse.json() : null;
@@ -1342,6 +1330,28 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!csrfToken()) return;
+    let alive = true;
+    void fetch('/api/auth/session').then(response => {
+      if (alive && response.status === 401) setIsAuthenticated(false);
+    }).catch(() => { if (alive) setIsAuthenticated(false); });
+    return () => { alive = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    let lastActivity = 0;
+    const activity = (event: Event) => {
+      if (!event.isTrusted || Date.now() - lastActivity < 60000) return;
+      lastActivity = Date.now();
+      void fetch('/api/auth/activity', { method: 'POST' }).catch(() => {});
+    };
+    window.addEventListener('pointerdown', activity);
+    window.addEventListener('keydown', activity);
+    return () => { window.removeEventListener('pointerdown', activity); window.removeEventListener('keydown', activity); };
+  }, [isAuthenticated]);
+
   // Listen for unauthorized events to clear auth state
   useEffect(() => {
     const handleUnauthorized = () => {
@@ -1354,9 +1364,7 @@ export default function App() {
   }, []);
 
   const fetchWithAuth = useCallback((url: string, options: RequestInit = {}) => {
-    const token = localStorage.getItem('vexa_auth_token');
     const headers = new Headers(options.headers);
-    if (token) headers.set('Authorization', `Bearer ${token}`);
     return fetch(url, { ...options, headers }).then(res => {
       if (res.status === 401) {
         localStorage.removeItem('vexa_auth_token');
@@ -1416,8 +1424,7 @@ export default function App() {
         body: JSON.stringify({ code })
       });
       if (res.ok) {
-        const data = await res.json();
-        localStorage.setItem('vexa_auth_token', data.token);
+        localStorage.removeItem('vexa_auth_token');
         setIsAuthenticated(true);
         setAuthStatus('success');
         setOtpCode('');
@@ -1449,8 +1456,8 @@ export default function App() {
         body: JSON.stringify({ username: pwUsername.trim(), password: pwPassword })
       });
       const data = await res.json();
-      if (res.ok && data.token) {
-        localStorage.setItem('vexa_auth_token', data.token);
+      if (res.ok && data.status === 'success') {
+        localStorage.removeItem('vexa_auth_token');
         setIsAuthenticated(true);
         setPwPassword('');
         setPwStatus('idle');
@@ -1500,13 +1507,12 @@ export default function App() {
       }
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const token = localStorage.getItem('vexa_auth_token') || '';
       const wsUrl = `${protocol}//${window.location.host}/api/ws`;
 
       console.log('Connecting to authenticated WebSocket.');
       // hermes-v2 = addressed delivery + stream resume. Older servers ignore it
       // and answer hermes-v1, which still works (they just fan everything out).
-      const ws = new WebSocket(wsUrl, ['hermes-v2', 'hermes-v1', `hermes-auth.${token}`]);
+      const ws = new WebSocket(wsUrl, ['hermes-v2', 'hermes-v1']);
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -2192,10 +2198,7 @@ export default function App() {
   };
 
   const fetchModels = () => {
-    const token = localStorage.getItem('vexa_auth_token');
-    fetch('/api/models', {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    })
+    fetch('/api/models')
       .then(res => res.json())
       .then(data => {
         if (Array.isArray(data)) {
@@ -2453,10 +2456,8 @@ export default function App() {
     const chatId = currentChatIdRef.current;
     const runId = generatingRunsRef.current[chatId];
     if (runId) {
-      const token = localStorage.getItem('vexa_auth_token');
       void fetch(`/api/runs/${encodeURIComponent(runId)}/cancel`, {
         method: 'POST',
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
     }
     clearGenerating(chatId);
@@ -2737,6 +2738,7 @@ export default function App() {
 
   return (
     <div className={`app-container scanlines${activeTab === 'vexa' ? (vexaUiMode === 'immersive' ? ' is-vexa-mode' : ' is-vexa-simple-mode') : ''}`}>
+      <ReauthDialog language={language} />
       {/* Mobile Menu Toggle Button */}
       <button 
         aria-label={language === 'ru' ? 'Меню разделов' : 'Navigation menu'}
@@ -2807,172 +2809,23 @@ export default function App() {
         </div>
         <p className="sidebar-subtitle" style={styles.logoSubtitle}>{t('appSubtitle')}</p>
         
-        <nav style={{ ...styles.navMenu, ...(isSidebarCollapsed ? styles.navMenuCollapsed : {}) }}>
-          <button
-            style={navStyle('vexa')}
-            onClick={() => {
-              selectChat('dashboard');
-              setActiveTab('vexa');
-              setSidebarOpen(false);
-            }}
-            title={t('navVexa')}
-          >
-            <AudioWaveform size={18} />
-            <span>{t('navVexa')}</span>
-          </button>
-
-          <button
-            style={navStyle('processes')}
-            onClick={() => { setActiveTab('processes'); setSidebarOpen(false); }}
-            title={t('navProcesses')}
-          >
-            <ShieldCheck size={18} />
-            <span>{t('navProcesses')}</span>
-          </button>
-
-          <button
-            style={navStyle('metrics')}
-            onClick={() => { setActiveTab('metrics'); setSidebarOpen(false); }}
-            title={t('navMetrics')}
-          >
-            <BarChart3 size={18} />
-            <span>{t('navMetrics')}</span>
-          </button>
-
-          <button
-            style={navStyle('earner')}
-            onClick={() => { setActiveTab('earner'); setSidebarOpen(false); }}
-            title={t('navEarner')}
-          >
-            <Coins size={18} />
-            <span>{t('navEarner')}</span>
-          </button>
-
-          <button
-            style={navStyle('desktops')}
-            onClick={() => { setActiveTab('desktops'); setSidebarOpen(false); }}
-            title={t('navAgentDesktops')}
-          >
-            <MonitorPlay size={18} />
-            <span>{t('navAgentDesktops')}</span>
-          </button>
-
-          <button
-            style={navStyle('devruns')}
-            onClick={() => { setActiveTab('devruns'); setSidebarOpen(false); }}
-            title="Dev Runs"
-          >
-            <Terminal size={18} />
-            <span>Dev Runs</span>
-          </button>
-
-          <button
-            style={navStyle('kanban')}
-            onClick={() => { setActiveTab('kanban'); setSidebarOpen(false); }}
-            title={t('navKanban')}
-          >
-            <Trello size={18} />
-            <span>{t('navKanban')}</span>
-          </button>
-
-          <button
-            style={navStyle('clients')}
-            onClick={() => { setActiveTab('clients'); setSidebarOpen(false); }}
-            title={t('navClients')}
-          >
-            <Briefcase size={18} />
-            <span>{t('navClients')}</span>
-            {overdueTaskCount > 0 && !isSidebarCollapsed && (
-              <span style={{
-                marginLeft: 'auto', minWidth: 16, padding: '1px 5px', borderRadius: 9,
-                background: 'rgba(246, 184, 74, 0.22)', color: '#f6b84a',
-                font: '700 0.62rem var(--font-mono)', textAlign: 'center',
-              }}>{overdueTaskCount}</span>
-            )}
-          </button>
-
-          <button
-            style={navStyle('agents')}
-            onClick={() => { setActiveTab('agents'); setSidebarOpen(false); }}
-            title={t('navAgents')}
-          >
-            <UserCog size={18} />
-            <span>{t('navAgents')}</span>
-          </button>
-
-          <button
-            style={navStyle('schedule')}
-            onClick={() => { setActiveTab('schedule'); setSidebarOpen(false); }}
-            title="Schedules & Automation"
-          >
-            <Clock size={18} />
-            <span>Schedules & Automation</span>
-          </button>
-
-          <button
-            style={navStyle('contentfactory')}
-            onClick={() => { setActiveTab('contentfactory'); setSidebarOpen(false); }}
-            title="Content Factory"
-          >
-            <Factory size={18} />
-            <span>Content Factory</span>
-            {!isSidebarCollapsed && (
-              <span style={{
-                marginLeft: 'auto', fontSize: 9, fontWeight: 700, letterSpacing: 0.6,
-                padding: '2px 6px', borderRadius: 4, color: '#141820', background: '#36cffb',
-              }}>NEW</span>
-            )}
-          </button>
-
-          <button
-            style={navStyle('smm')}
-            onClick={() => { setActiveTab('smm'); setSidebarOpen(false); }}
-            title={t('navSmmFactory')}
-          >
-            <Megaphone size={18} />
-            <span>{t('navSmmFactory')}</span>
-            {inboxUnread > 0 && !isSidebarCollapsed && (
-              <span style={{
-                marginLeft: 'auto', minWidth: 16, padding: '1px 5px', borderRadius: 9,
-                background: 'rgba(124, 92, 252, 0.28)', color: '#B197FF',
-                font: '700 0.62rem var(--font-mono)', textAlign: 'center',
-              }} aria-label={`${inboxUnread} диалогов с непрочитанными`}>{inboxUnread}</span>
-            )}
-          </button>
-
-          <button
-            style={navStyle('network')}
-            onClick={() => { setActiveTab('network'); setSidebarOpen(false); }}
-            title={t('navArchitecture')}
-          >
-            <Network size={18} />
-            <span>{t('navArchitecture')}</span>
-          </button>
-          
-          {routerDashboardUrl && (
-            <a
-              style={{ ...styles.navBtn, ...(isSidebarCollapsed ? styles.navBtnCollapsed : {}), textDecoration: 'none' }}
-              href={routerDashboardUrl}
-              target="_blank"
-              rel="noreferrer"
-              onClick={() => setSidebarOpen(false)}
-              title="OmniRoute"
-            >
-              <Shuffle size={18} />
-              <span>OmniRoute</span>
-              {!isSidebarCollapsed && <ExternalLink size={12} style={{ marginLeft: 'auto', opacity: 0.6 }} />}
-            </a>
-          )}
-
-          <button
-            style={navStyle('settings')}
-            onClick={() => { setActiveTab('settings'); setSidebarOpen(false); }}
-            title={t('navSettings')}
-          >
-            <Settings size={18} />
-            <span>{t('navSettings')}</span>
-          </button>
-        </nav>
+        <AppNavigation language={language} current={{ tab: activeTab, section: settingsSection, view: smmView, filter: processesView }}
+          collapsed={isSidebarCollapsed} overdue={overdueTaskCount} unread={inboxUnread} routerUrl={routerDashboardUrl}
+          onNavigate={destination => {
+            if (destination.tab === 'vexa') selectChat('dashboard');
+            if (destination.section) setSettingsSection(destination.section);
+            if (destination.view) setSmmView(destination.view);
+            if (destination.tab === 'processes') setProcessesView(destination.filter || 'all');
+            setActiveTab(destination.tab); setSidebarOpen(false);
+          }}
+          onSignOut={() => void (async () => {
+            try {
+              const response = await fetch('/api/auth/logout', { method: 'POST' });
+              if (!response.ok && response.status !== 401) throw new Error('Logout failed');
+              document.cookie = 'hermes_csrf=; Max-Age=0; path=/';
+              setIsAuthenticated(false);
+            } catch { notify(language === 'ru' ? 'Не удалось завершить сеанс' : 'Could not sign out'); }
+          })()} />
 
         {/* Sidebar Status Info */}
         <div style={styles.statusBox} className="glass-panel sidebar-status">
@@ -3179,7 +3032,7 @@ export default function App() {
                     {vexaFloatingPanel === 'agents' && (
                       <AgentsAdminTab agents={subagents} models={models} fetchAgents={fetchSubagents} t={t} />
                     )}
-                    {vexaFloatingPanel === 'protocols' && <ProcessesTab language={language} />}
+                    {vexaFloatingPanel === 'protocols' && <ProcessesTab key={processesView} language={language} initialFilter={processesView} />}
                   </FloatingWindow>
                 )}
               </>
@@ -3192,7 +3045,7 @@ export default function App() {
         {!vexaImmersive && (
           <AppHeader
             language={language}
-            onOpenProcesses={() => setActiveTab('processes')}
+            onOpenProcesses={() => { setProcessesView('approval'); setActiveTab('processes'); }}
             onOpenBrowserView={() => setBrowserViewOpen(true)}
           />
         )}
@@ -3214,7 +3067,7 @@ export default function App() {
           </FloatingWindow>
         )}
 
-        {activeTab === 'processes' && <ProcessesTab language={language} />}
+        {activeTab === 'processes' && <ProcessesTab key={processesView} language={language} initialFilter={processesView} />}
 
         {activeTab === 'devruns' && (
           <DevRunsTab language={language} lastEvent={lastDevRunEvent} />
@@ -3256,7 +3109,7 @@ export default function App() {
         )}
 
         {activeTab === 'smm' && (
-          <SMMFactoryTab agents={subagents} unreadDialogs={inboxUnread} onOpenClient={() => setActiveTab('clients')} />
+          <SMMFactoryTab agents={subagents} initialView={smmView} onViewChange={setSmmView} unreadDialogs={inboxUnread} onOpenClient={() => setActiveTab('clients')} />
         )}
 
         {activeTab === 'network' && (
@@ -3279,7 +3132,7 @@ export default function App() {
                 <KeyRound size={15} />
                 <span>{t('navApiKeys')}</span>
               </button>
-              <button type="button" className={settingsSection === 'subagents' ? 'is-active' : ''} onClick={() => { setSettingsSection('subagents'); selectChat(currentChatId === 'dashboard' ? 'dashboard' : currentChatId); }}>
+              <button type="button" className={settingsSection === 'subagents' ? 'is-active' : ''} onClick={() => setActiveTab('agents')}>
                 <Layers size={15} />
                 <span>{t('navSubagents')}</span>
               </button>
@@ -3430,7 +3283,7 @@ export default function App() {
             )}
 
             {settingsSection === 'obsidian' && (
-              <ObsidianTab authToken={localStorage.getItem('vexa_auth_token')} />
+              <ObsidianTab authToken={null} />
             )}
 
             {settingsSection === 'mcp' && (

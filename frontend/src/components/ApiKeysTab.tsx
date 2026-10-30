@@ -11,8 +11,8 @@ interface ApiKeyEntry {
 }
 
 function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem('vexa_auth_token');
-  return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+
+  return { 'Content-Type': 'application/json',  };
 }
 
 function KeyRow({ entry, onSaved }: { entry: ApiKeyEntry; onSaved: () => void }) {

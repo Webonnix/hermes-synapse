@@ -18,16 +18,20 @@ from backend.bot import init_bot, shutdown_bot
 from backend.websocket_manager import manager
 
 class AuthVerifyRequest(BaseModel):
-    code: str
+    code: str = Field(max_length=64)
 
 class AuthLoginRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(max_length=256)
+    password: str = Field(max_length=4096)
 
 class ChangePasswordRequest(BaseModel):
-    current_password: str | None = None
-    new_username: str
-    new_password: str
+    current_password: str | None = Field(default=None, max_length=4096)
+    new_username: str = Field(max_length=256)
+    new_password: str = Field(max_length=4096)
+
+class ReauthRequest(BaseModel):
+    code: str = Field(max_length=64)
+    password: str = Field(default="", max_length=4096)
 
 class ConfigUpdate(BaseModel):
     system_prompt: str | None = None
@@ -577,6 +581,13 @@ async def slow_request_watchdog(request: Request, call_next):
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
+    if path.startswith(("/api/plots/", "/api/generated-images/")):
+        from backend.artifact_links import valid
+        if await asyncio.to_thread(valid, path, request.query_params.get("expires", ""), request.query_params.get("signature", "")):
+            response = await call_next(request)
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            return response
     # Allow public auth routes and plots (images)
     if path in (
         "/health/live",
@@ -584,12 +595,13 @@ async def auth_middleware(request: Request, call_next):
         "/api/auth/request-code",
         "/api/auth/verify-code",
         "/api/auth/login",
+        "/api/auth/session",
         # Crypto payment callback: the provider can't hold a dashboard session,
         # so this one route authenticates itself with an HMAC signature over the
         # raw body instead (backend/payments.handle_webhook). It grants nothing
         # on a bad signature.
         "/api/payments/webhook",
-    ) or path.startswith("/api/plots/") or path.startswith("/api/generated-images/") or (
+    ) or (
         # Public read-only conversation snapshots. The token IS the credential,
         # and what it unlocks was sanitized once at creation — there is nothing
         # session-scoped behind this path to protect.
@@ -618,27 +630,78 @@ async def auth_middleware(request: Request, call_next):
     if not path.startswith("/api/"):
         return await call_next(request)
         
-    # Check authorization header
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        return JSONResponse(status_code=401, content={"detail": "Unauthorized: Missing or invalid token"})
-        
-    token = auth_header.split(" ")[1]
-    if not validate_session(token):
+    from backend import auth, auth_state
+    from backend.auth_http import connection_token, csrf_valid
+    token = connection_token(request)
+    try:
+        data = await asyncio.to_thread(auth.session_data, token, touch=False)
+    except auth_state.AuthUnavailable:
+        return JSONResponse(status_code=503, content={"detail": "Authentication temporarily unavailable"})
+    if not data:
         return JSONResponse(status_code=401, content={"detail": "Unauthorized: Session expired or invalid"})
-        
-    return await call_next(request)
+    request.state.auth = data
+    request.state.auth_token = token
+    role_scoped_prefixes = ("/api/clients", "/api/client-", "/api/inbox", "/api/crm", "/api/calendar",
+                            "/api/phone/", "/api/currency", "/api/v1/content-factory/", "/api/agent-desktops/",
+                            "/api/auth/logout", "/api/auth/activity")
+    if data["role"] != "owner" and not path.startswith(role_scoped_prefixes) and path not in ("/api/status", "/api/settings"):
+        return JSONResponse(status_code=403, content={"detail": "Owner access required"})
+    if not request.headers.get("authorization", "").startswith("Bearer ") and request.method not in ("GET", "HEAD", "OPTIONS"):
+        if not csrf_valid(request, data):
+            return JSONResponse(status_code=403, content={"detail": "Invalid CSRF token or origin"})
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        if not await asyncio.to_thread(auth.session_data, token, touch=True):
+            return JSONResponse(status_code=401, content={"detail": "Session expired"})
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+@app.middleware("http")
+async def auth_rate_limit_middleware(request: Request, call_next):
+    from backend import auth_state
+    from backend.auth_http import origin_allowed
+    from backend.auth import auth_retry_after
+    is_auth = request.url.path.startswith("/api/auth/")
+    try:
+        if is_auth and request.method not in ("GET", "HEAD", "OPTIONS") and not origin_allowed(request):
+            return JSONResponse(status_code=403, content={"detail": "Invalid origin"})
+        retry_after = 0
+        if is_auth and request.method != "OPTIONS":
+            retry_after = await asyncio.to_thread(auth_retry_after, request.url.path)
+        if retry_after:
+            response = JSONResponse(status_code=429,
+                content={"detail": "Too many authentication attempts. Please wait.",
+                         "message": "Too many authentication attempts. Please wait."},
+                headers={"Retry-After": str(retry_after)})
+        else:
+            response = await call_next(request)
+    except auth_state.AuthUnavailable:
+        response = JSONResponse(status_code=503, content={"detail": "Authentication temporarily unavailable"})
+    if is_auth:
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
 
 @app.post("/api/auth/request-code")
 async def request_code():
-    from backend.auth import generate_otp
+    from backend.auth import generate_otp, invalidate_otp, OTPRequestThrottled
     import backend.bot
     import os
     
-    code = generate_otp()
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if not chat_id:
         return {"status": "error", "message": "TELEGRAM_CHAT_ID is not configured on backend."}
+    if not backend.bot.telegram_app or not backend.bot.telegram_app.bot:
+        logger.error("Telegram bot is not initialized.")
+        return {"status": "error", "message": "Telegram bot is not initialized."}
+    try:
+        code = await asyncio.to_thread(generate_otp)
+    except OTPRequestThrottled as exc:
+        return JSONResponse(
+            status_code=429,
+            content={"status": "error", "message": str(exc)},
+            headers={"Retry-After": str(exc.retry_after)},
+        )
         
     msg = (
         f"🏛️ **Hermes Authorization Request**\n\n"
@@ -648,27 +711,28 @@ async def request_code():
         f"This code is valid for 5 minutes."
     )
     
+    delivered = False
     try:
-        if backend.bot.telegram_app and backend.bot.telegram_app.bot:
-            await backend.bot.telegram_app.bot.send_message(
-                chat_id=int(chat_id),
-                text=msg,
-                parse_mode="Markdown"
-            )
-            return {"status": "success", "message": "Code sent to Telegram."}
-        else:
-            logger.error("Telegram bot is not initialized.")
-            return {"status": "error", "message": "Telegram bot is not initialized."}
-    except Exception as e:
-        logger.error(f"Failed to send auth code to Telegram: {e}")
+        await backend.bot.telegram_app.bot.send_message(
+            chat_id=int(chat_id), text=msg, parse_mode="Markdown"
+        )
+        delivered = True
+        return {"status": "success", "message": "Code sent to Telegram."}
+    except Exception as exc:
+        logger.error("Failed to send auth code to Telegram (%s)", type(exc).__name__)
         return {"status": "error", "message": "Failed to send code. Check server logs."}
+    finally:
+        # Cancellation can happen while the network send is pending too.
+        if not delivered:
+            await asyncio.to_thread(invalidate_otp, code)
 
 @app.post("/api/auth/verify-code")
 async def verify_code(req: AuthVerifyRequest):
     from backend.auth import verify_otp, create_session
-    if verify_otp(req.code):
-        token = create_session()
-        return {"status": "success", "token": token}
+    from backend.auth_http import login_response
+    if await asyncio.to_thread(verify_otp, req.code):
+        token = await asyncio.to_thread(create_session)
+        return await asyncio.to_thread(login_response, token)
     else:
         from fastapi import HTTPException
         raise HTTPException(status_code=401, detail="Invalid or expired access code, Albert.")
@@ -685,14 +749,79 @@ async def login(req: AuthLoginRequest):
     if not stored_username or not stored_hash or not stored_salt:
         raise HTTPException(status_code=401, detail="Password login is not set up yet. Sign in via Telegram and set a password in Config.")
 
-    if req.username.strip() != stored_username or not verify_password(req.password, stored_hash, stored_salt):
+    valid_password = await asyncio.to_thread(verify_password, req.password, stored_hash, stored_salt)
+    if req.username.strip() != stored_username or not valid_password:
         raise HTTPException(status_code=401, detail="Invalid username or password.")
 
-    token = create_session()
-    return {"status": "success", "token": token}
+    from backend.auth_http import login_response
+    token = await asyncio.to_thread(create_session)
+    return await asyncio.to_thread(login_response, token)
+
+
+@app.get("/api/auth/session")
+async def auth_session(request: Request):
+    from backend import auth
+    from backend.auth_http import connection_token
+    data = await asyncio.to_thread(auth.session_data, connection_token(request), touch=False)
+    if not data:
+        raise HTTPException(status_code=401, detail="Session expired")
+    return {"authenticated": True, "role": data["role"], "csrf": data["csrf"]}
+
+
+@app.post("/api/auth/logout")
+async def logout(request: Request):
+    from backend import auth
+    from backend.auth_http import connection_token, SESSION_COOKIE, CSRF_COOKIE
+    await asyncio.to_thread(auth.destroy_session, connection_token(request))
+    response = JSONResponse({"status": "success"})
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    response.delete_cookie(CSRF_COOKIE, path="/")
+    return response
+
+
+@app.post("/api/auth/activity")
+async def session_activity():
+    # Auth/CSRF middleware already refreshed an actual user interaction.
+    return {"status": "success"}
+
+
+@app.post("/api/auth/reauth")
+async def reauthenticate(req: ReauthRequest, request: Request):
+    from backend import auth, database
+    from backend.auth_http import connection_token
+    token = connection_token(request)
+    if auth.role_for_session(token) != "owner":
+        raise HTTPException(status_code=403, detail="Owner access required")
+    stored_hash = database.get_setting("admin_password_hash")
+    stored_salt = database.get_setting("admin_password_salt")
+    password_ok = not stored_hash or bool(stored_salt and await asyncio.to_thread(
+        auth.verify_password, req.password, stored_hash, stored_salt))
+    code_ok = await asyncio.to_thread(auth.verify_otp, req.code)
+    if not password_ok or not code_ok:
+        raise HTTPException(status_code=401, detail="Invalid password or access code")
+    if not await asyncio.to_thread(auth.mark_session_fresh, token):
+        raise HTTPException(status_code=401, detail="Session expired")
+    return {"status": "success"}
+
+
+class ArtifactLinkRequest(BaseModel):
+    path: str = Field(max_length=240)
+
+
+@app.post("/api/artifacts/link")
+async def share_artifact(payload: ArtifactLinkRequest, request: Request):
+    from backend import permissions
+    from backend.artifact_links import sign
+    if permissions.role_from_request(request) != "owner":
+        raise HTTPException(status_code=403, detail="Owner access required")
+    try:
+        url = await asyncio.to_thread(sign, payload.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {"url": url, "expires_in": 300}
 
 @app.post("/api/auth/change-password")
-async def change_password(req: ChangePasswordRequest):
+async def change_password(req: ChangePasswordRequest, request: Request):
     from backend.auth import hash_password, verify_password
     from backend import database as db
 
@@ -712,7 +841,10 @@ async def change_password(req: ChangePasswordRequest):
     db.set_setting("admin_username", req.new_username.strip())
     db.set_setting("admin_password_hash", new_hash)
     db.set_setting("admin_password_salt", new_salt)
-    return {"status": "success"}
+    from backend.auth import revoke_all_sessions, create_session
+    from backend.auth_http import login_response
+    await asyncio.to_thread(revoke_all_sessions)
+    return await asyncio.to_thread(login_response, await asyncio.to_thread(create_session))
 
 from fastapi.staticfiles import StaticFiles
 import os
@@ -737,6 +869,8 @@ ALLOWED_ORIGINS = [
     for origin in os.getenv("HERMES_ALLOWED_ORIGINS", _DEFAULT_ALLOWED_ORIGINS).split(",")
     if origin.strip()
 ]
+if "*" in ALLOWED_ORIGINS:
+    raise ValueError("Credentialed CORS requires explicit origins")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -1081,14 +1215,25 @@ async def get_logs():
 # cost, and — crucially — which runs were still in flight when the process died.
 # ── Conversation sharing ───────────────────────────────────────────────────
 @app.post("/api/share/{chat_id}")
-async def create_conversation_share(chat_id: str):
+async def create_conversation_share(chat_id: str, request: Request):
     """Publish an immutable, sanitized snapshot of a conversation."""
     from backend import shares
+    from backend.auth_http import connection_token
+    from backend.auth import role_for_session
+    from backend.privacy.gateway import protect_messages, PrivacyCheckFailed
+    if await asyncio.to_thread(role_for_session, connection_token(request)) != "owner":
+        raise HTTPException(status_code=403, detail="Owner access required")
     from backend.database import get_session_transcript, get_session_title
     # get_session_transcript, not get_chat_history: it carries timestamps and
     # deliberately leaves out the run metadata that only exists to feed prompts.
     messages = get_session_transcript(chat_id, limit=shares.MAX_MESSAGES)
-    return shares.create_share(chat_id, messages, get_session_title(chat_id) or "")
+    messages = [dict(message) for message in messages if message.get("role") in shares.PUBLISHABLE_ROLES]
+    title_message = {"role": "user", "content": get_session_title(chat_id) or ""}
+    try:
+        await protect_messages([*messages, title_message], mark_key="_share_privacy")
+    except PrivacyCheckFailed:
+        raise HTTPException(status_code=503, detail="Privacy check unavailable; conversation was not published")
+    return shares.create_share(chat_id, messages, title_message["content"])
 
 
 @app.get("/api/share/{chat_id}")
@@ -1822,9 +1967,13 @@ async def get_control_plane_events_api(limit: int = 100):
     return list_events(limit=limit)
 
 @app.post("/api/control-plane/tasks/{task_id}/approve")
-async def approve_control_plane_task_api(task_id: str):
+async def approve_control_plane_task_api(task_id: str, request: Request):
     from backend.control_plane import approve_task, get_task
     from backend.approval_dispatch import execute_if_ready
+    from backend.auth_http import require_recent_auth
+    pending = await asyncio.to_thread(get_task, task_id)
+    if pending and pending["risk_class"] == "R4":
+        await asyncio.to_thread(require_recent_auth, request)
     try:
         task = approve_task(task_id, actor="owner:web")
     except KeyError:
@@ -5400,16 +5549,13 @@ def _resolve_turn_agent(raw: Any) -> Optional[str]:
 
 @app.websocket("/api/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    from backend.auth_http import websocket_session, watch_websocket_session
     offered_protocols = [
         item.strip()
         for item in websocket.headers.get("sec-websocket-protocol", "").split(",")
         if item.strip()
     ]
-    auth_protocol = next(
-        (item for item in offered_protocols if item.startswith("hermes-auth.")),
-        "",
-    )
-    token = auth_protocol.removeprefix("hermes-auth.")
+    token, session = await websocket_session(websocket)
     # Prefer the addressed/resumable protocol. A client still on hermes-v1 (or a
     # stale cached bundle offering neither) keeps working on the legacy firehose.
     from backend.websocket_manager import PROTOCOL_V1, PROTOCOL_V2
@@ -5420,28 +5566,33 @@ async def websocket_endpoint(websocket: WebSocket):
     else:
         response_protocol = None
     from backend.auth import validate_session
-    if not token or not validate_session(token):
+    if not session:
         await websocket.accept(subprotocol=response_protocol)
         await websocket.close(code=1008)
         return
 
-    await manager.connect(websocket, subprotocol=response_protocol)
+    owner = session["role"] == "owner"
+    await manager.connect(websocket, subprotocol=response_protocol, owner=owner)
+    session_watch = asyncio.create_task(watch_websocket_session(websocket, token))
     try:
         # Send initial setup on connection
         from backend.database import get_chat_history
         from backend.activity_logger import ACTIVITY_LOGS
-        history = get_chat_history("dashboard")
+        history = get_chat_history("dashboard") if owner else []
         await websocket.send_json({
             "type": "init",
-            "config": agent_instance.get_runtime_config(),
-            "logs": DECISION_LOGS[:20],
+            "config": agent_instance.get_runtime_config() if owner else {},
+            "logs": DECISION_LOGS[:20] if owner else [],
             "history": history,
-            "activity_logs": ACTIVITY_LOGS
+            "activity_logs": ACTIVITY_LOGS if owner else []
         })
         
         while True:
             # Maintain connection alive, process incoming messages if any
             data = await websocket.receive_text()
+            if not await asyncio.to_thread(validate_session, token, touch=False):
+                await websocket.close(code=1008)
+                break
             # Declared out here so the error handler below can always close out
             # the run the browser is waiting on, even for a frame that failed
             # before these were read.
@@ -5492,6 +5643,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         await manager.resume(websocket, resume_run_id, after_seq)
                     continue
                 if frame_type == "chat_message":
+                    if not owner:
+                        await websocket.send_json({"type": "error", "error": "Owner access required"})
+                        continue
+                    await asyncio.to_thread(validate_session, token, touch=True)
                     user_text = msg.get("content", "")
                     chat_id = msg.get("chat_id", "dashboard")
                     run_id = str(msg.get("run_id") or "")[:128]
@@ -5682,4 +5837,8 @@ async def websocket_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
     except Exception as e:
         logger.exception("WebSocket connection error")
+        manager.disconnect(websocket)
+    finally:
+        session_watch.cancel()
+        await asyncio.gather(session_watch, return_exceptions=True)
         manager.disconnect(websocket)

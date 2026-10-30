@@ -309,9 +309,9 @@ export function SubagentsTab({
   };
 
   useEffect(() => {
-    const token = localStorage.getItem('vexa_auth_token');
+
     fetch('/api/skills', {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      headers: {},
     })
       .then(r => r.json())
       .then(data => setSkillMap(data))
@@ -319,9 +319,9 @@ export function SubagentsTab({
   }, []);
 
   useEffect(() => {
-    const token = localStorage.getItem('vexa_auth_token');
+
     fetch('/api/router/models', {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      headers: {},
     })
       .then(r => (r.ok ? r.json() : null))
       .then((data: { models?: RouterModel[] } | null) => {

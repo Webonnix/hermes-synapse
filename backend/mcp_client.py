@@ -41,7 +41,7 @@ class MCPServerClient:
 
     async def start(self):
         try:
-            logger.info(f"Starting MCP server '{self.name}': {self.command} {' '.join(self.args)}")
+            logger.info("Starting MCP server %s (argument count=%d)", self.name, len(self.args))
             self.process = await asyncio.create_subprocess_exec(
                 self.command,
                 *self.args,

@@ -152,10 +152,18 @@ def _tasks(tool_name):
     return [t for t in control_plane.list_tasks(limit=50) if t["tool_name"] == tool_name]
 
 
-async def test_turn_with_r2_permission_runs_without_approval_and_is_audited(control_db, fake_desktop):
+async def test_turn_with_r2_permission_waits_for_owner_and_is_audited(control_db, fake_desktop):
     fake_desktop["agent"] = FakeAcpAgent(permission_kind="execute", reply="built").start()
     manager = sessions.AgentDesktopManager()
     manager.start_turn("alice", "grok", "build the site")
+    for _ in range(300):
+        pending = _tasks("agent_desktop_execute")
+        if pending:
+            break
+        await asyncio.sleep(0.01)
+    assert pending[0]["status"] == "awaiting_approval"
+    assert not fake_desktop["agent"].permission_answers
+    control_plane.approve_task(pending[0]["id"])
     events = await _finish(manager, "alice")
 
     assert fake_desktop["agent"].permission_answers[0]["result"]["outcome"] == {"outcome": "selected",
@@ -558,8 +566,8 @@ def test_openbot_desktop_gets_its_image_data_mount_and_the_same_isolation(monkey
     # Isolation is not a per-kind setting.
     assert kwargs["runtime"] == "runsc" and kwargs["read_only"] is True and kwargs["cap_drop"] == ["ALL"]
     assert kwargs["extra_hosts"] == {"hermes-backend": "172.23.0.4"}
-    assert owners == ["1000:1000"]
-    note = tmp_path / "bot" / "home" / "HERMES-MODEL.json"
+    assert owners == []  # Only the launcher changes the uid-1000 home's owner.
+    note = tmp_path / "bot" / "bootstrap" / "HERMES-MODEL.json"
     assert json.loads(note.read_text())["api_key"] == desktop.llm_token("bot")
     assert oct(note.stat().st_mode & 0o777) == "0o600"
     assert desktop.recorded_kind("bot") == "openbot"

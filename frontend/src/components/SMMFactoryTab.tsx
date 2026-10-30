@@ -62,15 +62,18 @@ function conversationRequested(): boolean {
 }
 
 interface SMMFactoryTabProps {
+  initialView?: View;
+  onViewChange?: (view: View) => void;
   agents: AgentModel[];
   /** Conversations with unread customer messages — shown on «Диалоги». */
   unreadDialogs?: number;
   onOpenClient?: (clientId: string) => void;
 }
 
-export function SMMFactoryTab({ agents, unreadDialogs = 0, onOpenClient }: SMMFactoryTabProps) {
+export function SMMFactoryTab({ agents, unreadDialogs = 0, onOpenClient, initialView, onViewChange }: SMMFactoryTabProps) {
   const [view, setView] = useState<View>(() => {
     // Another section (the client card) asked for one conversation: open on it.
+    if (initialView && VIEW_KEYS.includes(initialView)) return initialView;
     if (conversationRequested()) return 'dialogs';
     const stored = localStorage.getItem('smm_factory_view') as View | null;
     // A view name from an older build (or a hand-edited key) must not leave the
@@ -85,7 +88,10 @@ export function SMMFactoryTab({ agents, unreadDialogs = 0, onOpenClient }: SMMFa
 
   useEffect(() => {
     localStorage.setItem('smm_factory_view', view);
-  }, [view]);
+    onViewChange?.(view);
+  }, [view, onViewChange]);
+
+  useEffect(() => { if (initialView && VIEW_KEYS.includes(initialView)) setView(initialView); }, [initialView]);
 
   // Already mounted on another view: switch to «Диалоги»; the section picks the
   // conversation id up from storage when it mounts.

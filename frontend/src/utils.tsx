@@ -1,4 +1,5 @@
 import React from 'react';
+import { csrfToken, requestReauth } from './sessionAuth';
 import type { RenderedListItem } from './types';
 
 // Inline text formatter for bold, italic, links, and inline code
@@ -445,20 +446,26 @@ export const stopAlarmSound = () => {
 
 // Global Fetch Interceptor to automatically add Auth headers and capture 401s
 export const initFetchInterceptor = () => {
+  localStorage.removeItem('vexa_auth_token');
   const originalFetch = window.fetch;
   if ((originalFetch as any).__hermesAuth) return;
   (window as any).fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const urlStr = typeof input === 'string' ? input : (input instanceof URL ? input.toString() : (input as Request).url);
     const url = new URL(urlStr, window.location.href);
-    const protectedApi = url.origin === window.location.origin && url.pathname.startsWith('/api/') && !url.pathname.startsWith('/api/auth/');
-    const token = protectedApi ? localStorage.getItem('vexa_auth_token') : null;
-    if (token) {
+    const sameApi = url.origin === window.location.origin && url.pathname.startsWith('/api/');
+    const protectedApi = sameApi && !url.pathname.startsWith('/api/auth/');
+    if (sameApi) {
       const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
-      headers.set('Authorization', `Bearer ${token}`);
-      init = { ...init, headers };
+      const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+      if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) headers.set('X-CSRF-Token', csrfToken());
+      init = { ...init, headers, credentials: 'same-origin' };
     }
     
+    const retryInput = input instanceof Request ? input.clone() : input;
     const res = await originalFetch(input, init);
+    if (sameApi && res.status === 428 && !url.pathname.startsWith('/api/auth/')) {
+      if (await requestReauth()) return originalFetch(retryInput, init);
+    }
     if (res.status === 401 && protectedApi) {
       localStorage.removeItem('vexa_auth_token');
       window.dispatchEvent(new Event('vexa-unauthorized'));

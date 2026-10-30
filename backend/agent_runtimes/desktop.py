@@ -309,6 +309,10 @@ def model_access(key: str) -> Dict[str, Any]:
 def _prepare_openbot_home(key: str, with_local_model: bool) -> None:
     home = _local_root() / _safe_key(key) / "home"
     home.mkdir(parents=True, exist_ok=True)
+    # The broker owns the uid-1000 home. Backend writes only a separate
+    # uid-10001 bootstrap directory; the broker installs this one managed file.
+    home = home.parent / "bootstrap"
+    home.mkdir(exist_ok=True)
     note = home / "HERMES-MODEL.json"
     if with_local_model:
         # OpenBot's providers are set up in its app; this is the same data the
@@ -317,8 +321,6 @@ def _prepare_openbot_home(key: str, with_local_model: bool) -> None:
         note.chmod(0o600)
     elif note.exists():
         note.unlink()
-    subprocess.run(["chown", "-R", f"{KINDS[OPENBOT].uid}:{KINDS[OPENBOT].uid}", str(home)],
-                   check=True, capture_output=True, text=True, timeout=300)
 
 
 def _prepare_home(key: str, with_local_model: bool = False, external_models: Optional[List[str]] = None) -> None:
@@ -339,8 +341,9 @@ def _prepare_home(key: str, with_local_model: bool = False, external_models: Opt
                                        "permission": OPENCODE_PERMISSIONS}) + "\n")
     # The backend is root; the desktop drops to uid 10001 and must own its home,
     # or the very first write (the X authority file, the workspace) fails.
-    subprocess.run(["chown", "-R", f"{DESKTOP_UID}:{DESKTOP_GID}", str(home)],
-                   check=True, capture_output=True, text=True, timeout=120)
+    if os.geteuid() == 0:
+        subprocess.run(["chown", "-R", f"{DESKTOP_UID}:{DESKTOP_GID}", str(home)],
+                       check=True, capture_output=True, text=True, timeout=120)
 
 
 def _networks(client) -> List[str]:

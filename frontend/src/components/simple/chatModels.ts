@@ -59,8 +59,8 @@ export const emptyCatalog: ChatModelCatalog = {
 };
 
 function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem('vexa_auth_token');
-  return token ? { Authorization: `Bearer ${token}` } : {};
+
+  return {};
 }
 
 export async function fetchChatModels(refresh = false): Promise<ChatModelCatalog> {

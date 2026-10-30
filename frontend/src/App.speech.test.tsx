@@ -79,7 +79,7 @@ describe('streamed replies are spoken while they stream', () => {
     players.length = 0;
     synthesized = [];
     localStorage.clear();
-    localStorage.setItem('vexa_auth_token', 'mock_token');
+    document.cookie = 'hermes_csrf=mock-csrf; path=/';
     localStorage.setItem('hermes_language', 'en');
     vi.stubGlobal('WebSocket', MockWebSocket);
     vi.stubGlobal('Audio', FakeAudio);

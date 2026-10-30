@@ -10,8 +10,8 @@ import type { ChatMessage } from '../../types';
 import type { ModelSelection } from './chatModels';
 
 function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem('vexa_auth_token');
-  return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+
+  return { 'Content-Type': 'application/json',  };
 }
 
 async function readJson<T>(res: Response): Promise<T> {

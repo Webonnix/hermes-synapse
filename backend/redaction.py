@@ -10,6 +10,7 @@ _regex_redact (shares, tests) and the single-text detect/restore pair.
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Any, Dict, Tuple
 
 from backend.privacy.detectors.regex import (  # noqa: F401 — re-exported
@@ -31,14 +32,10 @@ async def detect_and_redact(text: str) -> Tuple[str, Dict[str, str]]:
 
 def safe_log_preview(text: Any, limit: int = 80) -> str:
     """Safe representation of user text / prompts / tool args for operational logs:
-    regex-redacted first `limit` chars plus length and a short hash — never the
-    full payload."""
+    Length and a short fingerprint; no part of the payload is retained."""
     raw = text if isinstance(text, str) else str(text)
     digest = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:10]
-    redacted, _ = _regex_redact(raw[: limit * 2])
-    preview = redacted[:limit].replace("\n", " ")
-    suffix = "…" if len(raw) > limit else ""
-    return f"len={len(raw)} sha={digest} preview='{preview}{suffix}'"
+    return f"len={len(raw)} sha={digest}"
 
 
 def restore_secrets_with_mapping(text: str, mapping: Dict[str, str]) -> str:
@@ -49,3 +46,21 @@ def restore_secrets_with_mapping(text: str, mapping: Dict[str, str]) -> str:
     vault = PlaceholderVault()
     vault.merge(mapping)
     return restore_text(text, vault)
+
+
+def diagnostic_metadata(log: Dict[str, Any]) -> Dict[str, Any]:
+    """Decision telemetry stores sizes/fingerprints, not a second transcript."""
+    result = dict(log)
+    for field in ("user_message", "assistant_response", "error"):
+        value = result.get(field)
+        if value:
+            # Idempotent when a record passes both memory and persistence gates.
+            result[field] = value if isinstance(value, str) and re.fullmatch(r"len=\d+ sha=[0-9a-f]{10}", value) else safe_log_preview(value)
+    safe_traces = []
+    for trace in result.get("traces") or []:
+        if isinstance(trace, dict):
+            safe_traces.append({key: value for key, value in trace.items()
+                                if key in ("duration_ms", "latency_ms", "input_tokens", "output_tokens")
+                                and isinstance(value, (int, float))})
+    result["traces"] = safe_traces
+    return result

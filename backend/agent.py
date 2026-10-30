@@ -12,6 +12,7 @@ import httpx
 from dotenv import load_dotenv
 
 from backend.tool_permissions import MAIN_AGENT_ID, LEGACY_MAIN_AGENT_ID
+from backend.redaction import diagnostic_metadata
 from backend.llamacpp_client import (
     DEFAULT_MODEL as DEFAULT_LOCAL_MODEL,
     LOCAL_PROVIDER,
@@ -797,8 +798,7 @@ def _parse_tool_arguments(raw_args: Any) -> Dict[str, Any]:
         parsed = json.loads(raw_args)
         return parsed if isinstance(parsed, dict) else {}
     except Exception:
-        from backend.redaction import safe_log_preview
-        logger.warning("Could not parse tool arguments as JSON (%s)", safe_log_preview(raw_args))
+        logger.warning("Could not parse tool arguments as JSON (characters=%d)", len(raw_args))
         return {}
 
 
@@ -1907,6 +1907,8 @@ class VexaAgent:
         and its own endpoint — the one crossing that produces a local model name
         sent to OmniRoute (HTTP 404) or vice versa."""
         from backend.llm_client import track_turn_usage
+        from backend.context_trust import SOURCES
+        trust_token = SOURCES.set(SOURCES.get() or {"history_or_external_input"})
 
         # One primary-key read, done inline like the turn's other small SQLite
         # writes (db.save_message); a malformed result means "no settings".
@@ -1937,6 +1939,7 @@ class VexaAgent:
                 self._persist_run_meta(session_id)
             return response_text
         finally:
+            SOURCES.reset(trust_token)
             _AGENT_OVERRIDE.reset(agent_token)
             _CHAT_SETTINGS.reset(settings_token)
             _LLM_OVERRIDE.reset(token)
@@ -2140,7 +2143,7 @@ class VexaAgent:
                     "provider_id": orch_provider_id,
                 }
 
-                DECISION_LOGS.insert(0, log_entry)
+                DECISION_LOGS.insert(0, diagnostic_metadata(log_entry))
                 if len(DECISION_LOGS) > 100:
                     DECISION_LOGS.pop()
                 try:
@@ -2229,8 +2232,7 @@ class VexaAgent:
 
         # ── Complexity routing (Fugu-style) ───────────────────────────────────────
         complexity = await classify_complexity(user_message, self.api_key, self.api_base, self.provider)
-        from backend.redaction import safe_log_preview
-        logger.info(f"Complexity routing decision: '{complexity}' for query ({safe_log_preview(user_message, 60)})")
+        logger.info("Complexity routing decision: %s (input characters=%d)", complexity, len(user_message))
         log_activity(
             activity_type="active",
             source="Router",
@@ -2354,7 +2356,7 @@ class VexaAgent:
                 "cost_usd": cost_usd,
                 "provider_id": orch_provider_id,
             }
-            DECISION_LOGS.insert(0, log_entry)
+            DECISION_LOGS.insert(0, diagnostic_metadata(log_entry))
             if len(DECISION_LOGS) > 100:
                 DECISION_LOGS.pop()
             try:
@@ -2957,7 +2959,7 @@ class VexaAgent:
             "traces": []
         }
         
-        DECISION_LOGS.insert(0, log_entry)
+        DECISION_LOGS.insert(0, diagnostic_metadata(log_entry))
         if len(DECISION_LOGS) > 100:
             DECISION_LOGS.pop()
         try:
@@ -3148,7 +3150,7 @@ class VexaAgent:
                     "completion_tokens_estimate": 0,
                     "cost_usd": 0.0,
                 }
-                DECISION_LOGS.insert(0, log_entry)
+                DECISION_LOGS.insert(0, diagnostic_metadata(log_entry))
                 if len(DECISION_LOGS) > 100:
                     DECISION_LOGS.pop()
                 try:
@@ -3687,7 +3689,7 @@ class VexaAgent:
             "provider_id": subagent_provider_id,
         }
         
-        DECISION_LOGS.insert(0, log_entry)
+        DECISION_LOGS.insert(0, diagnostic_metadata(log_entry))
         if len(DECISION_LOGS) > 100:
             DECISION_LOGS.pop()
         try:

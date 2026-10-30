@@ -4,6 +4,12 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 from backend.agent import VexaAgent, DEFAULT_SYSTEM_PROMPT
 from backend import database
+@pytest.fixture(autouse=True)
+def isolated_privacy_detector(monkeypatch):
+    from backend.privacy import gateway, cache
+    gateway.clear_memo(); cache.clear_memory()
+    monkeypatch.setenv("PRIVACY_CACHE_VALKEY", "0")
+    monkeypatch.setattr("backend.privacy.detectors.local_llm.find_spans", AsyncMock(return_value=[]))
 
 @pytest.fixture(autouse=True)
 def pin_pre_flight_routers():

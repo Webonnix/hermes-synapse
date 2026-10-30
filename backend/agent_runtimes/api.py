@@ -156,7 +156,10 @@ def _ws_allowed(websocket: WebSocket) -> bool:
     from backend.auth import role_for_session, validate_session
 
     offered = [p.strip() for p in websocket.headers.get("sec-websocket-protocol", "").split(",") if p.strip()]
-    token = next((p for p in offered if p.startswith("hermes-auth.")), "").removeprefix("hermes-auth.")
+    from backend.auth_http import connection_token, origin_allowed
+    if not origin_allowed(websocket):
+        return False
+    token = connection_token(websocket) or next((p for p in offered if p.startswith("hermes-auth.")), "").removeprefix("hermes-auth.")
     if not token or not validate_session(token):
         return False
     return permissions.has_permission(role_for_session(token), permissions.AGENT_DESKTOPS_MANAGE)
@@ -166,7 +169,9 @@ def _ws_allowed(websocket: WebSocket) -> bool:
 async def agent_desktop_vnc(websocket: WebSocket, key: str):
     """Relays the desktop's VNC stream between the dashboard's noVNC viewer and
     the desktop bridge. Bytes only — RFB is not parsed here."""
-    if not _ws_allowed(websocket) or not desktop.enabled():
+    from backend.auth_http import websocket_session, watch_websocket_session
+    token, session = await websocket_session(websocket)
+    if not session or not permissions.has_permission(session["role"], permissions.AGENT_DESKTOPS_MANAGE) or not desktop.enabled():
         await websocket.close(code=1008)
         return
     screen = websocket.query_params.get("screen", "0")
@@ -202,12 +207,14 @@ async def agent_desktop_vnc(websocket: WebSocket, key: str):
             if data:
                 await upstream.send(data)
 
-    tasks = [asyncio.create_task(to_viewer()), asyncio.create_task(to_desktop())]
+    tasks = [asyncio.create_task(to_viewer()), asyncio.create_task(to_desktop()),
+             asyncio.create_task(watch_websocket_session(websocket, token))]
     try:
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     finally:
         for task in tasks:
             task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         with contextlib.suppress(Exception):
             await upstream.close()
         with contextlib.suppress(Exception):

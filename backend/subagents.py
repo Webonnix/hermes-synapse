@@ -446,7 +446,7 @@ class ResearchAgent:
                 results_parts.append("📰 **Последние новости:**\n" + news_data)
 
         # 3) Fetch general web search results (up to 2 queries separated by ';')
-        logger.info(f"Research Agent: refining search query from instructions: '{prompt[:60]}...'")
+        logger.info("Research Agent: refining search query (input characters=%d)", len(prompt))
         refining_messages = [
             {"role": "system", "content": "Вы — ассистент, который преобразует длинные инструкции в 1-2 эффективных поисковых запроса для поисковых систем (Google/DuckDuckGo). Если запросов два, разделите их точкой с запятой (;). Выводите ТОЛЬКО поисковый(е) запрос(ы), без лишних слов, знаков препинания (кроме точки с запятой), кавычек и преамбул.\n"
                                           "КРИТИЧЕСКОЕ ПРАВИЛО: Категорически запрещено использовать в поисковых запросах слова вроде 'прогноз', 'прогнозы', 'валуйные', 'валуйная', 'value', 'советы', 'ставки от редакции'. Заменяйте их на запросы сырых данных, например: 'коэффициенты', 'odds', 'букмекерские котировки', 'расписание матчей', 'соперники'."},

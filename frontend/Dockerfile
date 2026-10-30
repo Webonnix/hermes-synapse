@@ -1,5 +1,5 @@
 # Stage 1: Build Vite React application
-FROM node:20-alpine AS build
+FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS build
 
 WORKDIR /app
 
@@ -16,7 +16,7 @@ ENV HERMES_BUILD_ID=$HERMES_BUILD_ID
 RUN npm run build
 
 # Stage 2: Serve application using Nginx
-FROM nginx:alpine
+FROM nginx:alpine@sha256:4a73073bd557c65b759505da037898b61f1be6cbcc3c2c3aeac22d2a470c1752
 
 # Copy built assets from build stage to nginx default public directory
 COPY --from=build /app/dist /usr/share/nginx/html
@@ -27,6 +27,8 @@ COPY --from=build /app/dist /usr/share/nginx/html
 # substituting only variables that are actually set in the container's
 # environment. This is how LLM_PROXY_TOKEN gets baked into the config.
 COPY nginx.conf.template /etc/nginx/templates/default.conf.template
+COPY security-headers.conf /etc/nginx/snippets/hermes-security.conf
+COPY security-common.conf /etc/nginx/snippets/hermes-security-common.conf
 
 # Expose Nginx port
 EXPOSE 80

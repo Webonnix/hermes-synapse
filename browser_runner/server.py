@@ -99,6 +99,9 @@ def _build_llm():
         # The local llama.cpp server speaks the OpenAI API under /v1.
         from browser_use import ChatOpenAI
         base_url = os.getenv("LLAMACPP_BASE_URL", "http://hermes-llama:8080").rstrip("/")
+        from backend.provider_trust import trusted_local_endpoint
+        if not trusted_local_endpoint(base_url):
+            raise RuntimeError("Local browser model endpoint is outside the trusted host policy")
         if not base_url.endswith("/v1"):
             base_url += "/v1"
         # Strata's default is "projection ON" for a request that omits the field; this agent must stay on the stock model,
@@ -121,18 +124,9 @@ def _build_llm():
         return ChatOpenAI(model=model, base_url=base_url, api_key=os.getenv("LLAMACPP_API_KEY", "") or "not-needed",
                           http_client=http_client)
 
-    if provider == "openrouter":
-        # Not re-exported from the top-level `browser_use` package in this
-        # pinned release — only from its own submodule.
-        from browser_use.llm.openrouter.chat import ChatOpenRouter
-        api_key = os.getenv("OPENROUTER_API_KEY", "")
-        return ChatOpenRouter(model=model, api_key=api_key)
-
-    # openai_compatible / vLLM / LM Studio / anything else exposing /v1
-    from browser_use import ChatOpenAI
-    base_url = os.getenv("LLM_API_BASE", "").rstrip("/") or None
-    api_key = os.getenv("OPENROUTER_API_KEY", "") or os.getenv("OPENAI_API_KEY", "") or "not-needed"
-    return ChatOpenAI(model=model, base_url=base_url, api_key=api_key)
+    # Screenshots and logged-in DOM have no privacy pass in browser-use.
+    # Refuse remote providers instead of silently sending these raw payloads.
+    raise RuntimeError("Browser automation requires the local model; external screenshots/DOM are blocked")
 
 
 def _build_browser_profile(requested_allowed_domains: Optional[List[str]], profile: Optional[str] = None):

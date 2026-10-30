@@ -5,8 +5,8 @@ import type { SystemConfig } from '../types';
 import { LocalModelPanel } from './LocalModelPanel';
 
 function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem('vexa_auth_token');
-  return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+
+  return { 'Content-Type': 'application/json',  };
 }
 
 /** Self-contained "change admin password" form — used by password-based login on the auth screen. */

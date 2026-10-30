@@ -106,6 +106,6 @@ export const CREDENTIAL_FIELDS: Record<string, { label: string; hint?: string; s
 };
 
 export function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem('vexa_auth_token');
-  return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+
+  return { 'Content-Type': 'application/json',  };
 }

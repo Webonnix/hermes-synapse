@@ -101,7 +101,6 @@ describe('AgentDesktopsTab', () => {
 
   it('shows the live screen of a running desktop, view-only until taken over', async () => {
     localStorage.setItem('hermes_agent_desktop_selected', 'alice');
-    localStorage.setItem('vexa_auth_token', 'tok');
     mockApi({
       'GET /api/agent-desktops': { enabled: true, runtimes, desktops: [{ key: 'alice', name: 'n', status: 'running', busy: [] }] },
       'GET /api/agent-desktops/alice/events': { events: [ev(1, { type: 'turn_start', runtime: 'grok', text: 'open the site' })] },
@@ -110,7 +109,7 @@ describe('AgentDesktopsTab', () => {
     expect(await screen.findByText('open the site')).toBeInTheDocument();
     await waitFor(() => expect(rfbInstances).toHaveLength(1));
     expect(rfbInstances[0].url).toMatch(/\/api\/agent-desktops\/alice\/vnc\?screen=0$/);
-    expect(rfbInstances[0].options).toMatchObject({ wsProtocols: ['hermes-vnc', 'hermes-auth.tok'] });
+    expect(rfbInstances[0].options).toMatchObject({ wsProtocols: ['hermes-vnc'] });
     expect(rfbInstances[0].viewOnly).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: /Управлять/ }));
     expect(rfbInstances[0].viewOnly).toBe(false);
@@ -125,6 +124,7 @@ describe('AgentDesktopsTab', () => {
     });
     render(<AgentDesktopsTab language="en" />);
     await screen.findByText('alice');
+    await screen.findByRole('option', { name: 'OpenCode' });
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'opencode' } });
     fireEvent.change(screen.getByLabelText(/What should the agent do/), { target: { value: 'make a site' } });
     fireEvent.click(screen.getByRole('button', { name: /Send/ }));

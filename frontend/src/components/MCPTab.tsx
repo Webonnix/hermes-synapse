@@ -12,8 +12,8 @@ interface MCPServer {
 }
 
 const AUTH = (): Record<string, string> => {
-  const token = localStorage.getItem('vexa_auth_token');
-  return token ? { 'Authorization': `Bearer ${token}` } : {};
+
+  return {};
 };
 
 const API = '/api/mcp/servers';

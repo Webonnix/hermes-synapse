@@ -47,8 +47,8 @@ export interface ExchangeRateHistoryEntry {
 }
 
 export function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem('vexa_auth_token');
-  return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+
+  return { 'Content-Type': 'application/json',  };
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {

@@ -252,11 +252,8 @@ def _is_local_provider(api_base: str) -> bool:
     """Detect generic local endpoints (LM Studio, LocalAI, vLLM...) that may lack
     native function calling. The bundled llama.cpp server is not one of them: it
     is recognised by provider and handled before this check is ever reached."""
-    base = (api_base or "").lower()
-    return any(m in base for m in (
-        "localhost", "127.0.0.1", "0.0.0.0", "host.docker.internal",
-        "lmstudio", "lm-studio", "localai", "vllm",
-    ))
+    from backend.provider_trust import trusted_local_endpoint
+    return trusted_local_endpoint(api_base)
 
 
 def _extract_request_id(response: httpx.Response, data: Dict[str, Any]) -> Optional[str]:

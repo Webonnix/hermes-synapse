@@ -104,7 +104,7 @@ def is_llamacpp_provider(api_base: str = "", provider: str = "") -> bool:
     if base:
         host = (urlparse(base).hostname or "").lower()
         env_host = (urlparse(normalize_base_url()).hostname or "").lower()
-        return any(marker in host for marker in _LOCAL_HOST_MARKERS) or (bool(env_host) and host == env_host)
+        return host in _LOCAL_HOST_MARKERS or (bool(env_host) and host == env_host)
     return normalize_provider(os.getenv("LLM_PROVIDER", "")) == LOCAL_PROVIDER
 
 
@@ -255,6 +255,10 @@ class LlamaCppClient:
         client: Optional[httpx.AsyncClient] = None,
     ):
         self.base_url = normalize_base_url(base_url)
+        from backend.provider_trust import trusted_local_endpoint
+        if not trusted_local_endpoint(self.base_url):
+            raise LlamaCppError("Local provider endpoint is outside the trusted host policy.",
+                                status_code=403, code="untrusted_local_endpoint")
         self.timeout = timeout
         self.api_key = api_key if api_key is not None else os.getenv("LLAMACPP_API_KEY", "")
         self._client = client

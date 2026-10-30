@@ -409,6 +409,10 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from backend.control_plane import approve_task, get_task
     from backend.approval_dispatch import execute_if_ready
     task_id = context.args[0].strip()
+    pending = await asyncio.to_thread(get_task, task_id)
+    if pending and pending.get("risk_class") == "R4":
+        await _reply_text(update, "Для R4 подтвердите вход паролем и свежим кодом в веб-панели, затем одобрите действие там.")
+        return
     try:
         task = approve_task(task_id, actor="owner:telegram")
     except KeyError:

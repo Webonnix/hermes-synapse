@@ -97,22 +97,29 @@ Most multi-agent frameworks are either **too rigid** (n8n: hardwired workflows) 
 
 ## 🚀 Quick Start
 
-> **Requirements:** Docker + Docker Compose. That's it.
+> **Requirements:** Docker Engine API 1.45+, modern Docker Compose (with volume subpaths), gVisor/runsc and TLS certificates. Python development and tests require 3.11+.
 
 ```bash
 # 1. Clone
 git clone https://github.com/pauloberezini/hermes-synapse
 cd hermes-synapse
 
-# 2. Configure (only OPENROUTER_API_KEY is required — everything else is optional)
+# 2. Configure the local model, authentication, existing data volumes and TLS
 cp .env.example .env
 ```
 The default setup is local-first and does not require an LLM API key. Optional
 Telegram, search, calendar, and cloud-provider keys can be added later.
 
-### 3. Launch the Stack
+### 3. Prepare data and validate the deployment
+
+Follow [the security deployment and migration procedure](docs/security-deployment.md)
+before upgrading an existing installation. The Compose file intentionally requires
+explicit existing data volumes; it must never silently replace your database,
+Valkey encryption key or router credentials with an empty store.
+
 ```bash
-docker-compose up -d --build
+python3 ops/security_preflight.py
+docker compose up -d --build
 ```
 This starts the backend (FastAPI), frontend dashboard (Nginx/React), the local
 llama.cpp server and the Qdrant vector database. Put the model's GGUF files in
@@ -429,3 +436,12 @@ MIT License — see [LICENSE](LICENSE) for details.
 [⭐ Star on GitHub](https://github.com/pauloberezini/hermes-synapse) · [🐛 Report Bug](https://github.com/pauloberezini/hermes-synapse/issues) · [💡 Request Feature](https://github.com/pauloberezini/hermes-synapse/issues)
 
 </div>
+
+### Security audit changes (2026-10-30)
+
+[Audit status and evidence](docs/security-audit-2026-10-30.md) ·
+[Migration and deployment requirements](docs/security-deployment.md).
+Sessions use HttpOnly/Secure cookies and shared Valkey expiry; outgoing actions
+retain server approval gates. External text calls fail closed on an incomplete
+privacy check. Images/audio and browser screenshots stay on local inference.
+The sidebar groups the existing pages into six workspaces and keeps old hash links.

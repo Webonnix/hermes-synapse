@@ -3,7 +3,7 @@ name = "hermes-backend"
 version = "1.2.0"
 description = "Vexa personal assistant backend (Hermes)"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.100.0",
     "uvicorn>=0.22.0",

@@ -109,6 +109,10 @@ def sanitize_text(text: Any) -> str:
     from backend.redaction import _regex_redact
 
     redacted, _mapping = _regex_redact(text)
+    # Privacy placeholders expose correlations and may be restored elsewhere;
+    # a published snapshot never needs them.
+    from backend.privacy.vault import PLACEHOLDER_RE
+    redacted = PLACEHOLDER_RE.sub("[REDACTED]", redacted)
     redacted = redact_paths(redacted)
     if len(redacted) > MAX_MESSAGE_CHARS:
         redacted = redacted[:MAX_MESSAGE_CHARS] + "\n…[truncated]"
@@ -135,7 +139,7 @@ def build_snapshot(chat_id: str, messages: List[Dict[str, Any]], title: str = ""
         if item is not None:
             published.append(item)
     return {
-        "version": 1,
+        "version": 2,
         "title": sanitize_text(title or "Conversation"),
         "created_at": _now(),
         "messages": published,
@@ -172,7 +176,10 @@ def load_share(token: str) -> Optional[Dict[str, Any]]:
     if not rows:
         return None
     try:
-        return json.loads(rows[0][0])
+        snapshot = json.loads(rows[0][0])
+        # Old snapshots predate the publication privacy pass. Re-publication
+        # performs that pass; visiting an old capability must not bypass it.
+        return snapshot if snapshot.get("version") == 2 else None
     except (TypeError, ValueError):
         logger.warning("Share %s holds an unreadable snapshot", token[:8])
         return None
@@ -180,19 +187,24 @@ def load_share(token: str) -> Optional[Dict[str, Any]]:
 
 def get_share_for_chat(chat_id: str) -> Optional[Dict[str, Any]]:
     rows = _query(
-        "SELECT token, message_count, created_at FROM conversation_shares WHERE chat_id = ?",
+        "SELECT token, message_count, created_at, snapshot FROM conversation_shares WHERE chat_id = ?",
         (str(chat_id),),
     )
     if not rows:
         return None
-    token, count, created_at = rows[0]
+    token, count, created_at, snapshot = rows[0]
+    try:
+        if json.loads(snapshot).get("version") != 2:
+            return None
+    except (TypeError, ValueError, AttributeError):
+        return None
     return {"token": token, "url": f"/share/{token}", "message_count": count, "created_at": created_at}
 
 
 def revoke_share(chat_id: str) -> bool:
     """Delete the snapshot. A revoked link stops working, it is not just unlisted."""
-    existing = get_share_for_chat(chat_id)
-    if existing is None:
+    existing = _query("SELECT token FROM conversation_shares WHERE chat_id = ?", (str(chat_id),))
+    if not existing:
         return False
     _execute("DELETE FROM conversation_shares WHERE chat_id = ?", (str(chat_id),))
     return True

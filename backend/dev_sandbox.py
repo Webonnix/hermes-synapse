@@ -253,6 +253,8 @@ def _chown_to_sandbox(target: Path, recursive: bool = True) -> None:
     recursive=False is for containers of checkouts (RUNS_ROOT) rather than a
     checkout itself: the runs root only needs to be traversable, and walking
     every existing run's tree on each new run would be pure waste."""
+    if os.geteuid() == SANDBOX_UID:
+        return
     subprocess.run(
         ["chown", *(["-R"] if recursive else []), f"{SANDBOX_UID}:{SANDBOX_GID}", str(target)],
         check=True, capture_output=True, text=True, timeout=60,

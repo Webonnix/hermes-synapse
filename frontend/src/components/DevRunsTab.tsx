@@ -315,7 +315,7 @@ export function DevRunsTab({ language, lastEvent, giteaBaseUrl }: Props) {
               <div key={run.id} className="devrun-showcase-card">
                 <a className="devrun-showcase-linkarea" href={run.demo_url!} target="_blank" rel="noreferrer">
                   <div className="devrun-showcase-frame">
-                    <iframe src={run.demo_url!} title={run.goal} loading="lazy" sandbox="allow-scripts allow-same-origin" />
+                    <iframe src={run.demo_url!} title={run.goal} loading="lazy" sandbox="allow-scripts" />
                   </div>
                   <div className="devrun-showcase-body">
                     <strong>{run.goal}</strong>

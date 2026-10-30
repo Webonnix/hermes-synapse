@@ -233,8 +233,11 @@ def role_from_request(request) -> str:
     route runs, so this only has to map token → role.
     """
     from backend.auth import role_for_session
-    header = request.headers.get("Authorization") if request is not None else None
-    token = header.split(" ", 1)[1].strip() if header and header.startswith("Bearer ") else None
+    from backend.auth_http import connection_token
+    state = getattr(getattr(request, "state", None), "auth", None)
+    if isinstance(state, dict) and state.get("role"):
+        return state["role"]
+    token = connection_token(request) if request is not None else ""
     return role_for_session(token)
 
 

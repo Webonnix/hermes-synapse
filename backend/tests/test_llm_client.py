@@ -8,6 +8,13 @@ import httpx
 import pytest
 
 from backend import llm_client as lc
+@pytest.fixture(autouse=True)
+def isolated_privacy_detector(monkeypatch):
+    from backend.privacy import gateway, cache
+    gateway.clear_memo(); cache.clear_memory()
+    monkeypatch.setenv("PRIVACY_CACHE_VALKEY", "0")
+    monkeypatch.setattr("backend.privacy.detectors.local_llm.find_spans", AsyncMock(return_value=[]))
+
 from backend.llm_client import (
     NormalizedLLMResponse,
     call_llm_normalized,

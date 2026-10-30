@@ -71,7 +71,7 @@ describe('App Component', () => {
   });
 
   it('renders main application when authenticated', async () => {
-    localStorage.setItem('vexa_auth_token', 'mock_token');
+    document.cookie = 'hermes_csrf=mock-csrf; path=/';
     localStorage.setItem('hermes_language', 'en');
     
     const fetchMock = vi.fn().mockImplementation((url) => {
@@ -115,7 +115,7 @@ describe('App Component', () => {
   });
 
   it('opens the GPU server metrics from the sidebar', async () => {
-    localStorage.setItem('vexa_auth_token', 'mock_token');
+    document.cookie = 'hermes_csrf=mock-csrf; path=/';
     localStorage.setItem('hermes_language', 'en');
     vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve({
       ok: true,
@@ -124,7 +124,8 @@ describe('App Component', () => {
 
     render(<App />);
 
-    // The tab existed for a while with no sidebar entry, reachable only by URL.
+    // Metrics belongs to Operations; it remains reachable through navigation.
+    fireEvent.click(await screen.findByRole('button', { name: 'Operations' }));
     const metricsBtn = await screen.findByRole('button', { name: 'Metrics' });
     fireEvent.click(metricsBtn);
 

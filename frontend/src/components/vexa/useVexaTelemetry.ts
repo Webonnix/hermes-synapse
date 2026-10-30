@@ -42,8 +42,8 @@ export function resourceBand(value: number | null): ResourceBand {
 }
 
 function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem('vexa_auth_token');
-  return token ? { Authorization: `Bearer ${token}` } : {};
+
+  return {};
 }
 
 async function getJson<T>(url: string): Promise<T | null> {

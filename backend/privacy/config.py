@@ -17,18 +17,13 @@ def _int_env(key: str, default: int, minimum: int) -> int:
 
 
 def fail_mode() -> str:
-    """What happens when the local-model pass cannot vouch for a message
-    (model down or busy past the queue wait, unparseable answer, more
-    windows than the call budget).
+    """External calls fail closed whenever the local pass is incomplete.
 
-    open   — send it with what the checks that did run found (logged).
-    closed — do not send it at all; the call fails with PrivacyCheckFailed.
-
-    Default stays "open"; flip to "closed" once the failure rate in the logs
-    ("privacy: local pass failed") is known.
+    Legacy PRIVACY_FAIL_MODE=open is ignored: deployment configuration cannot
+    silently restore the data-exfiltration fallback.
     """
-    mode = (os.getenv("PRIVACY_FAIL_MODE", FAIL_OPEN) or FAIL_OPEN).strip().lower()
-    return FAIL_CLOSED if mode == FAIL_CLOSED else FAIL_OPEN
+    # An old .env with "open" must not silently undo the security migration.
+    return FAIL_CLOSED
 
 
 def full_scan_chars() -> int:

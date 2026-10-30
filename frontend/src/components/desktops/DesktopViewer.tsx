@@ -23,9 +23,8 @@ export interface DesktopViewerHandle {
 
 /**
  * Live screen of one agent desktop: noVNC over the backend's authenticated
- * relay (/api/agent-desktops/<key>/vnc). The session token rides in the
- * `hermes-auth.` subprotocol, like /api/ws — a browser WebSocket cannot send an
- * Authorization header.
+ * relay (/api/agent-desktops/<key>/vnc). The browser sends its HttpOnly session cookie; no session secret is
+ * exposed to JavaScript or WebSocket subprotocols.
  *
  * noVNC is imported on first use: it is only needed while someone watches a
  * desktop, and it should not weigh on every other tab's bundle.
@@ -58,11 +57,10 @@ export const DesktopViewer = forwardRef<DesktopViewerHandle, Props>(function Des
     setStatus('connecting');
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = `${protocol}//${window.location.host}/api/agent-desktops/${encodeURIComponent(desktopKey)}/vnc?screen=${screen}`;
-    const token = localStorage.getItem('vexa_auth_token') || '';
 
     void import('@novnc/novnc').then(({ default: RFBClient }) => {
       if (disposed || !screenRef.current) return;
-      const rfb = new RFBClient(screenRef.current, url, { wsProtocols: ['hermes-vnc', `hermes-auth.${token}`], shared: true });
+      const rfb = new RFBClient(screenRef.current, url, { wsProtocols: ['hermes-vnc'], shared: true });
       rfb.scaleViewport = true;
       rfb.resizeSession = false;
       rfb.background = 'transparent';

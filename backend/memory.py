@@ -119,7 +119,7 @@ class SQLiteGraphMemoryEngine(MemoryEngine):
         db_clear_graph(doc_id)
 
         # 3. Extract knowledge graph elements (using LLM or heuristic fallback)
-        logger.info(f"Extracting graph elements from document '{title}' ({doc_id})...")
+        logger.info("Extracting graph elements (%s, %d characters)", doc_id, len(text))
         graph_data = self._extract_graph_elements(text)
         
         # 4. Save to relational database
@@ -138,7 +138,7 @@ class SQLiteGraphMemoryEngine(MemoryEngine):
                 continue
             db_save_graph_edge(src, tgt, edge.get("description", "related to"), 1.0, doc_id)
 
-        logger.info(f"Completed GraphRAG indexing for document: {title}")
+        logger.info("Completed GraphRAG indexing (%s)", doc_id)
         return True
 
     def search_memory(self, query: str, limit: int = 3, threshold: float = 0.7,
@@ -198,7 +198,10 @@ class SQLiteGraphMemoryEngine(MemoryEngine):
         api_base = os.getenv("LLM_API_BASE", "https://openrouter.ai/api/v1")
         model = os.getenv("LLM_MODEL", "google/gemini-2.5-flash")
         
-        if not api_key:
+        from backend.provider_trust import trusted_local_endpoint
+        # This legacy synchronous extractor does not use the privacy gateway.
+        # Keep raw document text local; remote extraction uses the safe heuristic.
+        if not trusted_local_endpoint(api_base):
             return self._heuristic_extractor(text)
 
         prompt = (

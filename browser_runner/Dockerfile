@@ -1,7 +1,7 @@
 # Headless-Chromium sidecar running a browser-use Agent loop against Hermes's
 # own configured LLM. See src/backend/tools.py's browser_read/browser_task and
 # src/backend/dev_runner_api.py for the sibling-container pattern this mirrors.
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93
 
 ENV PYTHONUNBUFFERED=1 \
     # browser-use / playwright cache land on a named volume so a rebuild does
@@ -26,6 +26,7 @@ RUN pip install --no-cache-dir \
     "uvicorn>=0.22.0" \
     && playwright install --with-deps chromium
 
+COPY backend/provider_trust.py /srv/backend/provider_trust.py
 COPY browser_runner/server.py /srv/server.py
 
 EXPOSE 8800

@@ -1,3 +1,4 @@
+import { csrfToken } from '../../../sessionAuth';
 import { useEffect, useState } from 'react';
 import type {
   AvailableNumber, BindingSettings, InboxBinding, InboxConversation, InboxMessage, InboxMeta, InboxRule, OwnedNumber,
@@ -218,7 +219,7 @@ export function useInboxUnread(): number {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const load = async () => {
-      if (!localStorage.getItem('vexa_auth_token')) return;
+      if (!csrfToken()) return;
       try {
         const meta = await inboxApi.meta();
         if (!cancelled) setCount(Number(meta.unread_conversations) || 0);

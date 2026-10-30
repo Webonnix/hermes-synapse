@@ -1,0 +1,100 @@
+name: Security gates
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '19 4 * * 1'
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39
+      - run: uv sync --frozen --project backend --group dev
+      - name: Secrets, CI policy and dependency advisories
+        env:
+          PROJECT_WORKSPACE_ROOT: ${{ github.workspace }}
+          PYTHONPATH: ${{ github.workspace }}
+          PYTHON_DOTENV_DISABLED: '1'
+        run: backend/.venv/bin/python ops/security_gate.py --dependencies
+      - name: Security behavior evals
+        env:
+          PYTHON_DOTENV_DISABLED: '1'
+          VALKEY_HOST: '127.0.0.1'
+          VALKEY_PORT: '1'
+          OPENROUTER_API_KEY: mock-key
+          TELEGRAM_BOT_TOKEN: ''
+        run: backend/.venv/bin/python -m pytest backend/tests/test_auth_security.py backend/tests/test_auth_http.py backend/tests/test_auth_surface.py backend/tests/test_auth_sessions.py backend/tests/test_control_plane.py backend/tests/test_privacy_gateway.py backend/tests/test_agent_llm_proxy.py backend/tests/test_sandbox_launcher.py backend/tests/test_websocket_routing.py -q
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      matrix:
+        language: [python, javascript-typescript]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@4bfa242aa49c5f7c6770b98670d354a7dfac05f8
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+      - uses: github/codeql-action/analyze@4bfa242aa49c5f7c6770b98670d354a7dfac05f8
+  images:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: backend
+            dockerfile: backend/Dockerfile
+            context: .
+          - name: frontend
+            dockerfile: frontend/Dockerfile
+            context: frontend
+          - name: launcher
+            dockerfile: sandbox_launcher/Dockerfile
+            context: .
+          - name: dev-runner
+            dockerfile: backend/Dockerfile.dev-runner
+            context: .
+          - name: agent-desktop
+            dockerfile: agent_desktop/Dockerfile
+            context: .
+          - name: browser-runner
+            dockerfile: browser_runner/Dockerfile
+            context: .
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build the image to be scanned
+        env:
+          IMAGE: hermes-${{ matrix.name }}:security
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          CONTEXT: ${{ matrix.context }}
+        run: docker build -t "$IMAGE" -f "$DOCKERFILE" "$CONTEXT"
+      - name: Generate SPDX inventory
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          image: hermes-${{ matrix.name }}:security
+          format: spdx-json
+          artifact-name: sbom-${{ matrix.name }}
+      - name: Block vulnerable images
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2
+        with:
+          image: hermes-${{ matrix.name }}:security
+          fail-build: true
+          severity-cutoff: high

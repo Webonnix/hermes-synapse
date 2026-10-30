@@ -11,8 +11,8 @@ import { Share2, Link2, X as XIcon } from 'lucide-react';
  */
 
 export function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem('vexa_auth_token');
-  return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+
+  return { 'Content-Type': 'application/json',  };
 }
 
 export interface ShareState {

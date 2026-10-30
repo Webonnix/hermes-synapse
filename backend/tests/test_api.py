@@ -175,7 +175,8 @@ def test_auth_flow():
         # 4. Test verify code - success
         resp = clean_client.post("/api/auth/verify-code", json={"code": otp_code})
         assert resp.status_code == 200
-        token = resp.json()["token"]
+        token = clean_client.cookies["hermes_session"]
+        assert "token" not in resp.json()
         assert token in backend.auth.active_sessions
         
         # 5. Verify the token actually grants access

@@ -10,6 +10,8 @@ import os
 from typing import Optional
 
 import redis
+from redis.backoff import NoBackoff
+from redis.retry import Retry
 
 _client: Optional["redis.Redis"] = None
 
@@ -22,8 +24,10 @@ def get_client() -> "redis.Redis":
             port=int(os.getenv("VALKEY_PORT", "6379")),
             password=os.getenv("VALKEY_PASSWORD") or None,
             decode_responses=True,
-            socket_connect_timeout=3,
-            socket_timeout=5,
+            socket_connect_timeout=1,
+            socket_timeout=2,
+            max_connections=32,
+            retry=Retry(NoBackoff(), 0),
         )
     return _client
 

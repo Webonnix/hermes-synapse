@@ -71,13 +71,14 @@ def _chat_key(chat_id: Any) -> str:
 class _Connection:
     """Per-socket state: what it can understand and what it asked for."""
 
-    __slots__ = ("websocket", "addressed", "subscriptions", "warned_legacy")
+    __slots__ = ("websocket", "addressed", "subscriptions", "warned_legacy", "owner")
 
-    def __init__(self, websocket: WebSocket, addressed: bool):
+    def __init__(self, websocket: WebSocket, addressed: bool, owner: bool = True):
         self.websocket = websocket
         self.addressed = addressed
         self.subscriptions: Set[str] = set()
         self.warned_legacy = False
+        self.owner = owner
 
 
 class _RunBuffer:
@@ -120,10 +121,10 @@ class ConnectionManager:
         self._runs: "Dict[str, _RunBuffer]" = {}
 
     # ── connection lifecycle ────────────────────────────────────────────
-    async def connect(self, websocket: WebSocket, subprotocol: Optional[str] = None):
+    async def connect(self, websocket: WebSocket, subprotocol: Optional[str] = None, *, owner: bool = True):
         await websocket.accept(subprotocol=subprotocol)
         self._connections[id(websocket)] = _Connection(
-            websocket, addressed=(subprotocol == PROTOCOL_V2)
+            websocket, addressed=(subprotocol == PROTOCOL_V2 or not owner), owner=owner
         )
         logger.info(
             "Dashboard connected (protocol=%s). Active connections: %d",
@@ -151,6 +152,8 @@ class ConnectionManager:
             return set()
         for chat_id in chat_ids:
             key = _chat_key(chat_id)
+            if not conn.owner and not key.startswith("inbox"):
+                continue
             if key:
                 conn.subscriptions.add(key)
         return set(conn.subscriptions)
@@ -188,6 +191,8 @@ class ConnectionManager:
         delivered = 0
         dead = []
         for key, conn in list(self._connections.items()):
+            if not conn.owner and (chat_id is None or not chat_id.startswith("inbox")):
+                continue
             if chat_id is not None and conn.addressed and chat_id not in conn.subscriptions:
                 continue
             if chat_id is not None and not conn.addressed and not conn.warned_legacy:
@@ -309,6 +314,8 @@ class ConnectionManager:
         """
         conn = self._connections.get(id(websocket))
         buffer = self._runs.get(run_id)
+        if conn is not None and not conn.owner:
+            buffer = None
         if conn is None or buffer is None:
             result = {"type": "resume_begin", "run_id": run_id, "status": "unknown",
                       "count": 0, "from_seq": 0, "to_seq": 0}

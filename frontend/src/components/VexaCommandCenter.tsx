@@ -20,8 +20,8 @@ const MAX_IDLE_RETRIES = 3;
 const APP_VERSION = '2.0.1';
 
 function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem('vexa_auth_token');
-  return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+
+  return { 'Content-Type': 'application/json',  };
 }
 
 export type VoicePhase = 'offline' | 'ready' | 'listening' | 'transcribing' | 'thinking' | 'speaking' | 'error';

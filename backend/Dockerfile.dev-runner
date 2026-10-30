@@ -1,6 +1,6 @@
 # Sandbox container for autonomous dev-runs: filesystem + argv exec over the
 # mounted dev-repo only. No Hermes backend code besides dev_runner_api.py.
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93
 
 ENV PYTHONUNBUFFERED=1
 
@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nodejs \
     npm \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir "fastapi>=0.100.0" "uvicorn>=0.22.0" "pytest==8.3.5"
+    && pip install --no-cache-dir "fastapi==0.162.0" "uvicorn==0.54.0" "pytest==8.3.5"
 
 RUN useradd --create-home --uid 10001 runner \
     && mkdir -p /dev-repo && chown runner:runner /dev-repo \

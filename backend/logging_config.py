@@ -1,5 +1,6 @@
 import logging
 import re
+import traceback
 from typing import Any
 
 
@@ -26,6 +27,15 @@ class SecretRedactingFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.msg = redact_secrets(record.getMessage())
         record.args = ()
+        if record.exc_info:
+            # Exception messages and chained provider payloads may contain the
+            # original prompt. Keep stack locations and exception type only.
+            kind, _, tb = record.exc_info
+            record.exc_text = '\n'.join(
+                f'  File "{frame.filename}", line {frame.lineno}, in {frame.name}'
+                for frame in traceback.extract_tb(tb)
+            ) + '\n' + kind.__name__
+            record.exc_info = None
         return True
 
 

@@ -13,12 +13,13 @@ codes go.
 from __future__ import annotations
 
 import logging
+import asyncio
 import os
 import time
 from typing import Any, Dict, List, Literal, Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger("hermes.browser_sessions")
@@ -99,7 +100,9 @@ async def get_browser_sessions():
 
 
 @router.delete("/api/browser/sessions/{name}")
-async def delete_browser_session(name: str):
+async def delete_browser_session(name: str, request: Request):
+    from backend.auth_http import require_recent_auth
+    await asyncio.to_thread(require_recent_auth, request)
     result = await _call("DELETE", f"/profiles/{name}", timeout=20.0)
     _forget_cache()
     logger.warning("Saved browser login '%s' deleted by the owner", name)
@@ -107,7 +110,9 @@ async def delete_browser_session(name: str):
 
 
 @router.post("/api/browser/login/start")
-async def start_browser_login(payload: LoginStartPayload):
+async def start_browser_login(payload: LoginStartPayload, request: Request):
+    from backend.auth_http import require_recent_auth
+    await asyncio.to_thread(require_recent_auth, request)
     result = await _call("POST", "/login/start", json=payload.model_dump(), timeout=60.0)
     _forget_cache()
     logger.info("Login window opened for profile '%s'", payload.profile)
@@ -120,7 +125,9 @@ async def browser_login_frame():
 
 
 @router.post("/api/browser/login/input")
-async def browser_login_input(payload: LoginInputPayload):
+async def browser_login_input(payload: LoginInputPayload, request: Request):
+    from backend.auth_http import require_recent_auth
+    await asyncio.to_thread(require_recent_auth, request)
     return await _call("POST", "/login/input", json=payload.model_dump(exclude_none=True), timeout=45.0)
 
 

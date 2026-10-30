@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 
 from backend.database import DB_PATH
 from backend.tool_permissions import MAIN_AGENT_ID
+from backend.context_trust import provenance
 
 logger = logging.getLogger("hermes.control_plane")
 
@@ -290,6 +291,11 @@ def create_tool_task(tool_name: str, arguments: Dict[str, Any], chat_id: str) ->
             (idempotency_key, *OPEN_STATUSES),
         ).fetchone()
         if existing:
+            if existing["approvals_required"] < approvals_required and existing["status"] != "running":
+                conn.execute("UPDATE workflow_tasks SET approvals_required = ?, status = ?, updated_at = ? WHERE id = ?",
+                             (approvals_required, "awaiting_approval" if existing["approval_count"] < approvals_required else "approved",
+                              now, existing["id"]))
+                existing = conn.execute("SELECT * FROM workflow_tasks WHERE id = ?", (existing["id"],)).fetchone()
             # Asked again after the owner loosened the mode: the queued request
             # must not keep waiting for approvals the new mode no longer needs.
             if existing["status"] == "awaiting_approval" and approvals_required < existing["approvals_required"]:
@@ -326,7 +332,8 @@ def create_tool_task(tool_name: str, arguments: Dict[str, Any], chat_id: str) ->
             ),
         )
         _event(conn, task_id, "task_created", "control-plane", f"Tool request classified as {risk_class}", risk_class,
-               metadata={"tool": tool_name, "approval_count": approvals_required})
+               metadata={"tool": tool_name, "approval_count": approvals_required,
+                         "context_sources": provenance()})
         if auto_approved:
             _event(conn, task_id, "auto_approved", f"autonomy:{mode}",
                    f"Owner approval waived by autonomy mode '{mode}'", risk_class,
@@ -439,10 +446,18 @@ def start_task(task_id: str) -> Dict[str, Any]:
         raise RuntimeError(f"Control Plane is stopped: {state['reason'] or 'owner request'}")
     now = _now()
     with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT * FROM workflow_tasks WHERE id = ?", (task_id,)).fetchone()
         if not row:
             raise KeyError(task_id)
         task = _task_from_row(row)
+        if task["status"] not in ("queued", "approved"):
+            raise PermissionError("Task is not executable in its current state")
+        if task.get("tool_name"):
+            from backend.context_trust import approval_floor
+            floor = approval_floor(task["tool_name"], classify_tool_risk(task["tool_name"]))
+            if task["approval_count"] < floor:
+                raise PermissionError("Task requires confirmation under the current security policy")
         if task["approval_count"] < task["approvals_required"]:
             raise PermissionError("Task is awaiting approval")
         if task["commands_used"] >= task["budget_commands"]:
@@ -481,6 +496,7 @@ def finish_task(task_id: str, result: str, error: str = "") -> Dict[str, Any]:
 def approve_task(task_id: str, actor: str = "owner") -> Dict[str, Any]:
     now = _now()
     with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT * FROM workflow_tasks WHERE id = ?", (task_id,)).fetchone()
         if not row:
             raise KeyError(task_id)
@@ -558,6 +574,10 @@ def execute_governed_tool(
             return json.dumps({"error": "Approved task not found", "task_id": approved_task_id}, ensure_ascii=False)
         if task["tool_name"] != tool_name:
             return json.dumps({"error": "Approved task/tool mismatch", "task_id": approved_task_id}, ensure_ascii=False)
+        if task["requester"] != chat_id or task["tool_arguments"] != arguments:
+            return json.dumps({"status": "forbidden", "error": "Approved task arguments or context mismatch"})
+        if task["status"] == "done":
+            return task.get("result") or json.dumps({"status": "done", "task_id": approved_task_id})
     else:
         state = get_control_state()
         if state["kill_switch"]:
@@ -574,10 +594,19 @@ def execute_governed_tool(
             "message": "Action queued in Control Plane and was not executed.",
         }, ensure_ascii=False)
 
+    # A failed claim must never finish someone else's running task (or turn a
+    # rejected task into a failure). Only the claimant may record the outcome.
+    try:
+        start_task(task["id"])
+    except (PermissionError, RuntimeError, KeyError):
+        return json.dumps({"status": "blocked", "error": "Task cannot be claimed under the current policy",
+                           "task_id": task["id"]})
     try:
         from backend.tools import execute_tool
-        start_task(task["id"])
         result = execute_tool(tool_name, arguments, chat_id=chat_id)
+        if task["risk_class"] in ("R0", "R1"):
+            from backend.context_trust import mark_untrusted
+            mark_untrusted(tool_name)
         parsed_error = ""
         try:
             parsed = json.loads(result)

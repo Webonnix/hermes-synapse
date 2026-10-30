@@ -142,6 +142,8 @@ def _message_slots(msg: Dict[str, Any]) -> List[_Slot]:
     if isinstance(content, str) and content:
         slots.append(_Slot([content], lambda new: msg.__setitem__("content", new[0])))
     elif isinstance(content, list):
+        if any(not isinstance(part, dict) or part.get("type") not in ("text", "input_text") for part in content):
+            raise PrivacyCheckFailed("External images, audio and files cannot be checked by the text privacy pass; use a local model.")
         parts = [copy.copy(part) if isinstance(part, dict) else part for part in content]
         text_parts = [p for p in parts if isinstance(p, dict) and isinstance(p.get("text"), str)]
         if text_parts:

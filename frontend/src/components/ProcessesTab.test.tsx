@@ -45,6 +45,8 @@ describe('ProcessesTab', () => {
     expect((await screen.findAllByText('add_calendar_event')).length).toBeGreaterThan(0);
     expect(screen.getByText('312')).toBeInTheDocument();
     expect(screen.getByText('EV-000001')).toBeInTheDocument();
+    expect(screen.getByText('Action preview')).toBeInTheDocument();
+    expect(screen.getByText(/"title": "Review"/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
@@ -68,7 +70,7 @@ describe('ProcessesTab', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('switches the agent autonomy mode, confirming full control first', async () => {
+  it('does not offer full control and keeps the guarded auto mode', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => (
       String(input) === '/api/autonomy/summary'
         ? { ok: true, json: async () => autonomySummary }
@@ -79,8 +81,8 @@ describe('ProcessesTab', () => {
 
     render(<ProcessesTab language="en" />);
     expect(await screen.findByRole('radio', { name: /supervised/i })).toHaveAttribute('aria-checked', 'true');
-    fireEvent.click(screen.getByRole('radio', { name: /full control/i }));
-    expect(confirm).toHaveBeenCalled();
+    expect(screen.queryByRole('radio', { name: /full control/i })).not.toBeInTheDocument();
+    expect(confirm).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalledWith('/api/agent-autonomy', expect.anything());
 
     fireEvent.click(screen.getByRole('radio', { name: /auto except sensitive/i }));

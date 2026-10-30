@@ -15,7 +15,7 @@ interface ObsidianTabProps {
   authToken: string | null;
 }
 
-export function ObsidianTab({ authToken }: ObsidianTabProps) {
+export function ObsidianTab(_props: ObsidianTabProps) {
   const [status, setStatus] = useState<null | { reachable: boolean; message: string }>(null);
   const [notes, setNotes] = useState<string[]>([]);
   const [indexedCount, setIndexedCount] = useState(0);
@@ -35,9 +35,8 @@ export function ObsidianTab({ authToken }: ObsidianTabProps) {
 
   const headers = useMemo(() => {
     const h: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (authToken) h['Authorization'] = `Bearer ${authToken}`;
     return h;
-  }, [authToken]);
+  }, []);
 
   const handleSelectNote = async (notePath: string) => {
     setSelectedNotePath(notePath);

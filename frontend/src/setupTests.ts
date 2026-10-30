@@ -1,3 +1,4 @@
+import { beforeEach } from 'vitest';
 import '@testing-library/jest-dom';
 import { configure } from '@testing-library/react';
 
@@ -17,3 +18,9 @@ class TestResizeObserver implements ResizeObserver {
 globalThis.ResizeObserver = TestResizeObserver as typeof ResizeObserver;
 globalThis.requestAnimationFrame = () => 1;
 globalThis.cancelAnimationFrame = () => undefined;
+
+beforeEach(() => {
+  for (const cookie of document.cookie.split(';')) {
+    document.cookie = cookie.split('=')[0].trim() + '=; Max-Age=0; path=/';
+  }
+});

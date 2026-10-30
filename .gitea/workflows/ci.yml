@@ -5,12 +5,15 @@ on:
     branches: ["**"]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   backend:
     runs-on: ubuntu-latest
-    container: python:3.11-slim
+    container: python:3.11-slim@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install system deps
         run: apt-get update && apt-get install -y --no-install-recommends git gcc python3-dev && rm -rf /var/lib/apt/lists/*
       # Dependencies come from backend/uv.lock only, so CI runs exactly the
@@ -24,18 +27,29 @@ jobs:
       - name: Install python deps
         working-directory: backend
         run: uv sync --frozen --group dev
+      - name: Security gates
+        env:
+          PYTHONPATH: ${{ gitea.workspace }}
+          PROJECT_WORKSPACE_ROOT: ${{ gitea.workspace }}
+          PYTHON_DOTENV_DISABLED: '1'
+        run: backend/.venv/bin/python ops/security_gate.py --dependencies
       - name: Run backend tests
         env:
           PYTHONPATH: ${{ gitea.workspace }}
+          PYTHON_DOTENV_DISABLED: '1'
+          VALKEY_HOST: '127.0.0.1'
+          VALKEY_PORT: '1'
+          TELEGRAM_BOT_TOKEN: ''
+          OPENROUTER_API_KEY: mock-key
         working-directory: backend
         run: uv run --frozen pytest tests/ -q
 
   frontend:
     runs-on: ubuntu-latest
     # Debian, not alpine: vitest does not start on alpine (see AGENTS.md).
-    container: node:20
+    container: node:20@sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c9ba5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install dependencies
         working-directory: frontend
         run: npm ci

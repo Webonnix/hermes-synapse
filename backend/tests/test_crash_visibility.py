@@ -28,7 +28,7 @@ async def test_a_dying_worker_is_logged_with_its_traceback(caplog):
     assert records, "a worker death must never be silent"
     assert "price_monitor" in records[0].getMessage()
     assert "provider client exploded" in records[0].getMessage()
-    assert records[0].exc_info is not None
+    assert "worker" in (records[0].exc_text or "")
 
 
 @pytest.mark.asyncio

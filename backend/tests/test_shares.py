@@ -136,3 +136,16 @@ def test_public_endpoint_serves_the_snapshot_without_a_session(shares_db):
     # used to probe which tokens were once valid.
     assert client.get(created["url"]).status_code == 404
     assert client.get("/share/never-existed").status_code == 404
+
+
+def test_old_share_is_hidden_but_can_still_be_revoked(shares_db):
+    created = shares.create_share('legacy', _messages())
+    database._execute('UPDATE conversation_shares SET snapshot = ? WHERE token = ?',
+                      (json.dumps({'version': 1, 'messages': []}), created['token']))
+    assert shares.load_share(created['token']) is None
+    assert shares.get_share_for_chat('legacy') is None
+    assert shares.revoke_share('legacy') is True
+
+
+def test_privacy_placeholders_are_never_published(shares_db):
+    assert '[SECRET_' not in shares.sanitize_text('mail [SECRET_abcdef1234]')

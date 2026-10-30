@@ -36,8 +36,8 @@ type AdminSection = 'agents' | 'router' | 'voice' | 'tiers' | 'projects' | 'acce
 type RoutingMode = 'chain' | 'pinned';
 
 function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem('vexa_auth_token');
-  return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+
+  return { 'Content-Type': 'application/json',  };
 }
 
 function statusChipClass(status: string | undefined): string {
@@ -480,12 +480,11 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
 
     const cleanId = draft.id.replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase();
     try {
-      const token = localStorage.getItem('vexa_auth_token');
+
       const response = await fetch('/api/agents', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         body: JSON.stringify({
           ...draft,
@@ -518,12 +517,11 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
 
   const toggleAgent = async (agent: AgentModel) => {
     const nextEnabled = !agent.is_enabled;
-    const token = localStorage.getItem('vexa_auth_token');
+
     await fetch('/api/agents', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       body: JSON.stringify({
         ...agent,

@@ -2027,7 +2027,9 @@ def get_app_settings() -> Dict[str, Any]:
         return {}
 
 def save_decision_log(log: Dict[str, Any]):
-    """Saves a single agent decision log to the database."""
+    """Saves metadata only; conversation text belongs in message history."""
+    from backend.redaction import diagnostic_metadata
+    log = diagnostic_metadata(log)
     try:
         _execute("""
             INSERT INTO decision_logs (
@@ -2085,7 +2087,8 @@ def get_decision_logs(limit: int = 100) -> List[Dict[str, Any]]:
                 "completion_tokens_estimate": r[11] if len(r) > 11 else 0,
                 "cost_usd": r[12] if len(r) > 12 else 0.0,
             })
-        return logs
+        from backend.redaction import diagnostic_metadata
+        return [diagnostic_metadata(log) for log in logs]
     except Exception as e:
         logger.error(f"Error retrieving decision logs: {e}")
         return []

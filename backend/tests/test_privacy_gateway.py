@@ -75,14 +75,24 @@ async def test_secret_from_an_earlier_call_reuses_its_placeholder():
 
 
 @pytest.mark.asyncio
-async def test_multimodal_text_parts_are_redacted_and_images_kept():
+async def test_unchecked_image_parts_block_external_calls_before_http():
     image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
     messages = [{"role": "user", "content": [{"type": "text", "text": f"see {KEY}"}, image]}]
+    with _no_local_spans(), patch("httpx.AsyncClient.post", new=AsyncMock()) as post:
+        result = await call_llm_normalized(api_base="https://external.invalid/v1", api_key="k", model="m",
+                                           messages=messages, max_retries=0)
+    assert result.status == STATUS_PROVIDER_ERROR
+    assert "local model" in result.error_message
+    post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_text_content_parts_still_pass_the_privacy_gateway():
+    messages = [{"role": "user", "content": [{"type": "text", "text": f"see {KEY}"}]}]
     with _no_local_spans():
         await protect_messages(messages, mark_key=MARK)
-    parts = messages[0]["content"]
-    assert KEY not in parts[0]["text"] and PLACEHOLDER_RE.search(parts[0]["text"])
-    assert parts[1] == image
+    assert KEY not in messages[0]["content"][0]["text"]
+
 
 
 @pytest.mark.asyncio
@@ -137,14 +147,13 @@ def test_split_chunks_covers_the_whole_text_with_overlap():
 
 
 @pytest.mark.asyncio
-async def test_fail_open_keeps_regex_and_partial_spans(monkeypatch):
+async def test_legacy_fail_open_cannot_bypass_privacy(monkeypatch):
     monkeypatch.setenv("PRIVACY_FAIL_MODE", "open")
     err = local_llm.LocalPassError("timeout", spans=["found-before-failure"])
     messages = [{"role": "user", "content": f"{KEY} and found-before-failure"}]
     with patch("backend.privacy.detectors.local_llm.find_spans", new=AsyncMock(side_effect=err)):
-        await protect_messages(messages, mark_key=MARK)
-    content = messages[0]["content"]
-    assert KEY not in content and "found-before-failure" not in content
+        with pytest.raises(PrivacyCheckFailed):
+            await protect_messages(messages, mark_key=MARK)
 
 
 @pytest.mark.asyncio
@@ -286,7 +295,8 @@ async def test_call_budget_open_skips_and_closed_blocks(monkeypatch):
     cache.clear_memory()
     with patch.object(local_llm, "_ask_local_model", new=AsyncMock(return_value=[])):
         messages = [{"role": "tool", "tool_call_id": "c", "content": text}]
-        await protect_messages(messages, mark_key=MARK)  # sent, regex-only past the budget
+        with pytest.raises(PrivacyCheckFailed):
+            await protect_messages(messages, mark_key=MARK)
     assert gateway._memo == {}  # incomplete pass is not frozen into the memo
 
     monkeypatch.setenv("PRIVACY_FAIL_MODE", "closed")

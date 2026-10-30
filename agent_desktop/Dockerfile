@@ -3,7 +3,7 @@
 # plus the CLI coding agents it can run in ACP mode. backend/agent_runtimes/
 # desktop.py starts one container of this image per agent, under gVisor.
 # Built only, never run by compose: `docker compose build agent-desktop`.
-FROM python:3.11-slim-bookworm
+FROM python:3.11-slim-bookworm@sha256:94a8fee35252d06ab75856f15f12c7bae67b10e8a6da93c7fded82b2610926cd
 
 ARG NODE_VERSION=22.20.0
 # Pinned CLI agents (see RUNTIMES in agent_desktop/server.py). Bump deliberately:
@@ -34,7 +34,7 @@ RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-l
        "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" \
     && npm cache clean --force
 
-RUN pip install --no-cache-dir "fastapi>=0.100.0" "uvicorn[standard]>=0.22.0"
+RUN pip install --no-cache-dir "fastapi==0.162.0" "uvicorn[standard]==0.54.0"
 
 # Same uid as the dev-runner sandbox (backend/dev_sandbox.py SANDBOX_UID): the
 # backend chowns each desktop's bind-mounted home to it before the first start.

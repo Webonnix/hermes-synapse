@@ -136,7 +136,7 @@ async def create_note(note_path: str, content: str) -> bool:
             if r.status_code in (200, 204):
                 logger.info(f"Obsidian note created/updated: {note_path}")
                 return True
-            logger.warning(f"Obsidian create_note '{note_path}' → HTTP {r.status_code}: {r.text[:200]}")
+            logger.warning("Obsidian create_note failed (HTTP %d)", r.status_code)
     except Exception as e:
         logger.warning(f"Obsidian create_note failed: {e}")
     return False
@@ -155,7 +155,7 @@ async def delete_note(note_path: str) -> bool:
             if r.status_code in (200, 204, 404):
                 logger.info(f"Obsidian note deleted: {note_path}")
                 return True
-            logger.warning(f"Obsidian delete_note '{note_path}' → HTTP {r.status_code}: {r.text[:200]}")
+            logger.warning("Obsidian delete_note failed (HTTP %d)", r.status_code)
     except Exception as e:
         logger.warning(f"Obsidian delete_note failed: {e}")
     return False

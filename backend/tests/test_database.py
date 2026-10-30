@@ -388,3 +388,17 @@ def test_local_llm_migration_moves_ollama_state_to_llamacpp(monkeypatch):
     assert dict(cur.execute("SELECT id, model FROM subagents"))["vexa"] == "custom"
     assert [r[0] for r in cur.execute("SELECT provider_id FROM decision_logs ORDER BY id")] == ["local", "prov-x", "local"]
 
+
+
+def test_decision_telemetry_does_not_duplicate_conversation_text():
+    import json
+    import sqlite3
+    log = dict(timestamp='now', session_id='test', model='local', latency_ms=1, success=True,
+               error='sensitive error', prompt_tokens_estimate=2, user_message='private input',
+               assistant_response='private output', traces=[{'prompt': 'hidden prompt', 'duration_ms': 2}])
+    database.save_decision_log(log)
+    with sqlite3.connect(database.DB_PATH) as conn:
+        raw = str(conn.execute('SELECT user_message, assistant_response, error, traces FROM decision_logs').fetchall())
+    for text in ('private input', 'private output', 'sensitive error', 'hidden prompt'):
+        assert text not in raw
+    assert database.get_decision_logs()[0]['traces'] == [{'duration_ms': 2}]

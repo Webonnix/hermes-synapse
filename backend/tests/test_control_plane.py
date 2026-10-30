@@ -174,3 +174,44 @@ def test_the_owners_shell_still_refuses_host_wrecking_commands(control_db):
         assert result["status"] == "forbidden"
         assert "Refused" in result["error"]
         execute.assert_not_called()
+
+
+def test_approval_cannot_change_arguments_or_requester(control_db):
+    task = control_plane.create_tool_task('add_calendar_event', {'title': 'approved'}, 'dashboard')
+    task = control_plane.approve_task(task['id'])
+    execute = MagicMock(return_value='{"status":"success"}')
+    with patch('backend.tools.execute_tool', execute):
+        for args, chat in [({'title': 'attacker'}, 'dashboard'), (task['tool_arguments'], 'different-chat')]:
+            result = json.loads(control_plane.execute_governed_tool('add_calendar_event', args, chat, approved_task_id=task['id']))
+            assert result['status'] == 'forbidden'
+        execute.assert_not_called()
+        assert control_plane.get_task(task['id'])['status'] == 'approved'
+
+
+def test_completed_approval_is_idempotent_and_rejected_task_stays_rejected(control_db):
+    task = control_plane.create_tool_task('add_calendar_event', {'title': 'once'}, 'dashboard')
+    task = control_plane.approve_task(task['id'])
+    execute = MagicMock(return_value='{"status":"success"}')
+    with patch('backend.tools.execute_tool', execute):
+        for _ in range(2):
+            assert json.loads(control_plane.execute_governed_tool('add_calendar_event', task['tool_arguments'], 'dashboard', approved_task_id=task['id']))['status'] == 'success'
+        assert execute.call_count == 1
+        rejected = control_plane.create_tool_task('get_weather', {'location': 'Minsk'}, 'dashboard')
+        control_plane.reject_task(rejected['id'])
+        assert json.loads(control_plane.execute_governed_tool('get_weather', rejected['tool_arguments'], 'dashboard', approved_task_id=rejected['id']))['status'] == 'blocked'
+        assert control_plane.get_task(rejected['id'])['status'] == 'rejected'
+        assert execute.call_count == 1
+
+
+def test_only_one_concurrent_executor_claims_a_task(control_db):
+    from concurrent.futures import ThreadPoolExecutor
+    task = control_plane.create_tool_task('get_weather', {'location': 'Minsk'}, 'dashboard')
+    def claim(_):
+        try:
+            control_plane.start_task(task['id'])
+            return True
+        except PermissionError:
+            return False
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert sum(pool.map(claim, range(8))) == 1
+    assert control_plane.get_task(task['id'])['commands_used'] == 1

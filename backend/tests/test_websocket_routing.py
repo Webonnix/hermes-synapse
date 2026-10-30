@@ -230,3 +230,19 @@ async def test_unsubscribe_stops_delivery(manager):
     manager.unsubscribe(socket, ["chat_a"])
     await manager.send_chat_event("chat_a", {"type": "chat_message", "content": "nope"})
     assert socket.frames("chat_message") == []
+
+
+@pytest.mark.asyncio
+async def test_non_owner_cannot_subscribe_to_owner_chats_or_resume_owner_run(manager):
+    socket = FakeWebSocket()
+    await manager.connect(socket, subprotocol=wsm.PROTOCOL_V1, owner=False)
+    manager.subscribe(socket, ['dashboard', 'inbox'])
+    await manager.broadcast({'type': 'config_update', 'secret': 'private'})
+    await manager.send_chat_event('dashboard', {'type': 'chat_message', 'content': 'private'})
+    await manager.send_run_event('private-run', 'dashboard', {'type': 'chat_stream_chunk', 'content': 'private'})
+    await manager.resume(socket, 'private-run', 0)
+    assert all('private' not in frame.get('content', '') for frame in socket.frames())
+    assert not socket.frames('config_update')
+    assert socket.frames('resume_begin')[0]['status'] == 'unknown'
+    await manager.send_chat_event('inbox', {'type': 'inbox_changed'})
+    assert socket.frames('inbox_changed')

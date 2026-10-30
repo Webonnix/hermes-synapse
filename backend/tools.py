@@ -775,7 +775,7 @@ async def _todoist_get(endpoint: str, token: str, params: Dict = None) -> Option
         async with httpx.AsyncClient(timeout=10.0) as c:
             r = await c.get(url, headers=headers, params=params or {})
             if r.status_code != 200:
-                logger.warning(f"Todoist GET {endpoint} -> {r.status_code}: {r.text[:100]}")
+                logger.warning("Todoist GET failed (HTTP %d)", r.status_code)
                 return None
             data = r.json()
             # v1 returns paginated {results: [...]} or plain list
@@ -887,7 +887,7 @@ async def _todoist_delete(endpoint: str, token: str) -> bool:
             r = await c.delete(url, headers=headers)
             if r.status_code in (200, 204):
                 return True
-            logger.warning(f"Todoist DELETE {endpoint} -> {r.status_code}: {r.text[:100]}")
+            logger.warning("Todoist DELETE failed (HTTP %d)", r.status_code)
             return False
     except Exception as e:
         logger.warning(f"Todoist DELETE {endpoint} error: {e}")

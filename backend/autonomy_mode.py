@@ -13,15 +13,16 @@ shell deny-list, the kill switch, command budgets or paid-tool budgets.
     action (including unknown tools, which classify as R4). Those keep the
     supervised approval count.
 ``full``
-    Nothing waits for approval, except tools that move money (trading), which
-    stay confirmed in every mode.
+    Disabled: stored legacy values fall back to supervised. Unknown or external
+    context cannot waive approval for side effects.
 """
 
 from __future__ import annotations
 
 import logging
+import asyncio
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from backend import database
@@ -32,7 +33,7 @@ SETTING_KEY = "agent_autonomy_mode"
 SUPERVISED = "supervised"
 AUTO = "auto"
 FULL = "full"
-MODES = (SUPERVISED, AUTO, FULL)
+MODES = (SUPERVISED, AUTO)
 DEFAULT_MODE = SUPERVISED
 
 # Still confirmed in ``auto``: actions that reach people or sites outside the
@@ -83,14 +84,12 @@ def is_sensitive(tool_name: str, risk_class: str) -> bool:
 
 def approvals_required(tool_name: str, risk_class: str, mode: str | None = None) -> int:
     """Owner approvals a new tool task needs under ``mode`` (default: the stored one)."""
-    base = _BASE_APPROVALS.get(risk_class, 0)
+    from backend.context_trust import approval_floor
+    base = max(_BASE_APPROVALS.get(risk_class, 0 if risk_class in ("R0", "R1", "R2") else 2),
+               approval_floor(tool_name, risk_class))
     if not base or tool_name.startswith(ALWAYS_CONFIRMED_PREFIXES):
         return base
     mode = mode or get_mode()
-    if mode == FULL:
-        return 0
-    if mode == AUTO and not is_sensitive(tool_name, risk_class):
-        return 0
     return base
 
 
@@ -99,17 +98,11 @@ def prompt_directive(mode: str | None = None) -> str:
     mode = mode or get_mode()
     if mode == SUPERVISED:
         return ""
-    if mode == FULL:
-        gate = (
-            "Владелец включил полную автономию: все действия выполняются сразу, без подтверждения "
-            "(кроме торговых операций)."
-        )
-    else:
-        gate = (
-            "Владелец включил автономный режим: действия выполняются сразу, без подтверждения. "
-            "Подтверждения ждут только чувствительные: shell, удаления, звонки, браузер на чужих "
-            "сайтах, установка ПО и подключения, перенастройка роутера."
-        )
+    gate = (
+        "Владелец разрешил автономную работу с чтением и локальными напоминаниями. "
+        "Изменения и исходящие действия требуют подтверждения владельца, "
+        "потому что контекст может содержать недоверенные данные."
+    )
     return (
         f"\n\n[Режим автономии]: {gate}\n"
         "Работай как автономный агент: доводи задачу до результата сам, цепочкой вызовов "
@@ -132,7 +125,10 @@ async def get_agent_autonomy():
 
 
 @router.put("/api/agent-autonomy")
-async def put_agent_autonomy(payload: AutonomyModePayload):
+async def put_agent_autonomy(payload: AutonomyModePayload, request: Request):
+    if payload.mode.strip().lower() == AUTO:
+        from backend.auth_http import require_recent_auth
+        await asyncio.to_thread(require_recent_auth, request)
     try:
         mode = set_mode(payload.mode)
     except ValueError as exc:

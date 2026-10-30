@@ -6,6 +6,7 @@ the real llm_gate.
 
 import asyncio
 import json
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -20,6 +21,10 @@ _real_killed = llm_proxy._killed
 
 @pytest.fixture()
 def env(monkeypatch):
+    from backend.privacy import gateway, cache
+    gateway.clear_memo(); cache.clear_memory()
+    monkeypatch.setenv("PRIVACY_CACHE_VALKEY", "0")
+    monkeypatch.setattr("backend.privacy.detectors.local_llm.find_spans", AsyncMock(return_value=[]))
     monkeypatch.setenv("AGENT_DESKTOPS_ENABLED", "true")
     monkeypatch.setenv("AGENT_DESKTOP_TOKEN_SECRET", "s3cret")
     monkeypatch.setenv("AGENT_LLM_MODEL", MODEL)
@@ -348,3 +353,19 @@ async def test_without_a_router_key_only_the_local_model_is_offered(env, monkeyp
                                  json={**_body(), "model": "omniroute/ds/deepseek-flash"}, headers=_auth())
     assert [m["id"] for m in models["data"]] == [MODEL]
     assert call.status_code == 503 and router.catalog_calls == 0
+
+
+@pytest.mark.parametrize('stream', [False, True])
+async def test_external_privacy_failure_blocks_provider_before_http(env, monkeypatch, stream):
+    from backend.privacy.detectors.local_llm import LocalPassError
+    monkeypatch.setenv('AGENT_LLM_EXTERNAL_ENABLED', 'true')
+    monkeypatch.setattr(llm_proxy, 'external_models', AsyncMock(return_value=['external-test']))
+    monkeypatch.setattr(llm_proxy, '_budget_refusal', lambda key: None)
+    monkeypatch.setattr(llm_proxy, '_router', lambda: ('https://router.invalid', 'fake-key'))
+    monkeypatch.setattr('backend.privacy.detectors.local_llm.find_spans', AsyncMock(side_effect=LocalPassError('offline')))
+    upstream = Upstream(monkeypatch)
+    async with _client() as client:
+        response = await client.post('/agent-llm/v1/chat/completions', json=_body(model=llm_proxy.EXTERNAL_PREFIX + 'external-test', stream=stream), headers=_auth())
+    assert response.status_code == 503
+    assert response.json()['error']['code'] == 'privacy_unavailable'
+    assert not upstream.requests

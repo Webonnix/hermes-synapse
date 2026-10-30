@@ -18,8 +18,9 @@ import {
 } from 'lucide-react';
 import type { AgentAutonomyMode, AutonomySummary, ControlPlaneSummary, WorkflowTask } from '../types';
 import { DiffViewer, looksLikeUnifiedDiff } from './DiffViewer';
+import { ApprovalPreview } from './ApprovalPreview';
 
-type Props = { language: 'ru' | 'en' };
+type Props = { language: 'ru' | 'en'; initialFilter?: 'all' | 'approval' };
 type Filter = 'all' | 'approval' | 'active' | 'finished';
 
 const COPY = {
@@ -27,7 +28,7 @@ const COPY = {
     title: 'Процессы и контроль', subtitle: 'Задачи, подтверждения, лимиты и доказательства исполнения',
     running: 'CONTROL PLANE АКТИВЕН', stopped: 'АВАРИЙНАЯ ОСТАНОВКА', stop: 'Остановить всё', resume: 'Возобновить', refresh: 'Обновить',
     approvals: 'Ожидают подтверждения', active: 'В работе', completed: 'Завершено', blocked: 'Остановлено',
-    all: 'Все', approval: 'Approval', activeTab: 'Активные', finished: 'Завершённые', queue: 'Очередь задач',
+    all: 'Все', approval: 'Подтверждения', activeTab: 'Активные', finished: 'Завершённые', queue: 'Очередь задач',
     empty: 'Процессов пока нет. Они появятся при вызове инструментов агентами.', select: 'Выберите задачу для просмотра контракта.',
     approve: 'Подтвердить', reject: 'Отклонить', details: 'Контракт задачи', risk: 'Риск', autonomy: 'Автономность', assignee: 'Исполнитель',
     source: 'Источник', budget: 'Бюджет', commands: 'команд', seconds: 'сек', acceptance: 'Критерии готовности', rollback: 'Откат',
@@ -41,9 +42,9 @@ const COPY = {
     managed: 'Управляемый рецепт', noInstall: 'Ручная настройка', installerOff: 'Исполнение отключено политикой',
     modeTitle: 'Режим автономии агентов', modeHint: 'Действует сразу для Vexa и всех субагентов. Аварийная остановка, лимиты и запреты для шелла работают в любом режиме.',
     modes: {
-      supervised: ['Под контролем', 'R3 — одно подтверждение, R4 — два. Как было раньше.'],
-      auto: ['Авто, кроме чувствительного', 'Всё выполняется само. Подтверждение только для шелла, удалений, звонков, браузера на чужих сайтах, установки ПО и настройки роутера.'],
-      full: ['Полный контроль', 'Агенты выполняют всё сами, без подтверждений. Торговые операции всё равно ждут вашего подтверждения.'],
+      supervised: ['Под контролем', 'Исходящие действия — одно подтверждение, R4 — два.'],
+      auto: ['Авто, кроме чувствительного', 'Локальные безопасные задачи выполняются сами. Исходящие действия требуют подтверждения.'],
+      full: ['Полный контроль', 'Недоступно: исходящие действия требуют подтверждения.'],
     },
     fullConfirm: 'Включить полный контроль? Агенты смогут выполнять шелл-команды, удалять данные, звонить и действовать в браузере без вашего подтверждения.',
   },
@@ -51,7 +52,7 @@ const COPY = {
     title: 'Processes & Control', subtitle: 'Tasks, approvals, limits and execution evidence',
     running: 'CONTROL PLANE ACTIVE', stopped: 'EMERGENCY STOP', stop: 'Stop all', resume: 'Resume', refresh: 'Refresh',
     approvals: 'Awaiting approval', active: 'Running', completed: 'Completed', blocked: 'Stopped',
-    all: 'All', approval: 'Approval', activeTab: 'Active', finished: 'Finished', queue: 'Task queue',
+    all: 'All', approval: 'Подтверждения', activeTab: 'Active', finished: 'Finished', queue: 'Task queue',
     empty: 'No processes yet. They appear when agents request tools.', select: 'Select a task to inspect its contract.',
     approve: 'Approve', reject: 'Reject', details: 'Task contract', risk: 'Risk', autonomy: 'Autonomy', assignee: 'Assignee',
     source: 'Origin', budget: 'Budget', commands: 'commands', seconds: 'sec', acceptance: 'Acceptance criteria', rollback: 'Rollback',
@@ -65,9 +66,9 @@ const COPY = {
     managed: 'Managed recipe', noInstall: 'Manual setup', installerOff: 'Execution disabled by policy',
     modeTitle: 'Agent autonomy', modeHint: 'Applies at once to Vexa and every sub-agent. Emergency stop, budgets and the shell deny-list hold in every mode.',
     modes: {
-      supervised: ['Supervised', 'R3 needs one approval, R4 two. The previous behaviour.'],
-      auto: ['Auto except sensitive', 'Everything runs on its own. Approval only for shell, deletions, calls, browser actions on third-party sites, installs and router changes.'],
-      full: ['Full control', 'Agents do everything on their own, no approvals. Trading still waits for your approval.'],
+      supervised: ['Supervised', 'Outgoing actions need one approval, R4 needs two.'],
+      auto: ['Auto except sensitive', 'Safe local tasks run automatically. Outgoing actions still require approval.'],
+      full: ['Full control', 'Unavailable: outgoing actions require approval.'],
     },
     fullConfirm: 'Enable full control? Agents will be able to run shell commands, delete data, place calls and act in the browser without your approval.',
   },
@@ -86,18 +87,18 @@ function shortTime(value: string) {
 function statusLabel(task: WorkflowTask, language: 'ru' | 'en') {
   const labels: Record<string, [string, string]> = {
     queued: ['В очереди', 'Queued'], running: ['Выполняется', 'Running'], blocked: ['Заблокировано', 'Blocked'],
-    awaiting_approval: ['Ждёт approval', 'Awaiting approval'], approved: ['Подтверждено', 'Approved'], done: ['Готово', 'Done'],
+    awaiting_approval: ['Ждёт подтверждения', 'Awaiting approval'], approved: ['Подтверждено', 'Approved'], done: ['Готово', 'Done'],
     failed: ['Ошибка', 'Failed'], killed: ['Остановлено', 'Killed'], rejected: ['Отклонено', 'Rejected'],
   };
   return labels[task.status]?.[language === 'ru' ? 0 : 1] || task.status;
 }
 
-export function ProcessesTab({ language }: Props) {
+export function ProcessesTab({ language, initialFilter = 'all' }: Props) {
   const copy = COPY[language];
   const [summary, setSummary] = useState<ControlPlaneSummary | null>(null);
   const [autonomy, setAutonomy] = useState<AutonomySummary | null>(null);
   const [selectedId, setSelectedId] = useState('');
-  const [filter, setFilter] = useState<Filter>('all');
+  const [filter, setFilter] = useState<Filter>(initialFilter);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
@@ -225,9 +226,9 @@ export function ProcessesTab({ language }: Props) {
   const stopped = Boolean(summary?.state.kill_switch);
   const autonomyMode: AgentAutonomyMode = summary?.policy.autonomy_mode || 'supervised';
   return (
-    <div className="control-page">
+    <div className={`control-page${initialFilter === 'approval' ? ' is-approvals' : ''}`}>
       <header className="control-header">
-        <div><span className="control-eyebrow"><ShieldCheck size={14} />CONTROL PLANE</span><h2>{copy.title}</h2><p>{copy.subtitle}</p></div>
+        <div><span className="control-eyebrow"><ShieldCheck size={14} />{language === 'ru' ? 'УПРАВЛЕНИЕ' : 'CONTROL'}</span><h2>{initialFilter === 'approval' ? (language === 'ru' ? 'Центр подтверждений' : 'Approval center') : copy.title}</h2><p>{initialFilter === 'approval' ? (language === 'ru' ? 'Действия, которые ждут вашего решения' : 'Actions waiting for your decision') : copy.subtitle}</p></div>
         <div className="control-actions">
           <span className={`control-state ${stopped ? 'is-stopped' : 'is-running'}`}><CircleDot size={14} />{stopped ? copy.stopped : copy.running}</span>
           <button type="button" className="icon-btn" onClick={() => void load()} title={copy.refresh} aria-label={copy.refresh}><RefreshCw size={16} /></button>
@@ -240,10 +241,10 @@ export function ProcessesTab({ language }: Props) {
       {error && <div className="control-alert"><AlertTriangle size={15} />{copy.failedLoad} {error}</div>}
       {stopped && <div className="control-stop-reason"><Ban size={15} /><strong>{copy.stoppedReason}:</strong> {summary?.state.reason || '—'}</div>}
 
-      <section className="control-mode" aria-labelledby="control-mode-title">
+      {initialFilter !== 'approval' && <section className="control-mode" aria-labelledby="control-mode-title">
         <div className="control-mode-head"><Zap size={16} /><div><h3 id="control-mode-title">{copy.modeTitle}</h3><small>{copy.modeHint}</small></div></div>
         <div className="control-mode-options" role="radiogroup" aria-labelledby="control-mode-title">
-          {(['supervised', 'auto', 'full'] as AgentAutonomyMode[]).map(mode => (
+          {(['supervised', 'auto'] as AgentAutonomyMode[]).map(mode => (
             <button
               key={mode}
               type="button"
@@ -255,7 +256,7 @@ export function ProcessesTab({ language }: Props) {
             ><strong>{copy.modes[mode][0]}</strong><small>{copy.modes[mode][1]}</small></button>
           ))}
         </div>
-      </section>
+      </section>}
 
       <section className="control-metrics" aria-label="Control Plane metrics">
         <div><span>{copy.approvals}</span><strong>{summary?.counts.awaiting_approval || 0}</strong></div>
@@ -264,7 +265,7 @@ export function ProcessesTab({ language }: Props) {
         <div><span>{copy.blocked}</span><strong>{(summary?.counts.blocked || 0) + (summary?.counts.failed || 0) + (summary?.counts.killed || 0)}</strong></div>
       </section>
 
-      <section className="control-autonomy" aria-labelledby="autonomy-runtime-title">
+      {initialFilter !== 'approval' && <section className="control-autonomy" aria-labelledby="autonomy-runtime-title">
         <div className="control-autonomy-head">
           <div><BrainCircuit size={18} /><h3 id="autonomy-runtime-title">{copy.autonomyTitle}</h3></div>
           <button type="button" onClick={() => void reindex()} disabled={Boolean(busy)} title={copy.reindex}>
@@ -309,7 +310,7 @@ export function ProcessesTab({ language }: Props) {
             })}
           </div>
         </div>
-      </section>
+      </section>}
 
       <div className="control-workspace">
         <section className="control-queue" aria-labelledby="control-queue-title">
@@ -336,6 +337,8 @@ export function ProcessesTab({ language }: Props) {
           {!selected && <p className="control-empty">{copy.select}</p>}
           {selected && <>
             <div className="control-inspector-head"><div><span>{copy.details}</span><h3>{selected.tool_name || selected.goal}</h3><code>{selected.id}</code></div><span className={`risk-badge is-${selected.risk_class.toLowerCase()}`}>{selected.risk_class}</span></div>
+
+            <ApprovalPreview arguments={selected.tool_arguments || {}} language={language} />
             {selected.status === 'awaiting_approval' && <div className="approval-bar">
               <div><strong>{selected.approval_count}/{selected.approvals_required}</strong><span>{selected.approvals_required === 1 ? copy.confirmation : copy.confirmations}</span></div>
               <button type="button" className="approve-btn" disabled={Boolean(busy)} onClick={() => approve(selected)} title={copy.approve}><Check size={16} />{copy.approve}</button>

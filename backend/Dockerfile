@@ -1,8 +1,12 @@
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93
 
 # Disable Python stdout buffering to ensure logs print immediately
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV HOME=/app/backend/data/home
+ENV HF_HOME=/app/backend/data/cache/huggingface
+ENV MPLCONFIGDIR=/app/backend/data/cache/matplotlib
 
 WORKDIR /app
 
@@ -38,6 +42,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends git \
 
 # Copy source code and environment configuration
 COPY backend/ /app/backend/
+
+RUN useradd --uid 10001 --create-home hermes \
+    && mkdir -p /app/backend/data/home /app/backend/data/cache \
+    && chown -R 10001:10001 /app/backend/data
+
+USER 10001:10001
 
 EXPOSE 8000
 

@@ -235,6 +235,9 @@ class _Target:
 
 async def _target(key: str, requested: str) -> tuple[Optional[_Target], Optional[JSONResponse]]:
     if requested == model_id():
+        from backend.provider_trust import trusted_local_endpoint
+        if not trusted_local_endpoint(normalize_base_url()):
+            return None, _error(503, "Local endpoint is outside the trusted host policy", "untrusted_local_endpoint")
         headers = {"Content-Type": "application/json"}
         api_key = os.getenv("LLAMACPP_API_KEY", "")
         if api_key:
@@ -293,6 +296,24 @@ async def chat_completions(request: Request):
     if refusal is not None:
         return refusal
     assert target is not None
+    vault = None
+    client_stream = bool(payload.get("stream"))
+    if not target.local:
+        from backend.privacy.gateway import protect_messages, PrivacyCheckFailed
+        mark = "_desktop_privacy"
+        for message in payload["messages"]:
+            if isinstance(message, dict):
+                message.pop(mark, None)
+        try:
+            vault = await protect_messages(payload["messages"], mark_key=mark)
+        except PrivacyCheckFailed:
+            return _error(503, "privacy check unavailable; external request blocked", "privacy_unavailable")
+        for message in payload["messages"]:
+            if isinstance(message, dict):
+                message.pop(mark, None)
+        # Buffer an external response before restoring placeholders, which may
+        # span arbitrary SSE chunks. Local streaming is unchanged.
+        payload["stream"] = False
     payload["model"] = target.model
 
     # Cap rather than refuse: SDKs send their own defaults, often the model's
@@ -355,11 +376,35 @@ async def chat_completions(request: Request):
         except ValueError:
             target.on_done(None, started, "no JSON")
             return _error(502, "model returned no JSON", "upstream_error")
+        if vault is not None:
+            from backend.privacy.gateway import restore_text, restore_arguments
+            def restore(value, field=""):
+                if isinstance(value, dict):
+                    return {k: restore(v, k) for k, v in value.items()}
+                if isinstance(value, list):
+                    return [restore(v) for v in value]
+                if isinstance(value, str):
+                    return restore_arguments(value, vault) if field == "arguments" else restore_text(value, vault)
+                return value
+            data = restore(data)
         usage = data.get("usage") if isinstance(data, dict) else None
         error = "" if response.status_code < 400 else f"HTTP {response.status_code}"
         target.on_done(usage, started, error)
         if not error:
             _record(key, target.model, usage, started)
+        if client_stream and vault is not None and not error:
+            async def protected_stream():
+                chunk = {**data, "object": "chat.completion.chunk"}
+                choices = []
+                for choice in data.get("choices", []):
+                    delta = choice.get("message") or {}
+                    if isinstance(delta.get("tool_calls"), list):
+                        delta["tool_calls"] = [{**call, "index": i} for i, call in enumerate(delta["tool_calls"])]
+                    choices.append({**{k: v for k, v in choice.items() if k != "message"}, "delta": delta})
+                chunk["choices"] = choices
+                yield ("data: " + json.dumps(chunk) + "\n\n").encode()
+                yield b"data: [DONE]\n\n"
+            return StreamingResponse(protected_stream(), media_type="text/event-stream")
         return JSONResponse(status_code=response.status_code, content=data)
 
     try:

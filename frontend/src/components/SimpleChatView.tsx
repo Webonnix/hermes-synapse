@@ -54,8 +54,8 @@ const STICK_TO_BOTTOM_PX = 120;
 const NARROW_PX = 900;
 
 function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem('vexa_auth_token');
-  return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+
+  return { 'Content-Type': 'application/json',  };
 }
 
 interface SimpleChatViewProps {
