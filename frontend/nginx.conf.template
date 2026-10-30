@@ -126,7 +126,7 @@ server {
         limit_req_status 429;
         proxy_pass $backend_upstream;
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
+        proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_read_timeout 120s;
@@ -136,7 +136,7 @@ server {
         include /etc/nginx/snippets/hermes-security.conf;
         proxy_pass $backend_upstream;
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
+        proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header Upgrade $http_upgrade;
@@ -153,7 +153,7 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
+        proxy_set_header Host $http_host;
         proxy_read_timeout 3600s;
     }
 
@@ -164,7 +164,7 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
+        proxy_set_header Host $http_host;
         proxy_read_timeout 3600s;
     }
 
@@ -186,7 +186,7 @@ server {
         rewrite ^/llm/(.*)$ /$1 break;
         proxy_pass $llm_upstream;
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
+        proxy_set_header Host $http_host;
     }
 
     # Token-gated reverse proxy onto the internal llama.cpp server, so external
@@ -210,7 +210,7 @@ server {
         rewrite ^/llm/(.*)$ /llm-open/$1 break;
         proxy_pass $backend_upstream;
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
+        proxy_set_header Host $http_host;
         # The model's window is 196608 tokens, roughly 1 MB of JSON — exactly
         # nginx's default body limit, so long prompts were silently 413ing and
         # capping usable context. Vision requests carry base64 images on top.

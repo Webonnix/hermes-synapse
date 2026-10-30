@@ -1,0 +1,679 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  backend:
+    build:
+      context: ./src
+      dockerfile: backend/Dockerfile
+    image: hermes-web-backend:local
+    container_name: hermes-web-backend
+    init: true
+    restart: unless-stopped
+    # Security audit 2026-10-30 (C4): non-root, read-only root filesystem, no
+    # capabilities. Writable state lives only in ./data and /tmp.
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - ./src/.env
+    environment:
+      LLM_PROVIDER: llamacpp
+      LLAMACPP_BASE_URL: http://hermes-llama:8080
+      # Strata (hermes-only stack) refuses /v1 without a key; it is the /llm/ proxy token.
+      LLAMACPP_API_KEY: "${LLM_PROXY_TOKEN:?Set LLM_PROXY_TOKEN in src/.env}"
+      LLM_LOCK_PROVIDER_ENDPOINT: "true"
+      # Strata ignores the request's model name; this is what the UI shows (since 2026-10-25).
+      LLM_MODEL: qwen3.8-flash-next-iq3_s
+      LLM_FAST_MODE: "false"
+      LLM_MAX_HISTORY_MESSAGES: "12"
+      LLM_MAX_TOKENS: "16384"
+      LLM_TOOL_MAX_TOKENS: "16384"
+      LLM_TEMPERATURE: "0.55"
+      LLM_REQUEST_TIMEOUT: "900"
+      LLM_MAX_RETRIES: "1"
+      LLM_MAX_TOOL_ITERATIONS: "50"
+      # = Strata's CONTEXT (hermes-only stack): 524288, rope scaling yarn x2 since 2026-10-29.
+      # The backend also reads the real value back from /props at startup.
+      LOCAL_NUM_CTX: "524288"
+      LOCAL_THINK: "true"
+      COMPLEXITY_ROUTING: keyword
+      RAG_AUTO_CONTEXT: "true"
+      MEMORY_ENABLED: "true"
+      MEMORY_AUTO_SAVE: "true"
+      MEMORY_MAX_ITEMS: "8"
+      QDRANT_HOST: qdrant
+      OBSIDIAN_HOST: obsidian
+      OBSIDIAN_PORT: "27124"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PROJECT_WORKSPACE_ROOT: /workspace
+      PROJECT_MEMORY_AUTO_INDEX: "true"
+      AUTONOMY_PROJECT_CONTEXT: "true"
+      VALKEY_HOST: valkey
+      VALKEY_PORT: "6379"
+      DEV_RUNNER_URL: http://dev-runner:8600
+      # This deployment's static dev-runner container is named
+      # hermes-web-dev-runner (not the "hermes-dev-runner" default that
+      # matches the local dev compose) — dev_sandbox.py reads its image/
+      # network from this container to build each per-run sandbox.
+      DEV_RUNNER_CONTAINER_NAME: hermes-web-dev-runner
+      # Host path matching ./data:/app/backend/data above — see
+      # dev_sandbox.py's docstring for why this can't be derived generically.
+      DEV_SANDBOX_HOST_RUNS_ROOT: /app/backend/data/dev-repo-runs
+      DEV_SANDBOX_MAX_CONCURRENT: "3"
+      # Agent desktops (backend/agent_runtimes/): one gVisor Linux desktop per
+      # agent, image hermes-agent-desktop:local (service agent-desktop below).
+      AGENT_DESKTOPS_ENABLED: "true"
+      AGENT_DESKTOP_HOST_ROOT: /app/backend/data/agent-desktops
+      AGENT_DESKTOP_RUNTIME: runsc
+      AGENT_DESKTOP_MAX_CONCURRENT: "4"
+      # OpenBot desktops (docs/agent-desktops-openbot.md) and OmniRoute models
+      # for desktops (paid: per-desktop daily limits below).
+      OPENBOT_DESKTOPS_ENABLED: "false"
+      AGENT_LLM_EXTERNAL_ENABLED: "true"
+      AGENT_LLM_EXTERNAL_MODELS: "*"
+      AGENT_LLM_EXTERNAL_DAILY_USD: "5"
+      AGENT_LLM_EXTERNAL_DAILY_REQUESTS: "500"
+      # Picked up automatically by docker.from_env() in dev_sandbox.py, the
+      # desktops and the Earner. sandbox-launcher accepts only fixed sandbox
+      # templates (runsc, approved images, no host mounts); the backend never
+      # reaches the raw Docker API. No /var/run/docker.sock mount here, ever.
+      DOCKER_HOST: tcp://sandbox-launcher:2375
+      # Sessions use a Secure cookie: the dashboard is served over https :9443.
+      HERMES_AUTH_SECURE_COOKIE: "true"
+      # Telephony (backend/phone_asterisk.py): call control over ARI on the
+      # asterisk service; call audio is RTP between asterisk and this container on
+      # UDP 40000-40199. Both stay on hermes-web-net — nothing is published.
+      PHONE_ARI_URL: http://asterisk:8088/ari
+      PHONE_RTP_PORT_MIN: "40000"
+      PHONE_RTP_PORT_MAX: "40199"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./src/.env:/app/.env:ro
+      - ./src:/workspace:ro
+      - ./data:/app/backend/data
+    tmpfs:
+      - /tmp:size=2g,mode=1777
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      obsidian:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      sandbox-launcher:
+        condition: service_healthy
+      data-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    stop_grace_period: 45s
+    logging: *default-logging
+    networks:
+      - hermes-web-net
+      - hermes-ollama-net
+      - hermes-llm-net
+      - hermes-dev-net
+      - launcher-net
+
+  # Guards the real Docker socket: only this sidecar ever mounts it, and it
+  # exposes just enough of the Docker API for backend/dev_sandbox.py to
+  # create/start/stop/remove per-run containers — not exec into arbitrary
+  # containers, not volumes/swarm/secrets/plugins/builds. Reachable only from
+  # `backend`, on its own internal network; the dev-run sandboxes it manages
+  # live on hermes-dev-net instead and can never reach this proxy, so an
+  # agent-controlled `dev_exec` shell command inside a sandbox has no path to
+  # the Docker API even if it tried.
+  # Image of the per-agent desktops. Build-only: never started by up.
+  #   docker compose --env-file src/.env -f docker-compose.yml build agent-desktop
+  agent-desktop:
+    build:
+      context: ./src
+      dockerfile: agent_desktop/Dockerfile
+    image: hermes-agent-desktop:local
+    profiles: ["build-only"]
+
+  # OpenBot desktop image (openbot_desktop/Dockerfile). Build-only.
+  openbot-desktop:
+    build:
+      context: ./src
+      dockerfile: openbot_desktop/Dockerfile
+    image: hermes-openbot-desktop:local
+    profiles: ["build-only"]
+
+  # One-shot: the backend runs as uid 10001, so the data root and its fixed
+  # subdirectories must belong to it. Never touches sandbox homes' contents.
+  data-init:
+    image: hermes-web-backend:local
+    user: "0:0"
+    entrypoint: ["python", "/app/backend/init_data.py"]
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE]
+    volumes:
+      - ./data:/data
+    network_mode: none
+
+  # The only holder of the Docker socket (security audit C4). It exposes a
+  # template broker, not the Docker API: dev runs, agent desktops and Earner
+  # runs are rebuilt from fixed templates (runsc, approved image, no host
+  # mounts, capped limits); anything else is refused. Reachable only from the
+  # backend on launcher-net; sandboxes on hermes-dev-net never reach it.
+  sandbox-launcher:
+    build:
+      context: ./src
+      dockerfile: sandbox_launcher/Dockerfile
+    image: hermes-web-sandbox-launcher:local
+    container_name: hermes-web-sandbox-launcher
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+    environment:
+      SANDBOX_DATA_VOLUME: hermes_web_data
+      DEV_RUNNER_CONTAINER_NAME: hermes-web-dev-runner
+      BACKEND_CONTAINER_NAME: hermes-web-backend
+      SANDBOX_DEV_IMAGE: hermes-web-dev-runner:local
+      SANDBOX_AGENT_IMAGE: hermes-agent-desktop:local
+      SANDBOX_OPENBOT_IMAGE: hermes-openbot-desktop:local
+      SANDBOX_EARNER_IMAGES: hermes-web-dev-runner:local,hermes-earner-runner:local
+      SANDBOX_NETWORK_LABELS: hermes-dev-net,hermes-dev-egress-net
+      SANDBOX_MAX_CONTAINERS: "6"
+      SANDBOX_MEMORY_BUDGET: "25769803776"
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - hermes_web_data:/data
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:2375/health', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *default-logging
+    networks:
+      - launcher-net
+
+  dev-runner:
+    build:
+      context: ./src
+      dockerfile: backend/Dockerfile.dev-runner
+    image: hermes-web-dev-runner:local
+    container_name: hermes-web-dev-runner
+    restart: unless-stopped
+    # Only its own bearer token (security audit): the runner has internet
+    # egress, so it must not hold the rest of src/.env.
+    environment:
+      DEV_RUNNER_REPO_ROOT: /dev-repo
+      DEV_RUNNER_TOKEN: "${DEV_RUNNER_TOKEN:?Set DEV_RUNNER_TOKEN in src/.env}"
+    volumes:
+      # Must be owned by uid/gid 10001 (the `runner` user this image drops to)
+      # on the host: a bind mount overrides the image's own ownership of
+      # /dev-repo, so a directory the Docker daemon auto-creates here lands
+      # root:root 0755 and every agent write fails with PermissionError. The
+      # backend repairs this on startup (dev_sandbox.ensure_shared_repo_writable);
+      # to fix it by hand: chown -R 10001:10001 ./data/dev-repo ./data/dev-repo-runs
+      - ./data/dev-repo:/dev-repo
+    mem_limit: 2g
+    cpus: 2
+    # hermes-dev-net: internal-only, reachable from backend and Gitea.
+    # hermes-dev-egress-net: the ONLY source of real internet access, added
+    # so `dev_exec` can run npm/pip/apt installs -- before this, any goal
+    # needing a package manager retried forever (DNS itself failed:
+    # EAI_AGAIN) with no way to ever succeed. Kept as a second, separate
+    # bridge network rather than dropping hermes-dev-net's internal flag so
+    # egress does not also mean reachability: this network has no other
+    # member containers, so a sandbox on it still cannot reach docker-proxy,
+    # llama, qdrant or anything else internal -- only the outside world and
+    # (via hermes-dev-net) backend/Gitea. Per-run sandboxes inherit both
+    # automatically (dev_sandbox.py's _blocking_ensure_container mirrors
+    # whatever networks this static container is on).
+    networks:
+      - hermes-dev-net
+      - hermes-dev-egress-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8600/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging: *default-logging
+
+  # RETIRED 2026-10-19: replaced as Vexa's voice by `qwen3-tts` below (XTTS's
+  # CPML licence is non-commercial; Qwen3-TTS is Apache-2.0, streams first audio
+  # in ~0.25 s against ~3.3 s, RTF ~0.2 against 0.56). Kept behind the
+  # `legacy-xtts` profile (never started by a plain `up`) only as a rollback
+  # path — container, image and both volumes are kept; `hermes_web_xtts_speakers`
+  # still holds vexa-reference.wav, which qwen3-tts clones from (read-only).
+  # Rollback (GPU1 cannot hold both: stop qwen3-tts first):
+  #   docker compose --env-file src/.env stop qwen3-tts
+  #   docker compose --env-file src/.env --profile legacy-xtts up -d --no-deps xtts
+  #   set VOICE_TTS_PROVIDER=auto in src/.env, then
+  #   docker compose --env-file src/.env up -d --no-deps backend
+  # (with VOICE_TTS_PROVIDER=qwen3 the backend already falls back qwen3 -> xtts
+  # -> piper, so starting xtts alone restores the XTTS voice even before that.)
+  #
+  # One multilingual voice for Vexa: XTTS-v2 reads both Russian and English with
+  # the same speaker, cloned on first boot from the Piper English voice
+  # (en_US-amy-medium). Deliberately not a backend dependency — while its weights
+  # load, or if it is down, backend/tts.py falls back to Piper.
+  xtts:
+    build:
+      context: ./src
+      dockerfile: xtts/Dockerfile
+    image: hermes-web-xtts:local
+    container_name: hermes-web-xtts
+    profiles: ["legacy-xtts"]
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8700:8700"
+    environment:
+      XTTS_DEVICE: cuda
+      XTTS_SPEAKER: Daisy Studious
+      XTTS_SPEAKER_WAV: /speakers/vexa-reference.wav
+      XTTS_REFERENCE_PIPER_MODEL: /piper-voices/en_US-amy-medium.onnx
+      XTTS_DEFAULT_LANGUAGE: en
+      COQUI_TOS_AGREED: "1"
+    volumes:
+      - hermes_web_xtts_models:/models
+      - hermes_web_xtts_speakers:/speakers
+      - ./data/piper-voices:/piper-voices:ro
+    # Back on GPU1 as of 2026-09-02 (it had been on the CPU since 2026-08-17).
+    # XTTS on the CPU measures RTF 2.06 against 0.52-0.66 on the card, so every
+    # spoken reply cost ~3.5x more than it had to -- and the LLM context of
+    # 196608 was itself sized to leave ~6.4 GiB free on this card for XTTS,
+    # headroom that was sitting idle the whole time. Pinned to device 1 so it
+    # never lands on GPU0, which runs far hotter under load (87-88 C vs 69-70).
+    # To go back to the CPU: comment this block out and set XTTS_DEVICE: cpu.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+    logging: *default-logging
+    networks:
+      - hermes-web-net
+
+  # Vexa's voice since 2026-10-19: Qwen3-TTS-12Hz-1.7B-Base (Apache-2.0) served
+  # by vLLM-Omni as OpenAI-compatible POST /v1/audio/speech (also raw-PCM and
+  # WebSocket streaming). backend/tts.py uses it with VOICE_TTS_PROVIDER=qwen3
+  # (src/.env, VOICE_TTS_QWEN3_*), falling back to xtts -> piper when it is
+  # down. Like XTTS it is deliberately not a backend dependency.
+  # The Base model clones in context from the same reference XTTS used, read
+  # only from XTTS's volume: ref_audio=file:///xtts-speakers/vexa-reference.wav
+  # + its transcript (backend/tts.py QWEN3_REFERENCE_TEXT).
+  # GPU1 budget (24 GiB card, llama.cpp holds 16.5 GiB, XTTS stopped -> ~7.4 GiB
+  # free): gpu_memory_utilization is per stage, a fraction of the whole card,
+  # and a stage refuses to start if that much is not free. Talker 0.20 (1.7B
+  # weights 3.89 GiB + 0.71 GiB KV) + code2wav 0.04 = 5.75 GiB idle, ~6.4 GiB
+  # peak while speaking. 0.6B-Base (0.10 + 0.06, 3.3 GiB) is the fallback if
+  # the card ever gets tighter — and the only size that fits beside XTTS.
+  # max_model_len: talker 2048 (sentence + 20 s reference) and code2wav 16384 =
+  # 16 codebooks x 1024 frames (~85 s audio). CUDA graphs on the talker only
+  # (eager talker: RTF ~1.05, slower than real time); graphs on code2wav as well
+  # cost +700 MiB. Sampling temperature 0.6 (shipped 0.9) on the talker and
+  # sub-talker — see docs/qwen3-tts-pilot/README.md for the click/WER test.
+  # HF_HUB_OFFLINE: weights are cached in hermes_web_qwen3_tts_hf,
+  # so a restart never depends on the Hub. Pilot results: docs/qwen3-tts-pilot/.
+  qwen3-tts:
+    image: vllm/vllm-omni:v0.30.0@sha256:fc77cfaac7b1b43c30cbf32eaea214864434c6e0f303e6e9eb9f64104241a994
+    container_name: hermes-web-qwen3-tts
+    # Off on the owner's request since 2026-10-25: `up -d` leaves it alone. Turn it on with
+    #   docker compose ... --profile voice up -d --no-deps qwen3-tts && docker restart hermes-llama
+    # (Strata takes all free VRAM at start, so it must restart after the voice is up).
+    profiles: [voice]
+    restart: unless-stopped
+    # The talker -> code2wav handoff uses a shared-memory connector.
+    shm_size: "2gb"
+    entrypoint: ["vllm"]
+    command:
+      - serve
+      - Qwen/Qwen3-TTS-12Hz-1.7B-Base
+      - --omni
+      - --host=0.0.0.0
+      - --port=8091
+      - --trust-remote-code
+      - --allowed-local-media-path=/xtts-speakers
+      - '--stage-overrides={"0":{"gpu_memory_utilization":0.2,"max_num_seqs":2,"max_model_len":2048,"default_sampling_params":{"temperature":0.6,"top_k":50,"max_tokens":4096,"min_tokens":2,"repetition_penalty":1.05},"subtalker_sampling_params":{"do_sample":true,"temperature":0.6,"top_k":50,"top_p":1.0}},"1":{"gpu_memory_utilization":0.04,"max_num_seqs":2,"enforce_eager":true,"max_model_len":16384,"max_num_batched_tokens":16384}}'
+    ports:
+      - "127.0.0.1:8091:8091"
+    environment:
+      HF_HOME: /hf
+      HF_HUB_OFFLINE: "1"
+      SPEAKER_SAMPLES_DIR: /voices
+    volumes:
+      - hermes_web_qwen3_tts_hf:/hf
+      - hermes_web_qwen3_tts_voices:/voices
+      - hermes_web_xtts_speakers:/xtts-speakers:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/v1/models', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+    logging: *default-logging
+    networks:
+      - hermes-web-net
+
+  # Telephony edge (src/asterisk): registers to the SIP provider (Zadarma) and
+  # carries RTP. Every call goes into the "hermes" ARI app; the backend decides
+  # and talks. ARI (8088) is reachable only from the compose network. Its state —
+  # the generated ARI password and the provider trunk file the backend writes —
+  # lives in ./data/asterisk, which the backend sees as /app/backend/data/asterisk.
+  # SIP registration works from behind NAT without port forwarding; the RTP range
+  # is published so a router rule can be added later if a provider needs it.
+  asterisk:
+    build:
+      context: ./src
+      dockerfile: asterisk/Dockerfile
+    image: hermes-web-asterisk:local
+    container_name: hermes-web-asterisk
+    init: true
+    restart: unless-stopped
+    ports:
+      - "192.168.0.200:5060:5060/udp"
+      - "192.168.0.200:10000-10199:10000-10199/udp"
+    environment:
+      HERMES_ASTERISK_STATE: /var/lib/hermes-asterisk
+    volumes:
+      - ./data/asterisk:/var/lib/hermes-asterisk
+    logging: *default-logging
+    networks:
+      - hermes-web-net
+
+  # Browser-automation agent (browser-use driving a headless Chromium session
+  # against the same local llama.cpp model as everything else). CPU/RAM-heavy;
+  # deliberately not a depends_on for other services.
+  browser-runner:
+    build:
+      context: ./src
+      dockerfile: browser_runner/Dockerfile
+    image: hermes-web-browser-runner:local
+    container_name: hermes-web-browser-runner
+    restart: unless-stopped
+    env_file:
+      - ./src/.env
+    volumes:
+      # Read-only: matches what dev_publish_demo writes and nginx serves at
+      # /demo/ (see the frontend service). Backs tools.dev_review_demo's /audit call.
+      - ./data/dev-previews:/previews:ro
+      # Saved logins (browser_runner/server.py "Saved logins"): persistent Chromium
+      # profiles the owner signed in to. Holds session cookies — never mount elsewhere.
+      - ./data/browser-profiles:/profiles
+    environment:
+      LLM_PROVIDER: llamacpp
+      BROWSER_PROFILES_ROOT: /profiles
+      LLAMACPP_BASE_URL: http://hermes-llama:8080
+      # Strata (hermes-only stack) refuses /v1 without a key; it is the /llm/ proxy token.
+      LLAMACPP_API_KEY: "${LLM_PROXY_TOKEN:?Set LLM_PROXY_TOKEN in src/.env}"
+      # Strata ignores the request's model name; this is what the UI shows (since 2026-10-25).
+      LLM_MODEL: qwen3.8-flash-next-iq3_s
+    mem_limit: 2g
+    cpus: 2
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8800/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging: *default-logging
+    networks:
+      - hermes-web-net
+      - hermes-ollama-net
+      - hermes-llm-net
+
+  frontend:
+    build:
+      context: ./src/frontend
+      dockerfile: Dockerfile
+    image: hermes-web-frontend:local
+    container_name: hermes-web-frontend
+    restart: unless-stopped
+    env_file:
+      - ./src/.env
+    environment:
+      LLM_PROXY_TOKEN: "${LLM_PROXY_TOKEN:?Set LLM_PROXY_TOKEN in src/.env}"
+      ROUTER_HOSTNAME: "${ROUTER_HOSTNAME:-router.invalid}"
+    ports:
+      - "9119:80"
+      - "9443:443"
+    volumes:
+      - ./ssl:/etc/nginx/ssl:ro
+      # Kanban dev-run demo previews (nginx.conf.template's /demo/ location).
+      # Backend writes here via dev_publish_demo; nginx only ever reads.
+      - ./data/dev-previews:/usr/share/nginx/dev-previews:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging: *default-logging
+    networks:
+      - hermes-web-net
+      - hermes-ollama-net
+      - hermes-llm-net
+
+  # AI Router / token-saver sidecar: OmniRoute (github.com/diegosouzapw/omniroute).
+  # Fronts external LLM providers with an OpenAI-compatible endpoint, tiered
+  # fallback and token compression. The backend reaches it at
+  # ROUTER_API_BASE=http://omniroute:20128 (provider_bindings, AI Router tab,
+  # dashboard session) and connects its built-in MCP server at /api/mcp/stream
+  # (backend/omniroute_mcp.py). The cloudflared route (router.webonnix.net ->
+  # localhost:20128) reaches the loopback-published port. Secrets live in
+  # src/.env; OMNIROUTE_STORAGE_ENCRYPTION_KEY encrypts the DB — losing it means
+  # re-connecting every provider account.
+  omniroute:
+    image: diegosouzapw/omniroute:3.8.51@sha256:8bd462c9f60d8eda79329cfbb6ea7ea723505fe7721beb944f3d43835409e218
+    container_name: hermes-web-omniroute
+    restart: unless-stopped
+    stop_grace_period: 40s
+    environment:
+      PORT: "20128"
+      DASHBOARD_PORT: "20128"
+      DATA_DIR: /app/data
+      JWT_SECRET: "${OMNIROUTE_JWT_SECRET:?Set OMNIROUTE_JWT_SECRET in src/.env}"
+      API_KEY_SECRET: "${OMNIROUTE_API_KEY_SECRET:?Set OMNIROUTE_API_KEY_SECRET in src/.env}"
+      STORAGE_ENCRYPTION_KEY: "${OMNIROUTE_STORAGE_ENCRYPTION_KEY:?Set OMNIROUTE_STORAGE_ENCRYPTION_KEY in src/.env}"
+      STORAGE_ENCRYPTION_KEY_VERSION: v1
+      INITIAL_PASSWORD: "${OMNIROUTE_INITIAL_PASSWORD:?Set OMNIROUTE_INITIAL_PASSWORD in src/.env}"
+      BASE_URL: "${ROUTER_PUBLIC_BASE_URL:-http://localhost:20128}"
+      NEXT_PUBLIC_BASE_URL: "${ROUTER_PUBLIC_BASE_URL:-http://localhost:20128}"
+      # MCP tools call OmniRoute's own API; left to auto-detect they use BASE_URL,
+      # i.e. the public hostname behind Cloudflare Access, and get its login page.
+      OMNIROUTE_BASE_URL: http://127.0.0.1:20128
+      NODE_OPTIONS: --max-old-space-size=2048
+      # Privacy safety net (2026-10-19): irreversibly replaces API keys/tokens/
+      # private keys/connection strings with [REDACTED:<type>] in requests,
+      # tool args/results and responses. Secrets only — pii-masker stays off,
+      # since it would also blank the reversible surrogates Hermes's own
+      # privacy gateway puts into model responses.
+      CREDENTIAL_REDACTION_ENABLED: "true"
+      # Never store request/response bodies (overrides the dashboard toggle).
+      # Per-key no_log is set on each API key once the keys exist.
+      ENABLE_REQUEST_LOGS: "false"
+    ports:
+      - "${ROUTER_PUBLISH_HOST:-127.0.0.1}:20128:20128"
+    volumes:
+      - hermes_web_omniroute_data:/app/data
+    logging: *default-logging
+    networks:
+      - hermes-web-net
+
+  qdrant:
+    image: qdrant/qdrant:v1.18.1@sha256:45f8e3ddc2570a4d029877e1b5ec1045c19b3852b4e22a55c7f43b05aea0ca89
+    container_name: hermes-web-qdrant
+    restart: unless-stopped
+    volumes:
+      - hermes_web_qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333; printf 'GET /healthz HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; grep -q '200 OK' <&3"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging: *default-logging
+    networks:
+      - hermes-web-net
+
+  obsidian:
+    image: lscr.io/linuxserver/obsidian@sha256:b8a0b2542f9c408f1710368f36c5349ae4dc4e69921d2b145929b16ee2919024
+    container_name: hermes-web-obsidian
+    restart: unless-stopped
+    security_opt:
+      - seccomp=unconfined
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Europe/Minsk}
+      CUSTOM_USER: ${OBSIDIAN_WEB_USER:-hermes}
+      PASSWORD: ${OBSIDIAN_WEB_PASSWORD:?Set OBSIDIAN_WEB_PASSWORD in src/.env}
+    volumes:
+      - ./obsidian:/config
+    ports:
+      - "192.168.0.200:3001:3001"
+      - "127.0.0.1:27124:27124"
+    shm_size: "1gb"
+    healthcheck:
+      test: ["CMD", "curl", "-kfsS", "--max-time", "5", "https://127.0.0.1:27124/"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 90s
+    logging: *default-logging
+    networks:
+      - hermes-web-net
+
+  valkey:
+    image: valkey/valkey:8.1.8-alpine@sha256:94365b275456ae14621001c03556c732b1d93a0cdeacc317d1bdd52eba680885
+    container_name: hermes-web-valkey
+    restart: unless-stopped
+    command: ["valkey-server", "--requirepass", "${VALKEY_PASSWORD:?Set VALKEY_PASSWORD in src/.env}", "--appendonly", "yes"]
+    volumes:
+      - hermes_web_valkey_data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-a", "${VALKEY_PASSWORD:?Set VALKEY_PASSWORD in src/.env}", "--no-auth-warning", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging: *default-logging
+    networks:
+      - hermes-web-net
+
+  gitea:
+    image: gitea/gitea:1.22.6@sha256:538658de667c5d098a274f2f63aa6ec891d88f670cdd5282cf27221ba747dda4
+    container_name: hermes-web-gitea
+    restart: unless-stopped
+    environment:
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__server__DOMAIN: 192.168.0.200
+      GITEA__server__ROOT_URL: http://192.168.0.200:3002/
+      GITEA__server__HTTP_PORT: "3000"
+      GITEA__server__SSH_DOMAIN: 192.168.0.200
+      GITEA__server__DISABLE_SSH: "true"
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__service__DISABLE_REGISTRATION: "true"
+      USER_UID: ${PUID:-1000}
+      USER_GID: ${PGID:-1000}
+    volumes:
+      - hermes_web_gitea_data:/data
+    ports:
+      - "192.168.0.200:3002:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/api/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+    networks:
+      - hermes-web-net
+      - hermes-dev-net
+
+networks:
+  hermes-web-net:
+    name: hermes-web-net
+    driver: bridge
+  # Shared with the hermes-only (Ollama) stack. Externally managed on purpose
+  # -- created once with `docker network create hermes-ollama-net`, never by
+  # compose. It used to point at hermes-only's compose *default* network, but
+  # `docker compose down` deletes a default network while these containers
+  # hold its network *ID*: after a reboot they could not attach at all
+  # ("failed to set up container networking: network <id> not found") and
+  # hermes-web.service failed on boot. An external network is never removed by
+  # compose, so its ID survives any down/up of either stack.
+  hermes-ollama-net:
+    external: true
+    name: hermes-ollama-net
+  # The local model's network (hermes-only stack): --internal, no route out of the host.
+  hermes-llm-net:
+    external: true
+    name: hermes-llm-net
+  hermes-dev-net:
+    name: hermes-dev-net
+    driver: bridge
+    internal: true
+  # backend <-> sandbox-launcher only. Never shared with hermes-dev-net, so
+  # no sandbox can reach the launcher.
+  launcher-net:
+    name: hermes-web-launcher-net
+    driver: bridge
+    internal: true
+  # Real internet egress for dev-runner sandboxes ONLY (npm/pip/apt package
+  # registries) -- no other service ever joins this network, so it grants
+  # reachability to the outside world and nothing else. See dev-runner's own
+  # service comment above.
+  hermes-dev-egress-net:
+    name: hermes-dev-egress-net
+    driver: bridge
+
+volumes:
+  # The same directory as ./data, as a named volume: the launcher mounts only
+  # a fixed subpath of it into each sandbox (Docker volume subpath).
+  hermes_web_data:
+    name: hermes_web_data
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/fast_storage/hermes-web/data
+  hermes_web_qdrant_data:
+  hermes_web_xtts_models:
+  hermes_web_xtts_speakers:
+  backend_model_cache:
+  hermes_web_valkey_data:
+  hermes_web_gitea_data:
+  hermes_web_omniroute_data:
+  hermes_web_qwen3_tts_hf:
+  hermes_web_qwen3_tts_voices:
