@@ -7,8 +7,10 @@ import json
 import logging
 import re
 import sqlite3
+import posixpath
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 from typing import Any, Dict, Optional
 
 from backend.database import DB_PATH
@@ -275,8 +277,9 @@ def create_tool_task(tool_name: str, arguments: Dict[str, Any], chat_id: str) ->
     # The owner's autonomy mode (backend/autonomy_mode.py) may waive the R3/R4
     # approvals; the waiver is recorded as its own evidence event below.
     mode = autonomy_mode.get_mode()
-    supervised_approvals = 1 if risk_class == "R3" else 2 if risk_class == "R4" else 0
-    approvals_required = autonomy_mode.approvals_required(tool_name, risk_class, mode)
+    supervised_approvals = autonomy_mode.approvals_required(tool_name, risk_class, autonomy_mode.SUPERVISED)
+    approvals_required = autonomy_mode.approvals_required(tool_name, risk_class, mode, arguments)
+    rule = matching_rule(tool_name, arguments) if approvals_required < supervised_approvals else None
     auto_approved = approvals_required < supervised_approvals
     status = "awaiting_approval" if approvals_required else "queued"
     safe_arguments = _redact(arguments)
@@ -336,8 +339,10 @@ def create_tool_task(tool_name: str, arguments: Dict[str, Any], chat_id: str) ->
                          "context_sources": provenance()})
         if auto_approved:
             _event(conn, task_id, "auto_approved", f"autonomy:{mode}",
-                   f"Owner approval waived by autonomy mode '{mode}'", risk_class,
-                   metadata={"tool": tool_name, "waived_approvals": supervised_approvals - approvals_required})
+                   f"Owner approval waived by autonomy mode '{mode}'"
+                   + (f" and approval rule #{rule['id']}" if rule else ""), risk_class,
+                   metadata={"tool": tool_name, "waived_approvals": supervised_approvals - approvals_required,
+                             **({"approval_rule": rule["id"]} if rule else {})})
         row = conn.execute("SELECT * FROM workflow_tasks WHERE id = ?", (task_id,)).fetchone()
     return _task_from_row(row)
 
@@ -510,14 +515,15 @@ def approve_task(task_id: str, actor: str = "owner") -> Dict[str, Any]:
             (next_count, next_status, now, task_id),
         )
         _event(conn, task_id, "approval_granted", actor,
-               f"Approval {next_count}/{task['approvals_required']} granted", task["risk_class"])
+               f"Approval {next_count}/{task['approvals_required']} granted", task["risk_class"],
+               metadata=_decision_metadata(conn, task))
     return get_task(task_id) or {}
 
 
 def reject_task(task_id: str, reason: str = "Rejected by owner", actor: str = "owner") -> Dict[str, Any]:
     now = _now()
     with _connect() as conn:
-        row = conn.execute("SELECT risk_class, status FROM workflow_tasks WHERE id = ?", (task_id,)).fetchone()
+        row = conn.execute("SELECT * FROM workflow_tasks WHERE id = ?", (task_id,)).fetchone()
         if not row:
             raise KeyError(task_id)
         if row["status"] not in ("awaiting_approval", "approved", "queued"):
@@ -526,7 +532,8 @@ def reject_task(task_id: str, reason: str = "Rejected by owner", actor: str = "o
             "UPDATE workflow_tasks SET status = 'rejected', error = ?, updated_at = ?, completed_at = ? WHERE id = ?",
             (reason[:1000], now, now, task_id),
         )
-        _event(conn, task_id, "approval_rejected", actor, reason[:500], row["risk_class"])
+        _event(conn, task_id, "approval_rejected", actor, reason[:500], row["risk_class"],
+               metadata=_decision_metadata(conn, _task_from_row(row)))
     return get_task(task_id) or {}
 
 
@@ -619,6 +626,143 @@ def execute_governed_tool(
         logger.exception("Governed tool execution failed for task %s", task["id"])
         finish_task(task["id"], "", str(exc))
         return json.dumps({"error": str(exc), "task_id": task["id"]}, ensure_ascii=False)
+
+
+# ── Decision history and owner-confirmed approval rules ─────────────────────
+# Every approval or rejection records the few argument values a person judges
+# by (who receives it, which site or desktop) next to the context it came from.
+# Repeated identical approvals become a *suggested* rule; only the owner turns
+# a suggestion into a rule, and a rule only ever waives the single approval an
+# R2 action needs in "auto" mode. R3/R4 and money keep their approvals.
+_FEATURE_KEYS = ("recipient", "to", "email", "phone", "chat_id", "client_id", "agent", "runtime",
+                 "desktop", "agent_id", "repo", "channel", "url", "path", "amount", "currency")
+RULE_KEYS = frozenset({"recipient", "to", "email", "phone", "chat_id", "client_id", "agent", "desktop",
+                       "agent_id", "repo", "channel", "domain", "path_dir"})
+SUGGEST_AFTER_APPROVALS = 5
+
+
+def decision_features(arguments: Any) -> Dict[str, str]:
+    """The judgement-relevant values of a tool call, never its free text."""
+    features: Dict[str, str] = {}
+    if not isinstance(arguments, dict):
+        return features
+    for key in _FEATURE_KEYS:
+        value = arguments.get(key)
+        if value is None or isinstance(value, (dict, list)) or not str(value).strip():
+            continue
+        value = str(value).strip()
+        if key == "url":
+            host = (urlsplit(value).hostname or "").lower().rstrip(".")
+            if host:
+                features["domain"] = host[:200]
+        elif key == "path":
+            features["path_dir"] = posixpath.dirname(value)[:200]
+        else:
+            features[key] = value[:200]
+    return features
+
+
+def _decision_metadata(conn: sqlite3.Connection, task: Dict[str, Any]) -> Dict[str, Any]:
+    created = conn.execute(
+        "SELECT metadata FROM workflow_events WHERE task_id = ? AND event_type = 'task_created' ORDER BY id LIMIT 1",
+        (task["id"],),
+    ).fetchone()
+    try:
+        sources = json.loads(created["metadata"]).get("context_sources", []) if created else []
+    except Exception:
+        sources = []
+    return {"tool": task.get("tool_name") or "", "features": decision_features(task.get("tool_arguments")),
+            "context_sources": sources}
+
+
+def decision_history(limit: int = 200) -> list[Dict[str, Any]]:
+    limit = max(1, min(int(limit), 1000))
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT id, task_id, event_type, actor, risk_class, metadata, created_at FROM workflow_events
+               WHERE event_type IN ('approval_granted', 'approval_rejected') ORDER BY id DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    history = []
+    for row in rows:
+        try:
+            metadata = json.loads(row["metadata"] or "{}")
+        except Exception:
+            metadata = {}
+        history.append({"task_id": row["task_id"], "decision": "approved" if row["event_type"] == "approval_granted"
+                        else "rejected", "actor": row["actor"], "risk_class": row["risk_class"],
+                        "tool": metadata.get("tool", ""), "features": metadata.get("features", {}),
+                        "context_sources": metadata.get("context_sources", []), "decided_at": row["created_at"]})
+    return history
+
+
+def list_approval_rules() -> list[Dict[str, Any]]:
+    with _connect() as conn:
+        return [dict(row) for row in conn.execute("SELECT * FROM approval_rules ORDER BY id DESC").fetchall()]
+
+
+def policy_suggestions(limit: int = 1000) -> list[Dict[str, Any]]:
+    """R2 tool + one argument value approved repeatedly and never rejected."""
+    from backend import autonomy_mode
+
+    tallies: Dict[tuple, Dict[str, int]] = {}
+    for decision in decision_history(limit):
+        tool = decision["tool"]
+        if decision["risk_class"] != "R2" or not tool or tool.startswith(autonomy_mode.ALWAYS_CONFIRMED_PREFIXES):
+            continue
+        for key, value in decision["features"].items():
+            if key in RULE_KEYS:
+                tally = tallies.setdefault((tool, key, value), {"approved": 0, "rejected": 0})
+                tally[decision["decision"]] += 1
+    existing = {(r["tool_name"], r["feature_key"], r["feature_value"]) for r in list_approval_rules()}
+    suggestions = [{"tool_name": tool, "feature_key": key, "feature_value": value, **tally}
+                   for (tool, key, value), tally in tallies.items()
+                   if tally["approved"] >= SUGGEST_AFTER_APPROVALS and not tally["rejected"]
+                   and (tool, key, value) not in existing]
+    return sorted(suggestions, key=lambda item: -item["approved"])
+
+
+def create_approval_rule(tool_name: str, feature_key: str, feature_value: str, actor: str = "owner") -> Dict[str, Any]:
+    from backend import autonomy_mode
+
+    if classify_tool_risk(tool_name) != "R2" or tool_name.startswith(autonomy_mode.ALWAYS_CONFIRMED_PREFIXES):
+        raise ValueError("Only R2 actions can be approved by a rule")
+    if feature_key not in RULE_KEYS or not feature_value.strip():
+        raise ValueError("A rule needs one exact recipient, site, desktop or similar value")
+    with _connect() as conn:
+        conn.execute(
+            """INSERT OR IGNORE INTO approval_rules (tool_name, feature_key, feature_value, created_by, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (tool_name, feature_key, feature_value.strip()[:200], actor, _now()),
+        )
+        _event(conn, None, "approval_rule_created", actor, f"{tool_name}: {feature_key}={feature_value[:80]}", "R2",
+               metadata={"tool": tool_name, "feature_key": feature_key})
+        row = conn.execute("SELECT * FROM approval_rules WHERE tool_name = ? AND feature_key = ? AND feature_value = ?",
+                           (tool_name, feature_key, feature_value.strip()[:200])).fetchone()
+    return dict(row)
+
+
+def delete_approval_rule(rule_id: int, actor: str = "owner") -> None:
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM approval_rules WHERE id = ?", (rule_id,)).fetchone()
+        if not row:
+            raise KeyError(rule_id)
+        conn.execute("DELETE FROM approval_rules WHERE id = ?", (rule_id,))
+        _event(conn, None, "approval_rule_deleted", actor, f"{row['tool_name']}: {row['feature_key']}", "R2")
+
+
+def matching_rule(tool_name: str, arguments: Any) -> Optional[Dict[str, Any]]:
+    features = decision_features(arguments)
+    if not features:
+        return None
+    try:
+        with _connect() as conn:
+            for row in conn.execute("SELECT * FROM approval_rules WHERE tool_name = ?", (tool_name,)).fetchall():
+                if features.get(row["feature_key"]) == row["feature_value"]:
+                    return dict(row)
+    except sqlite3.Error:
+        logger.exception("Could not read approval rules; asking the owner")
+    return None
 
 
 def get_summary(limit: int = 100) -> Dict[str, Any]:

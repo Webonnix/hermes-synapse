@@ -19,4 +19,8 @@ describe('workspace navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     expect(signOut).toHaveBeenCalledOnce();
   });
+  it('shows pending approvals on Operations wherever the owner is', () => {
+    render(<AppNavigation language="ru" current={{ tab: 'kanban' }} collapsed={false} overdue={0} unread={0} pendingApprovals={2} onNavigate={vi.fn()} onSignOut={vi.fn()} routerUrl={null} />);
+    expect(screen.getByLabelText('2 ждут подтверждения')).toBeInTheDocument();
+  });
 });

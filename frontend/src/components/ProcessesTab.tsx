@@ -19,6 +19,7 @@ import {
 import type { AgentAutonomyMode, AutonomySummary, ControlPlaneSummary, WorkflowTask } from '../types';
 import { DiffViewer, looksLikeUnifiedDiff } from './DiffViewer';
 import { ApprovalPreview } from './ApprovalPreview';
+import { ApprovalRulesPanel } from './ApprovalRulesPanel';
 
 type Props = { language: 'ru' | 'en'; initialFilter?: 'all' | 'approval' };
 type Filter = 'all' | 'approval' | 'active' | 'finished';
@@ -358,6 +359,8 @@ export function ProcessesTab({ language, initialFilter = 'all' }: Props) {
           </>}
         </aside>
       </div>
+
+      {initialFilter === 'approval' && <ApprovalRulesPanel language={language} />}
 
       <section className="evidence-ledger" aria-labelledby="evidence-title">
         <div className="control-section-head"><div><FileCheck2 size={17} /><h3 id="evidence-title">{copy.evidence}</h3></div><span>{selectedEvents.length}</span></div>

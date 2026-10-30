@@ -21,7 +21,7 @@ import {
   Coins,
 } from 'lucide-react';
 
-import type { AppSettings, ChatMessage, ChatSession, DecisionLog, ActivityLog, SystemConfig, AgentModel, Project } from './types';
+import type { AppSettings, ChatMessage, ChatSession, DecisionLog, ActivityLog, SystemConfig, AgentModel, Project, ControlPlaneSummary } from './types';
 import { styles } from './styles';
 import { translate, normalizeLanguage, type Language } from './i18n';
 import { 
@@ -169,6 +169,8 @@ export default function App() {
    *  the badge has to stay live while the user is on an entirely different
    *  tab, where ClientsTab itself is unmounted. */
   const [overdueTaskCount, setOverdueTaskCount] = useState(0);
+  // One poll feeds both the header's approval counter and the Operations badge.
+  const [controlSummary, setControlSummary] = useState<ControlPlaneSummary | null>(null);
   const inboxUnread = useInboxUnread();
   // The client card (and anything else) can ask to open one conversation; SMM
   // Factory → Диалоги picks the id up from storage when it mounts, or from the
@@ -1385,6 +1387,20 @@ export default function App() {
     };
     load();
     const interval = setInterval(load, 60000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [isAuthenticated, fetchWithAuth]);
+
+  useEffect(() => {
+    if (!isAuthenticated) return undefined;
+    let cancelled = false;
+    const load = () => {
+      fetchWithAuth('/api/control-plane/summary?limit=50')
+        .then(res => (res.ok ? res.json() : null))
+        .then(data => { if (!cancelled && data) setControlSummary(data as ControlPlaneSummary); })
+        .catch(() => {});
+    };
+    load();
+    const interval = setInterval(load, 15000);
     return () => { cancelled = true; clearInterval(interval); };
   }, [isAuthenticated, fetchWithAuth]);
 
@@ -2811,6 +2827,7 @@ export default function App() {
         
         <AppNavigation language={language} current={{ tab: activeTab, section: settingsSection, view: smmView, filter: processesView }}
           collapsed={isSidebarCollapsed} overdue={overdueTaskCount} unread={inboxUnread} routerUrl={routerDashboardUrl}
+          pendingApprovals={controlSummary?.counts?.awaiting_approval || 0}
           onNavigate={destination => {
             if (destination.tab === 'vexa') selectChat('dashboard');
             if (destination.section) setSettingsSection(destination.section);
@@ -3045,6 +3062,7 @@ export default function App() {
         {!vexaImmersive && (
           <AppHeader
             language={language}
+            summary={controlSummary}
             onOpenProcesses={() => { setProcessesView('approval'); setActiveTab('processes'); }}
             onOpenBrowserView={() => setBrowserViewOpen(true)}
           />

@@ -3,21 +3,21 @@ import { activeZone, matchesDestination, UTILITIES, ZONES, type Destination, typ
 import './appNavigation.css';
 
 const ICONS = { vexa: AudioWaveform, agents: Users, work: FolderKanban, clients: Briefcase, content: Factory, operations: ShieldCheck, integrations: Plug, settings: Settings };
-type Props = { language: 'ru' | 'en'; current: Destination; collapsed: boolean; overdue: number; unread: number;
+type Props = { language: 'ru' | 'en'; current: Destination; collapsed: boolean; overdue: number; unread: number; pendingApprovals?: number;
   onNavigate: (destination: Destination) => void; onSignOut: () => void; routerUrl: string | null };
 
-export function AppNavigation({ language, current, collapsed, overdue, unread, onNavigate, onSignOut, routerUrl }: Props) {
+export function AppNavigation({ language, current, collapsed, overdue, unread, pendingApprovals = 0, onNavigate, onSignOut, routerUrl }: Props) {
   const selected = activeZone(current);
   const renderZone = (zone: Zone) => {
     const Icon = ICONS[zone.id as keyof typeof ICONS];
     const active = selected.id === zone.id;
-    const badge = zone.id === 'clients' ? overdue + unread : 0;
+    const badge = zone.id === 'clients' ? overdue + unread : zone.id === 'operations' ? pendingApprovals : 0;
     return <div key={zone.id} className={`nav-zone${active ? ' is-active' : ''}`}>
       <button type="button" className="nav-zone-button" title={zone[language]}
         aria-current={active ? 'page' : undefined} aria-expanded={zone.pages.length ? active : undefined}
         onClick={() => onNavigate(zone.home)}>
         <Icon size={18} /><span>{zone[language]}</span>
-        {badge > 0 && !collapsed && <small>{badge}</small>}
+        {badge > 0 && !collapsed && <small aria-label={zone.id === 'operations' ? (language === 'ru' ? `${badge} ждут подтверждения` : `${badge} awaiting approval`) : undefined}>{badge}</small>}
         {!!zone.pages.length && !collapsed && <ChevronDown size={13} className="nav-zone-chevron" />}
       </button>
       {active && !collapsed && zone.pages.length > 0 && <div className="nav-zone-pages" aria-label={zone[language]}>

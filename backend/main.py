@@ -2014,6 +2014,49 @@ async def resume_control_plane_api(action: ControlPlaneAction):
     state = set_kill_switch(False, action.reason or "Resumed by owner", actor="owner:web")
     return {"status": "running", "state": state}
 
+
+class ApprovalRuleRequest(BaseModel):
+    tool_name: str = Field(..., max_length=120)
+    feature_key: str = Field(..., max_length=40)
+    feature_value: str = Field(..., max_length=200)
+
+
+@app.get("/api/control-plane/decisions")
+async def control_plane_decisions_api(limit: int = 200):
+    from backend.control_plane import decision_history
+    return {"decisions": await asyncio.to_thread(decision_history, limit)}
+
+
+@app.get("/api/control-plane/approval-rules")
+async def control_plane_rules_api():
+    from backend.control_plane import list_approval_rules, policy_suggestions
+    rules, suggestions = await asyncio.gather(asyncio.to_thread(list_approval_rules),
+                                              asyncio.to_thread(policy_suggestions))
+    return {"rules": rules, "suggestions": suggestions}
+
+
+@app.post("/api/control-plane/approval-rules")
+async def create_control_plane_rule_api(rule: ApprovalRuleRequest, request: Request):
+    # A rule stops future approvals, so it needs a recent sign-in like a mode change.
+    from backend.auth_http import require_recent_auth
+    from backend.control_plane import create_approval_rule
+    await asyncio.to_thread(require_recent_auth, request)
+    try:
+        return await asyncio.to_thread(create_approval_rule, rule.tool_name, rule.feature_key, rule.feature_value,
+                                       "owner:web")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@app.delete("/api/control-plane/approval-rules/{rule_id}")
+async def delete_control_plane_rule_api(rule_id: int):
+    from backend.control_plane import delete_approval_rule
+    try:
+        await asyncio.to_thread(delete_approval_rule, rule_id, "owner:web")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    return {"status": "deleted"}
+
 @app.post("/api/subagents/positions")
 async def update_subagent_positions_api(update: SubagentPositionsUpdate):
     from backend.database import DB_PATH

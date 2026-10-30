@@ -82,14 +82,22 @@ def is_sensitive(tool_name: str, risk_class: str) -> bool:
     return False
 
 
-def approvals_required(tool_name: str, risk_class: str, mode: str | None = None) -> int:
-    """Owner approvals a new tool task needs under ``mode`` (default: the stored one)."""
+def approvals_required(tool_name: str, risk_class: str, mode: str | None = None,
+                       arguments: dict | None = None) -> int:
+    """Owner approvals a new tool task needs under ``mode`` (default: the stored one).
+
+    In ``auto``, an owner-confirmed rule for this exact R2 tool and argument value
+    (control_plane.create_approval_rule) waives its one approval. Nothing else does."""
     from backend.context_trust import approval_floor
     base = max(_BASE_APPROVALS.get(risk_class, 0 if risk_class in ("R0", "R1", "R2") else 2),
                approval_floor(tool_name, risk_class))
     if not base or tool_name.startswith(ALWAYS_CONFIRMED_PREFIXES):
         return base
     mode = mode or get_mode()
+    if mode == AUTO and risk_class == "R2" and arguments is not None:
+        from backend.control_plane import matching_rule
+        if matching_rule(tool_name, arguments):
+            return 0
     return base
 
 

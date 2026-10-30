@@ -853,6 +853,19 @@ def _init_sqlite_schema():
         CREATE INDEX IF NOT EXISTS idx_workflow_events_task
         ON workflow_events (task_id, id DESC)
     """)
+    # Owner-confirmed approval rules (backend/control_plane.py): one R2 tool and
+    # one exact argument value the owner approved often enough to stop asking.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS approval_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tool_name TEXT NOT NULL,
+            feature_key TEXT NOT NULL,
+            feature_value TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE (tool_name, feature_key, feature_value)
+        )
+    """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS control_plane_state (
             id INTEGER PRIMARY KEY CHECK (id = 1),
