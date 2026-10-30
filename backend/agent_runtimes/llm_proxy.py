@@ -89,8 +89,13 @@ def _external_patterns() -> List[str]:
 
 
 def _router() -> tuple[str, str]:
-    return (os.getenv("ROUTER_API_BASE", "http://omniroute:20128").rstrip("/"),
-            os.getenv("ROUTER_API_KEY", ""))
+    """OmniRoute's base URL and key. The key is normally saved from the
+    dashboard (api_keys table), not in the environment — the same order
+    omniroute_mcp.py uses."""
+    from backend import database as db
+
+    key = (db.get_api_key("ROUTER_API_KEY") or os.getenv("ROUTER_API_KEY", "")).strip()
+    return os.getenv("ROUTER_API_BASE", "http://omniroute:20128").rstrip("/"), key
 
 
 def _error(status: int, message: str, code: str) -> JSONResponse:
@@ -136,7 +141,10 @@ async def external_models(refresh: bool = False) -> Optional[List[str]]:
     if not refresh and _catalog["ids"] is not None and now - _catalog["at"] < CATALOG_TTL_S:
         ids = _catalog["ids"]
     else:
-        base, api_key = _router()
+        base, api_key = await asyncio.to_thread(_router)
+        if not api_key:
+            logger.warning("agent-llm: no OmniRoute key (ROUTER_API_KEY); OmniRoute models unavailable")
+            return None
         try:
             async with _http_client() as client:
                 response = await client.get(f"{base}/v1/models", headers={"Authorization": f"Bearer {api_key}"},
@@ -243,7 +251,7 @@ async def _target(key: str, requested: str) -> tuple[Optional[_Target], Optional
         refusal = await asyncio.to_thread(_budget_refusal, key)
         if refusal:
             return None, _error(429, refusal, "budget_exceeded")
-        base, api_key = _router()
+        base, api_key = await asyncio.to_thread(_router)
         return _Target(f"{base}/v1/chat/completions",
                        {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
                        upstream_model, False,

@@ -320,3 +320,31 @@ async def test_unreachable_router_refuses_instead_of_guessing(env, monkeypatch, 
         response = await client.post("/agent-llm/v1/chat/completions",
                                      json={**_body(), "model": "omniroute/ds/deepseek-flash"}, headers=_auth())
     assert response.status_code == 503
+
+
+async def test_router_key_comes_from_the_dashboard_store_first(env, monkeypatch, usage_db):
+    from backend import database
+
+    monkeypatch.setenv("AGENT_LLM_EXTERNAL_ENABLED", "true")
+    router = Router(monkeypatch)
+    monkeypatch.setenv("ROUTER_API_KEY", "")
+    monkeypatch.setattr(database, "get_api_key", lambda name: "stored-key" if name == "ROUTER_API_KEY" else None)
+    async with _client() as client:
+        await client.post("/agent-llm/v1/chat/completions",
+                          json={**_body(), "model": "omniroute/ds/deepseek-flash"}, headers=_auth())
+    assert router.requests[0][0].headers["authorization"] == "Bearer stored-key"
+
+
+async def test_without_a_router_key_only_the_local_model_is_offered(env, monkeypatch, usage_db):
+    from backend import database
+
+    monkeypatch.setenv("AGENT_LLM_EXTERNAL_ENABLED", "true")
+    router = Router(monkeypatch)
+    monkeypatch.setenv("ROUTER_API_KEY", "")
+    monkeypatch.setattr(database, "get_api_key", lambda name: None)
+    async with _client() as client:
+        models = (await client.get("/agent-llm/v1/models", headers=_auth())).json()
+        call = await client.post("/agent-llm/v1/chat/completions",
+                                 json={**_body(), "model": "omniroute/ds/deepseek-flash"}, headers=_auth())
+    assert [m["id"] for m in models["data"]] == [MODEL]
+    assert call.status_code == 503 and router.catalog_calls == 0
