@@ -175,7 +175,7 @@ describe('branches, settings and export', () => {
     const put = calls.find(c => c.init?.method === 'PUT');
     expect(put?.url).toBe('/api/history/chat_a/settings');
     expect(JSON.parse(String(put?.init?.body))).toMatchObject({
-      system_prompt: 'Только по-английски', temperature: 0.2, top_p: null, max_tokens: null, think: null, ephemeral: false, uncensored: false,
+      system_prompt: 'Только по-английски', temperature: 0.2, top_p: null, max_tokens: null, think: null, ephemeral: false,
     });
   });
 

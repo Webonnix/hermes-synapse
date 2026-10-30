@@ -32,7 +32,8 @@ const pipelineSummary = {
 };
 
 const today = new Date();
-const iso = (d: Date) => d.toISOString().slice(0, 10);
+// Local calendar date: toISOString() is UTC and lands on yesterday after local midnight east of Greenwich.
+const iso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const plusDT = (days: number, hhmm: string) => {
   const d = new Date(today);
   d.setDate(d.getDate() + days);

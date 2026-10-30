@@ -31,7 +31,7 @@ describe('App Component', () => {
 
   it('renders login screen when unauthenticated', async () => {
     render(<App />);
-    expect(screen.getByText('HERMES')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'VEXA' })).toBeInTheDocument();
     expect(screen.getByText('Secure Access Link')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /request code in telegram/i })).toBeInTheDocument();
   });
@@ -43,7 +43,7 @@ describe('App Component', () => {
 
     render(<App />);
 
-    expect(screen.getByText('HERMES')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'VEXA' })).toBeInTheDocument();
     await new Promise(resolve => setTimeout(resolve, 1100));
     expect(fetchMock).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: /request code in telegram/i })).toBeInTheDocument();

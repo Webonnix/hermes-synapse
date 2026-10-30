@@ -103,7 +103,13 @@ async def test_a_twilio_media_stream_runs_a_whole_call(phone_env):
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline and len(phone_env["agent_calls"]) < 1:
         await asyncio.sleep(0.02)
-    await asyncio.sleep(0.1)
+    # A turn is counted once its reply finished playing: wait for the outgoing
+    # audio to go quiet rather than a fixed pause that loses the race on slow runs.
+    sent, quiet_since = len(ws.sent), time.monotonic()
+    while time.monotonic() < deadline + 3 and time.monotonic() - quiet_since < 0.3:
+        await asyncio.sleep(0.02)
+        if len(ws.sent) != sent:
+            sent, quiet_since = len(ws.sent), time.monotonic()
     ws.push({"event": "stop"})
     await asyncio.wait_for(task, 5)
 

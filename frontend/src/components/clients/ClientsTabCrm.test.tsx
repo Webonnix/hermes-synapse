@@ -375,7 +375,8 @@ describe('ClientsTab — calendar', () => {
     render(<ClientsTab />);
     fireEvent.click(await screen.findByRole('button', { name: 'Календарь' }));
 
-    const todayIso = new Date().toISOString().slice(0, 10);
+    const now = new Date();
+    const todayIso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
     const input = await screen.findByPlaceholderText('Добавить задачу на этот день…');
     fireEvent.change(input, { target: { value: 'Подготовить материалы' } });
     fireEvent.keyDown(input, { key: 'Enter' });
