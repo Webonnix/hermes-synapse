@@ -1,3 +1,6 @@
+# Never name the nginx version in headers or error pages (http context: this file is in conf.d).
+server_tokens off;
+
 # Log route paths, never query credentials or public share capabilities.
 map $uri $hermes_log_uri { default $uri; ~^/share/ "/share/[redacted]"; }
 log_format hermes_safe '$remote_addr $request_method $hermes_log_uri $status $body_bytes_sent';

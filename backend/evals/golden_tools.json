@@ -1,0 +1,12 @@
+[
+  {"message": "Какая сейчас погода в Тель-Авиве?", "expect": ["get_weather"]},
+  {"message": "Поставь таймер на 10 минут", "expect": ["set_timer"]},
+  {"message": "Что у меня в календаре на завтра?", "expect": ["get_calendar_events"]},
+  {"message": "Добавь в календарь встречу с Олегом в пятницу в 11:00", "expect": ["add_calendar_event"]},
+  {"message": "Найди в интернете последние новости про gVisor", "expect": ["web_search"]},
+  {"message": "Сколько сейчас стоит ETH?", "expect": ["get_market_prices"]},
+  {"message": "Напомни мне каждый понедельник в 9 утра проверить отчёты", "expect": ["set_recurring_reminder"]},
+  {"message": "Сколько свободно памяти на сервере?", "expect": ["get_system_stats"]},
+  {"message": "Привет! Как дела?", "expect": []},
+  {"message": "Объясни разницу между TCP и UDP", "expect": []}
+]

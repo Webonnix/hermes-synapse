@@ -33,7 +33,7 @@ jobs:
           VALKEY_PORT: '1'
           OPENROUTER_API_KEY: mock-key
           TELEGRAM_BOT_TOKEN: ''
-        run: backend/.venv/bin/python -m pytest backend/tests/test_auth_security.py backend/tests/test_auth_http.py backend/tests/test_auth_surface.py backend/tests/test_auth_sessions.py backend/tests/test_control_plane.py backend/tests/test_privacy_gateway.py backend/tests/test_agent_llm_proxy.py backend/tests/test_sandbox_launcher.py backend/tests/test_websocket_routing.py -q
+        run: backend/.venv/bin/python -m pytest backend/tests/test_auth_security.py backend/tests/test_auth_http.py backend/tests/test_auth_surface.py backend/tests/test_auth_sessions.py backend/tests/test_control_plane.py backend/tests/test_privacy_gateway.py backend/tests/test_agent_llm_proxy.py backend/tests/test_sandbox_launcher.py backend/tests/test_websocket_routing.py backend/tests/test_prompt_injection_gate.py backend/tests/test_approval_rules.py -q
   codeql:
     runs-on: ubuntu-latest
     permissions:
