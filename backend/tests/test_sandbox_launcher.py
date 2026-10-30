@@ -182,3 +182,20 @@ async def test_logs_and_input_only_for_owned_sandboxes(broker):
     for method, path in [("GET", "/containers/vexa-backend/logs?stdout=1"), ("POST", "/containers/vexa-backend/kill"),
                          ("POST", "/hermes/earner/vexa-backend/stdin")]:
         assert (await client.request(method, path)).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_refusals_carry_the_docker_message_field(broker):
+    client, _ = broker
+    response = await client.post("/networks/create")
+    assert response.status_code == 403 and response.json()["message"]
+
+
+@pytest.mark.asyncio
+async def test_networks_are_approved_by_name_or_id(monkeypatch):
+    async def docker(method, path, **kwargs):
+        if path.startswith("/containers/"):
+            return httpx.Response(200, json={"Id": "r", "NetworkSettings": {"Networks": {"hermes-dev-net": {}}}})
+        return httpx.Response(200, json={"Id": "abc123", "Labels": {"com.docker.compose.network": "dev-net"}})
+    monkeypatch.setattr(launcher, "docker", docker)
+    assert await launcher.allowed_networks() == {"hermes-dev-net", "abc123"}

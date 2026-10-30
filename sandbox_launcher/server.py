@@ -18,6 +18,12 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@app.exception_handler(HTTPException)
+async def docker_style_error(_request: Request, exc: HTTPException) -> JSONResponse:
+    # The Docker SDK reads "message"; FastAPI's own clients read "detail".
+    return JSONResponse({"message": str(exc.detail), "detail": exc.detail}, status_code=exc.status_code)
 MARKER = "hermes.launcher"
 DATA_ROOT = Path("/data")
 VOLUME = os.getenv("SANDBOX_DATA_VOLUME", "hermes-data")
@@ -106,7 +112,8 @@ async def allowed_networks() -> set[str]:
             label = network.get("Labels", {}).get("com.docker.compose.network")
             # No inferred fallback to the backend or daemon-control network.
             if label in NETWORK_LABELS:
-                allowed.add(name)
+                # docker-py addresses a network by name or by id; both name the same one.
+                allowed.update({name, network.get("Id", name)})
     if not allowed:
         raise HTTPException(503, "Sandbox networks unavailable")
     return allowed
