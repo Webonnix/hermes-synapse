@@ -530,3 +530,133 @@ def test_opencode_must_ask_for_every_tool_including_mcp(monkeypatch, tmp_path, n
     assert config["permission"]["*"] == "ask"
     assert all(value in ("ask", "allow") for value in config["permission"].values())
     assert config["permission"].get("bash", "ask") == "ask" and config["permission"].get("edit", "ask") == "ask"
+
+
+# ── desktop kinds: OpenBot ──────────────────────────────────────────────────
+
+def test_openbot_desktops_need_their_own_switch(monkeypatch, tmp_path):
+    client = _docker(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENBOT_DESKTOPS_ENABLED", "false")
+    with pytest.raises(desktop.DesktopUnavailable):
+        desktop._blocking_ensure("bot", "openbot")
+    client.containers.create.assert_not_called()
+
+
+def test_openbot_desktop_gets_its_image_data_mount_and_the_same_isolation(monkeypatch, tmp_path):
+    client = _docker(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENBOT_DESKTOPS_ENABLED", "true")
+    owners = []
+    monkeypatch.setattr(desktop.subprocess, "run", lambda argv, **k: owners.append(argv[2]))
+    desktop._blocking_ensure("bot", "openbot")
+    kwargs = client.containers.create.call_args.kwargs
+    assert client.containers.create.call_args.args[0] == "hermes-openbot-desktop:local"
+    assert kwargs["labels"]["hermes.agent-desktop.kind"] == "openbot"
+    assert kwargs["volumes"]["/srv/desktops/bot/home"] == {"bind": "/data", "mode": "rw"}
+    assert kwargs["tmpfs"]["/run/openbot"].endswith("uid=1000,gid=1000,mode=0700")
+    assert kwargs["environment"]["AGENT_DESKTOP_VNC_PORTS"] == "5900,5901"
+    assert "OPENCODE_CONFIG" not in kwargs["environment"]
+    # Isolation is not a per-kind setting.
+    assert kwargs["runtime"] == "runsc" and kwargs["read_only"] is True and kwargs["cap_drop"] == ["ALL"]
+    assert kwargs["extra_hosts"] == {"hermes-backend": "172.23.0.4"}
+    assert owners == ["1000:1000"]
+    note = tmp_path / "bot" / "home" / "HERMES-MODEL.json"
+    assert json.loads(note.read_text())["api_key"] == desktop.llm_token("bot")
+    assert oct(note.stat().st_mode & 0o777) == "0o600"
+    assert desktop.recorded_kind("bot") == "openbot"
+
+
+def test_a_desktop_keeps_its_kind(monkeypatch, tmp_path):
+    client = _docker(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENBOT_DESKTOPS_ENABLED", "true")
+    desktop._blocking_ensure("bot", "openbot")
+    with pytest.raises(desktop.DesktopUnavailable):
+        desktop._blocking_ensure("bot", "agent")
+    client.containers.create.reset_mock()
+    desktop._blocking_ensure("bot")  # no kind given: the recorded one
+    assert client.containers.create.call_args.kwargs["labels"]["hermes.agent-desktop.kind"] == "openbot"
+
+
+def test_recreating_a_running_openbot_desktop_stops_it_gracefully_first(monkeypatch, tmp_path):
+    running = MagicMock(status="running", labels={"hermes.agent-desktop.kind": "openbot"},
+                        attrs={"HostConfig": {"ExtraHosts": ["hermes-backend:172.23.0.9"]}})
+    _docker(monkeypatch, tmp_path, existing=running)
+    monkeypatch.setenv("OPENBOT_DESKTOPS_ENABLED", "true")
+    desktop._record_kind("alice", "openbot")
+    desktop._blocking_ensure("alice")
+    running.stop.assert_called_once_with(timeout=60)
+    running.remove.assert_called_once_with(force=True)
+
+
+def test_opencode_is_offered_the_allowed_omniroute_models(monkeypatch, tmp_path):
+    _docker(monkeypatch, tmp_path)
+    desktop._blocking_ensure("alice", None, ["ds/deepseek-flash"])
+    config = json.loads((tmp_path / "alice" / "home" / ".config" / "hermes" / "opencode.json").read_text())
+    models = config["provider"]["hermes"]["models"]
+    assert set(models) == {"qwen-local", "omniroute/ds/deepseek-flash"}
+    assert config["model"] == "hermes/qwen-local"  # the local model stays the default
+
+
+def test_api_starts_a_kind_and_refuses_turns_in_an_openbot_desktop(api_client, monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_DESKTOPS_ENABLED", "true")
+    monkeypatch.setenv("AGENT_DESKTOP_ROOT", str(tmp_path))
+    monkeypatch.setenv("AGENT_DESKTOP_TOKEN_SECRET", "s3cret")
+    seen = {}
+
+    async def ensure(key, kind=None):
+        seen["kind"] = kind
+        desktop._record_kind(key, kind or "agent")
+        return {"status": "ok"}
+
+    monkeypatch.setattr(desktop, "ensure_desktop", ensure)
+    owner = {"Authorization": "Bearer owner-token"}
+    started = api_client.post("/api/agent-desktops/bot/start", json={"kind": "openbot"}, headers=owner)
+    assert started.status_code == 200 and started.json()["kind"] == "openbot" and seen["kind"] == "openbot"
+    assert api_client.post("/api/agent-desktops/x/start", json={"kind": "vm"}, headers=owner).status_code == 422
+    turn = api_client.post("/api/agent-desktops/bot/turns", json={"runtime": "grok", "text": "hi"}, headers=owner)
+    assert turn.status_code == 422
+    access = api_client.get("/api/agent-desktops/bot/model-access", headers=owner).json()
+    assert access["base_url"] == "http://hermes-backend:8000/agent-llm/v1"
+    assert access["api_key"] == desktop.llm_token("bot") and access["models"][0] == access["model"]
+
+
+@pytest.mark.parametrize("screen", ["1", "9", "x"])
+def test_vnc_screens_are_limited_to_the_desktops_kind(api_client, monkeypatch, tmp_path, screen):
+    from starlette.websockets import WebSocketDisconnect
+
+    monkeypatch.setenv("AGENT_DESKTOPS_ENABLED", "true")
+    monkeypatch.setenv("AGENT_DESKTOP_ROOT", str(tmp_path))
+    monkeypatch.setenv("AGENT_DESKTOP_TOKEN_SECRET", "s3cret")
+    connected = []
+
+    async def fake_connect(url, headers):
+        connected.append(url)
+        raise ConnectionError("no desktop in tests")
+
+    monkeypatch.setattr(desktop, "_ws_connect", fake_connect)
+    desktop._record_kind("alice", "agent")  # one screen
+    with pytest.raises(WebSocketDisconnect):
+        with api_client.websocket_connect("/api/agent-desktops/alice/vnc?screen=" + screen,
+                                          subprotocols=["hermes-vnc", "hermes-auth.owner-token"]) as ws:
+            ws.receive_bytes()
+    assert connected == []  # refused before reaching any desktop
+
+
+def test_openbot_desktop_second_screen_reaches_its_bridge(api_client, monkeypatch, tmp_path):
+    from starlette.websockets import WebSocketDisconnect
+
+    monkeypatch.setenv("AGENT_DESKTOPS_ENABLED", "true")
+    monkeypatch.setenv("AGENT_DESKTOP_ROOT", str(tmp_path))
+    monkeypatch.setenv("AGENT_DESKTOP_TOKEN_SECRET", "s3cret")
+    connected = []
+
+    async def fake_connect(url, headers):
+        connected.append(url)
+        raise ConnectionError("no desktop in tests")
+
+    monkeypatch.setattr(desktop, "_ws_connect", fake_connect)
+    desktop._record_kind("bot", "openbot")
+    with pytest.raises(WebSocketDisconnect):
+        with api_client.websocket_connect("/api/agent-desktops/bot/vnc?screen=1",
+                                          subprotocols=["hermes-vnc", "hermes-auth.owner-token"]) as ws:
+            ws.receive_bytes()
+    assert connected == ["ws://hermes-agent-desktop-bot:8900/vnc?screen=1"]

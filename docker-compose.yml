@@ -68,6 +68,13 @@ services:
       - AGENT_DESKTOP_HOST_ROOT=${AGENT_DESKTOP_HOST_ROOT:-${PWD}/backend/data/agent-desktops}
       - AGENT_DESKTOP_RUNTIME=${AGENT_DESKTOP_RUNTIME:-runsc}
       - AGENT_DESKTOP_MAX_CONCURRENT=${AGENT_DESKTOP_MAX_CONCURRENT:-4}
+      # OpenBot as a desktop kind (docs/agent-desktops-openbot.md) and OmniRoute
+      # models for desktops — both off unless enabled.
+      - OPENBOT_DESKTOPS_ENABLED=${OPENBOT_DESKTOPS_ENABLED:-false}
+      - AGENT_LLM_EXTERNAL_ENABLED=${AGENT_LLM_EXTERNAL_ENABLED:-false}
+      - AGENT_LLM_EXTERNAL_MODELS=${AGENT_LLM_EXTERNAL_MODELS:-*}
+      - AGENT_LLM_EXTERNAL_DAILY_USD=${AGENT_LLM_EXTERNAL_DAILY_USD:-5}
+      - AGENT_LLM_EXTERNAL_DAILY_REQUESTS=${AGENT_LLM_EXTERNAL_DAILY_REQUESTS:-500}
       - DEV_SANDBOX_MAX_CONCURRENT=${DEV_SANDBOX_MAX_CONCURRENT:-3}
       # Picked up automatically by docker.from_env() in dev_sandbox.py — routes
       # Docker API calls through the access-controlled proxy below instead of
@@ -187,6 +194,16 @@ services:
       context: .
       dockerfile: agent_desktop/Dockerfile
     image: hermes-agent-desktop:local
+    profiles: ["build-only"]
+
+  # OpenBot desktop image: the upstream OpenBot server image (pinned by digest in
+  # openbot_desktop/Dockerfile) plus VNC, a terminal and the desktop bridge.
+  #   docker compose build openbot-desktop
+  openbot-desktop:
+    build:
+      context: .
+      dockerfile: openbot_desktop/Dockerfile
+    image: hermes-openbot-desktop:local
     profiles: ["build-only"]
 
   # One multilingual voice for Vexa: XTTS-v2 reads both Russian and English with

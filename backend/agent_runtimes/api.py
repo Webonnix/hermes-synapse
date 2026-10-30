@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket
 from pydantic import BaseModel, Field
@@ -39,6 +40,10 @@ class CancelPayload(BaseModel):
     runtime: str
 
 
+class StartPayload(BaseModel):
+    kind: Optional[str] = None
+
+
 def _key(key: str) -> str:
     try:
         return desktop._safe_key(key)
@@ -55,8 +60,9 @@ def _require_enabled() -> None:
 async def list_agent_desktops(request: Request):
     permissions.require(request, permissions.AGENT_DESKTOPS_MANAGE)
     runtimes = [{"id": rid, **meta} for rid, meta in RUNTIMES.items()]
+    kinds = [{"id": kind.name, "enabled": kind.enabled(), "screens": kind.screens} for kind in desktop.KINDS.values()]
     if not desktop.enabled():
-        return {"enabled": False, "runtimes": runtimes, "desktops": []}
+        return {"enabled": False, "runtimes": runtimes, "kinds": kinds, "desktops": []}
     try:
         desktops = await desktop.list_desktops()
     except Exception as exc:
@@ -65,19 +71,39 @@ async def list_agent_desktops(request: Request):
     for item in desktops:
         item["busy"] = manager.busy(item["key"])
         item["llm_usage"] = llm_proxy.usage_by_desktop.get(item["key"])
-    return {"enabled": True, "runtimes": runtimes, "desktops": desktops}
+    return {"enabled": True, "runtimes": runtimes, "kinds": kinds, "desktops": desktops,
+            "external_models": llm_proxy.external_enabled()}
 
 
 @router.post("/api/agent-desktops/{key}/start")
-async def start_agent_desktop(key: str, request: Request):
+async def start_agent_desktop(key: str, request: Request, payload: Optional[StartPayload] = None):
+    permissions.require(request, permissions.AGENT_DESKTOPS_MANAGE)
+    key = _key(key)
+    _require_enabled()
+    kind = payload.kind if payload else None
+    if kind is not None and kind not in desktop.KINDS:
+        raise HTTPException(status_code=422, detail=f"Unknown desktop kind: {kind}")
+    try:
+        health = await desktop.ensure_desktop(key, kind)
+    except desktop.DesktopUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return {"key": key, "kind": desktop.recorded_kind(key), "health": health}
+
+
+@router.get("/api/agent-desktops/{key}/model-access")
+async def agent_desktop_model_access(key: str, request: Request):
+    """What to type into an agent's own settings (OpenBot's custom provider)
+    to reach the models through llm_proxy — the desktop's own credential."""
     permissions.require(request, permissions.AGENT_DESKTOPS_MANAGE)
     key = _key(key)
     _require_enabled()
     try:
-        health = await desktop.ensure_desktop(key)
+        access = desktop.model_access(key)
     except desktop.DesktopUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc))
-    return {"key": key, "health": health}
+    external = await llm_proxy.external_models() or []
+    access["models"] = [access["model"]] + [f"{llm_proxy.EXTERNAL_PREFIX}{model}" for model in external]
+    return {"key": key, **access}
 
 
 @router.post("/api/agent-desktops/{key}/stop")
@@ -101,6 +127,8 @@ async def start_agent_turn(key: str, payload: TurnPayload, request: Request):
     permissions.require(request, permissions.AGENT_DESKTOPS_MANAGE)
     key = _key(key)
     _require_enabled()
+    if desktop.recorded_kind(key) == desktop.OPENBOT:
+        raise HTTPException(status_code=422, detail="An OpenBot desktop is driven from OpenBot itself, not from here.")
     try:
         run_id = manager.start_turn(key, payload.runtime, payload.text)
     except ValueError as exc:
@@ -141,9 +169,13 @@ async def agent_desktop_vnc(websocket: WebSocket, key: str):
     if not _ws_allowed(websocket) or not desktop.enabled():
         await websocket.close(code=1008)
         return
+    screen = websocket.query_params.get("screen", "0")
     try:
         key = desktop._safe_key(key)
-        upstream = await desktop._ws_connect(desktop.ws_url(key, "/vnc"),
+        kind = desktop.KINDS[desktop.recorded_kind(key) or desktop.AGENT]
+        if not screen.isdigit() or int(screen) >= kind.screens:
+            raise ValueError("unknown screen")
+        upstream = await desktop._ws_connect(desktop.ws_url(key, f"/vnc?screen={int(screen)}"),
                                              {"Authorization": f"Bearer {desktop.desktop_token(key)}"})
     except Exception as exc:
         logger.info("Agent desktop VNC for %s unavailable: %s", key, type(exc).__name__)

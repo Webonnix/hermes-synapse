@@ -98,7 +98,7 @@ describe('AgentDesktopsTab', () => {
     render(<AgentDesktopsTab language="ru" />);
     expect(await screen.findByText('open the site')).toBeInTheDocument();
     await waitFor(() => expect(rfbInstances).toHaveLength(1));
-    expect(rfbInstances[0].url).toMatch(/\/api\/agent-desktops\/alice\/vnc$/);
+    expect(rfbInstances[0].url).toMatch(/\/api\/agent-desktops\/alice\/vnc\?screen=0$/);
     expect(rfbInstances[0].options).toMatchObject({ wsProtocols: ['hermes-vnc', 'hermes-auth.tok'] });
     expect(rfbInstances[0].viewOnly).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: /Управлять/ }));
@@ -130,5 +130,45 @@ describe('AgentDesktopsTab', () => {
     fireEvent.click(screen.getByRole('button', { name: /Start/ }));
     expect(await screen.findByRole('alert')).toHaveTextContent(/lowercase/);
     expect(calls.some(c => c.init?.method === 'POST')).toBe(false);
+  });
+
+  it('creates an OpenBot desktop when that kind is chosen', async () => {
+    const calls = mockApi({
+      'GET /api/agent-desktops': { enabled: true, runtimes, desktops: [], kinds: [
+        { id: 'agent', enabled: true, screens: 1 }, { id: 'openbot', enabled: true, screens: 2 }] },
+      'POST /api/agent-desktops/team-bot/start': { key: 'team-bot', kind: 'openbot' },
+    });
+    render(<AgentDesktopsTab language="en" />);
+    await screen.findByText(/No desktops yet/);
+    fireEvent.change(screen.getByLabelText('agent-name'), { target: { value: 'team-bot' } });
+    fireEvent.change(await screen.findByDisplayValue('Agent (Grok / OpenCode)'), { target: { value: 'openbot' } });
+    fireEvent.click(screen.getByRole('button', { name: /Start/ }));
+    await waitFor(() => expect(calls.some(c => c.url.endsWith('/team-bot/start'))).toBe(true));
+    const sent = calls.find(c => c.url.endsWith('/team-bot/start'))!;
+    expect(JSON.parse(String(sent.init?.body))).toEqual({ kind: 'openbot' });
+  });
+
+  it('shows an OpenBot desktop with two screens and how to connect it', async () => {
+    localStorage.setItem('hermes_agent_desktop_selected', 'bot');
+    mockApi({
+      'GET /api/agent-desktops': { enabled: true, runtimes, kinds: [
+        { id: 'agent', enabled: true, screens: 1 }, { id: 'openbot', enabled: true, screens: 2 }],
+        desktops: [{ key: 'bot', name: 'n', status: 'running', busy: [], kind: 'openbot' }] },
+      'GET /api/agent-desktops/bot/events': { events: [] },
+      'GET /api/agent-desktops/bot/model-access': {
+        base_url: 'http://hermes-backend:8000/agent-llm/v1', model: 'qwen-local', api_key: 'bot.secret',
+        models: ['qwen-local', 'omniroute/ds/deepseek-flash'] },
+    });
+    render(<AgentDesktopsTab language="en" />);
+    expect(await screen.findByText('http://hermes-backend:8000/agent-llm/v1')).toBeInTheDocument();
+    // The key is masked until asked for, and no task box is offered.
+    expect(screen.queryByText('bot.secret')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/What should the agent do/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Show' }));
+    expect(screen.getByText('bot.secret')).toBeInTheDocument();
+    expect(screen.getByText('omniroute/ds/deepseek-flash')).toBeInTheDocument();
+    await waitFor(() => expect(rfbInstances).toHaveLength(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Agents screen' }));
+    await waitFor(() => expect(rfbInstances.at(-1)!.url).toMatch(/vnc\?screen=1$/));
   });
 });

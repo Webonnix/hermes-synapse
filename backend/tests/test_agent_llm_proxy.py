@@ -15,6 +15,7 @@ from backend import llm_gate
 from backend.agent_runtimes import desktop, llm_proxy
 
 MODEL = "qwen-local"
+_real_killed = llm_proxy._killed
 
 
 @pytest.fixture()
@@ -25,8 +26,11 @@ def env(monkeypatch):
     monkeypatch.setenv("AGENT_LLM_MAX_TOKENS", "4096")
     monkeypatch.setenv("LLAMACPP_BASE_URL", "http://llama:8080")
     monkeypatch.setenv("LLAMACPP_API_KEY", "upstream-key")
+    monkeypatch.setenv("AGENT_LLM_EXTERNAL_ENABLED", "false")
     monkeypatch.setattr(llm_proxy, "usage_by_desktop", {})
-    monkeypatch.setattr(llm_proxy, "_locks", {})
+    monkeypatch.setattr(llm_proxy, "_slots", {})
+    monkeypatch.setattr(llm_proxy, "_catalog", {"at": 0.0, "ids": None})
+    monkeypatch.setattr(llm_proxy, "_killed", lambda: False)
 
 
 class Upstream:
@@ -152,7 +156,7 @@ async def test_stream_is_relayed_whole_and_frees_the_queue(env, monkeypatch):
     assert upstream.requests[0][1]["stream_options"] == {"include_usage": True}
     assert llm_proxy.usage_by_desktop["alice"]["completion_tokens"] == 2
     assert llm_gate.llamacpp_gate().active == 0
-    assert not llm_proxy._locks["alice"].locked()
+    assert not llm_proxy._slots["alice"].locked()
 
 
 async def test_agents_queue_behind_chat_in_the_shared_gate(env, monkeypatch):
@@ -185,7 +189,7 @@ async def test_one_request_in_flight_per_desktop_and_a_busy_model_answers_503(en
     assert same.status_code == 429
     # bob waited for the single slot alice held, and gave up at the queue timeout.
     assert other.status_code == 503 and other.json()["error"]["code"] == "model_busy"
-    assert not llm_proxy._locks["bob"].locked()
+    assert not llm_proxy._slots["bob"].locked()
 
 
 async def test_upstream_error_passes_through_and_releases(env, monkeypatch):
@@ -195,4 +199,124 @@ async def test_upstream_error_passes_through_and_releases(env, monkeypatch):
         streamed = await client.post("/agent-llm/v1/chat/completions", json=_body(stream=True), headers=_auth())
     assert plain.status_code == 503 and streamed.status_code == 503
     assert llm_gate.llamacpp_gate().active == 0
-    assert not llm_proxy._locks["alice"].locked()
+    assert not llm_proxy._slots["alice"].locked()
+
+
+# ── kill switch and OmniRoute ───────────────────────────────────────────────
+
+async def test_kill_switch_refuses_every_model(env, monkeypatch, tmp_path):
+    from backend import control_plane, database
+
+    db_path = str(tmp_path / "cp.db")
+    monkeypatch.setattr(database, "DB_PATH", db_path)
+    monkeypatch.setattr(control_plane, "DB_PATH", db_path)
+    database.init_db()
+    # The env fixture stubs the kill-switch read; this test needs the real one.
+    monkeypatch.setattr(llm_proxy, "_killed", _real_killed)
+    upstream = Upstream(monkeypatch)
+    control_plane.set_kill_switch(True, "test")
+    async with _client() as client:
+        response = await client.post("/agent-llm/v1/chat/completions", json=_body(), headers=_auth())
+    assert response.status_code == 503 and response.json()["error"]["code"] == "killed"
+    assert not upstream.requests
+
+
+class Router:
+    """Fake OmniRoute (catalogue + completions) beside the fake llama."""
+
+    def __init__(self, monkeypatch, ids=("ds/deepseek-flash", "openai/gpt-x", "gemini/pro")):
+        self.ids = list(ids)
+        self.requests = []
+        self.catalog_calls = 0
+        monkeypatch.setenv("ROUTER_API_BASE", "http://omniroute:20128")
+        monkeypatch.setenv("ROUTER_API_KEY", "router-secret")
+        monkeypatch.setattr(llm_proxy, "_http_client",
+                            lambda: httpx.AsyncClient(transport=httpx.MockTransport(self.handle)))
+
+    async def handle(self, request):
+        if request.url.path == "/v1/models":
+            self.catalog_calls += 1
+            return httpx.Response(200, json={"data": [{"id": i} for i in self.ids]})
+        body = json.loads(request.content)
+        self.requests.append((request, body))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "from router"}}],
+                                         "usage": {"prompt_tokens": 1000, "completion_tokens": 500}})
+
+
+@pytest.fixture()
+def usage_db(tmp_path, monkeypatch):
+    from backend import database, router_usage
+
+    db_path = str(tmp_path / "usage.db")
+    monkeypatch.setattr(database, "DB_PATH", db_path)
+    monkeypatch.setattr(router_usage, "DB_PATH", db_path)
+    return db_path
+
+
+async def test_omniroute_models_are_hidden_until_the_owner_enables_them(env, monkeypatch, usage_db):
+    router = Router(monkeypatch)
+    async with _client() as client:
+        models = (await client.get("/agent-llm/v1/models", headers=_auth())).json()
+        call = await client.post("/agent-llm/v1/chat/completions",
+                                 json={**_body(), "model": "omniroute/ds/deepseek-flash"}, headers=_auth())
+    assert [m["id"] for m in models["data"]] == [MODEL]
+    assert call.status_code == 404 and not router.requests and router.catalog_calls == 0
+
+
+async def test_enabled_omniroute_models_are_listed_routed_and_logged(env, monkeypatch, usage_db):
+    from backend import router_usage
+
+    monkeypatch.setenv("AGENT_LLM_EXTERNAL_ENABLED", "true")
+    monkeypatch.setenv("AGENT_LLM_EXTERNAL_MODELS", "ds/*,gemini/*")
+    router = Router(monkeypatch)
+    async with _client() as client:
+        models = (await client.get("/agent-llm/v1/models", headers=_auth())).json()
+        ok = await client.post("/agent-llm/v1/chat/completions",
+                               json={**_body(), "model": "omniroute/ds/deepseek-flash"}, headers=_auth())
+        blocked = await client.post("/agent-llm/v1/chat/completions",
+                                    json={**_body(), "model": "omniroute/openai/gpt-x"}, headers=_auth())
+    ids = [m["id"] for m in models["data"]]
+    assert ids == [MODEL, "omniroute/ds/deepseek-flash", "omniroute/gemini/pro"]
+    assert ok.json()["choices"][0]["message"]["content"] == "from router"
+    assert blocked.status_code == 404
+    request, body = router.requests[0]
+    # The router gets its own model id and key; the desktop token stays here.
+    assert body["model"] == "ds/deepseek-flash" and request.headers["authorization"] == "Bearer router-secret"
+    assert str(request.url) == "http://omniroute:20128/v1/chat/completions"
+    # The GPU queue is for the local model only.
+    assert llm_gate.llamacpp_gate().active == 0
+    with router_usage._connect() as connection:
+        rows = connection.execute("SELECT tier_label, kind, input_tokens, output_tokens FROM router_usage_log").fetchall()
+    assert [tuple(r) for r in rows] == [("agent-desktop:alice", "agent_desktop", 1000, 500)]
+    assert router.catalog_calls == 1  # cached between the listing and the calls
+
+
+async def test_daily_request_budget_stops_omniroute_but_not_the_local_model(env, monkeypatch, usage_db):
+    monkeypatch.setenv("AGENT_LLM_EXTERNAL_ENABLED", "true")
+    monkeypatch.setenv("AGENT_LLM_EXTERNAL_DAILY_REQUESTS", "1")
+    router = Router(monkeypatch)
+    async with _client() as client:
+        first = await client.post("/agent-llm/v1/chat/completions",
+                                  json={**_body(), "model": "omniroute/ds/deepseek-flash"}, headers=_auth())
+        second = await client.post("/agent-llm/v1/chat/completions",
+                                   json={**_body(), "model": "omniroute/ds/deepseek-flash"}, headers=_auth())
+        other_desktop = await client.post("/agent-llm/v1/chat/completions",
+                                          json={**_body(), "model": "omniroute/ds/deepseek-flash"},
+                                          headers=_auth("bob"))
+    assert first.status_code == 200
+    assert second.status_code == 429 and second.json()["error"]["code"] == "budget_exceeded"
+    assert other_desktop.status_code == 200  # the budget is per desktop
+    assert len(router.requests) == 2
+
+
+async def test_unreachable_router_refuses_instead_of_guessing(env, monkeypatch, usage_db):
+    monkeypatch.setenv("AGENT_LLM_EXTERNAL_ENABLED", "true")
+
+    async def down(request):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(llm_proxy, "_http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(down)))
+    async with _client() as client:
+        response = await client.post("/agent-llm/v1/chat/completions",
+                                     json={**_body(), "model": "omniroute/ds/deepseek-flash"}, headers=_auth())
+    assert response.status_code == 503

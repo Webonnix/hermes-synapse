@@ -8,6 +8,8 @@ interface Props {
   viewOnly: boolean;
   /** Bumped to force a fresh connection (the reconnect button). */
   attempt: number;
+  /** Which of the desktop's screens (an OpenBot desktop has two). */
+  screen?: number;
   copy: { connecting: string; disconnected: string };
 }
 
@@ -20,7 +22,7 @@ interface Props {
  * noVNC is imported on first use: it is only needed while someone watches a
  * desktop, and it should not weigh on every other tab's bundle.
  */
-export function DesktopViewer({ desktopKey, viewOnly, attempt, copy }: Props) {
+export function DesktopViewer({ desktopKey, viewOnly, attempt, screen = 0, copy }: Props) {
   const screenRef = useRef<HTMLDivElement | null>(null);
   const rfbRef = useRef<RFB | null>(null);
   const [status, setStatus] = useState<Status>('connecting');
@@ -29,7 +31,7 @@ export function DesktopViewer({ desktopKey, viewOnly, attempt, copy }: Props) {
     let disposed = false;
     setStatus('connecting');
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${protocol}//${window.location.host}/api/agent-desktops/${encodeURIComponent(desktopKey)}/vnc`;
+    const url = `${protocol}//${window.location.host}/api/agent-desktops/${encodeURIComponent(desktopKey)}/vnc?screen=${screen}`;
     const token = localStorage.getItem('vexa_auth_token') || '';
 
     void import('@novnc/novnc').then(({ default: RFBClient }) => {
@@ -51,7 +53,7 @@ export function DesktopViewer({ desktopKey, viewOnly, attempt, copy }: Props) {
     };
     // viewOnly is applied live below; reconnecting for it would drop the view.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [desktopKey, attempt]);
+  }, [desktopKey, attempt, screen]);
 
   useEffect(() => {
     if (rfbRef.current) {

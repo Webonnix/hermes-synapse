@@ -124,6 +124,25 @@
   background: var(--bg-elevated); color: var(--accent-cyan); font-size: 11px; font-weight: 600;
 }
 
+/* --- kinds, screens, OpenBot connect --- */
+.ad-new { flex-wrap: wrap; }
+.ad-kind { flex-basis: 100%; }
+.ad-kind-tag { margin-left: 6px; margin-right: 0; }
+.ad-screens { display: inline-flex; gap: 4px; }
+.ad-connect { display: flex; flex-direction: column; gap: 10px; overflow: auto; }
+.ad-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 10px; font-size: 13px; line-height: 1.45; }
+.ad-steps code, .ad-value { background: var(--bg-elevated); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+.ad-fields { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.ad-field { display: grid; grid-template-columns: 70px minmax(0, 1fr) auto auto; gap: 6px; align-items: center; }
+.ad-label-text { color: var(--text-secondary); font-size: 12px; }
+.ad-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ad-models summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; }
+.ad-models ul { margin: 6px 0 0; padding-left: 16px; max-height: 180px; overflow: auto; font-size: 12px; }
+.ad-note {
+  display: flex; gap: 8px; align-items: flex-start; margin: 0; padding: 8px 10px; border-radius: 7px; font-size: 12px;
+  color: var(--warning); background: rgba(246, 184, 74, .08); border: 1px solid rgba(246, 184, 74, .35);
+}
+
 @media (max-width: 1400px) {
   .ad-layout { grid-template-columns: 200px minmax(0, 1fr); }
   .ad-agent { grid-column: 1 / -1; max-height: none; }

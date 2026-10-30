@@ -38,6 +38,10 @@ HOME = Path(os.getenv("HOME", "/home/agent"))
 WORKSPACE = Path(os.getenv("AGENT_WORKSPACE", str(HOME / "workspace")))
 DISPLAY = os.getenv("DISPLAY", ":1")
 VNC_PORT = int(os.getenv("AGENT_DESKTOP_VNC_PORT", "5900"))
+# One loopback VNC port per screen, in screen order. A desktop has one screen;
+# an OpenBot desktop has two (its own window on :0, the agents' desktop on :1).
+VNC_PORTS: List[int] = [int(port) for port in
+                        os.getenv("AGENT_DESKTOP_VNC_PORTS", str(VNC_PORT)).split(",") if port.strip()]
 
 # Name -> argv of the agent's ACP mode. Fixed here, never taken from a request:
 # the backend picks a *name*, and only these programs can ever be started.
@@ -71,8 +75,8 @@ def _display_up() -> bool:
     return Path(f"/tmp/.X11-unix/X{number}").exists()
 
 
-def _vnc_up() -> bool:
-    with contextlib.suppress(OSError), socket.create_connection(("127.0.0.1", VNC_PORT), timeout=1.0):
+def _vnc_up(port: Optional[int] = None) -> bool:
+    with contextlib.suppress(OSError), socket.create_connection(("127.0.0.1", port or VNC_PORTS[0]), timeout=1.0):
         return True
     return False
 
@@ -88,6 +92,7 @@ async def health():
         "status": "ok",
         "display": _display_up(),
         "vnc": _vnc_up(),
+        "screens": [_vnc_up(port) for port in VNC_PORTS],
         "runtimes": {name: runtime_available(name) for name in RUNTIMES},
     }
 
@@ -191,8 +196,12 @@ async def vnc(websocket: WebSocket):
     if not _token_ok(websocket):
         await websocket.close(code=1008)
         return
+    screen = websocket.query_params.get("screen", "0")
+    if not screen.isdigit() or int(screen) >= len(VNC_PORTS):
+        await websocket.close(code=1008, reason="unknown screen")
+        return
     try:
-        reader, writer = await asyncio.open_connection("127.0.0.1", VNC_PORT)
+        reader, writer = await asyncio.open_connection("127.0.0.1", VNC_PORTS[int(screen)])
     except OSError:
         await websocket.close(code=1011, reason="desktop VNC server is not running")
         return

@@ -7,8 +7,18 @@
 export type Lang = 'ru' | 'en';
 
 export interface RuntimeInfo { id: string; title: string; login: string }
-export interface DesktopInfo { key: string; name: string; status: string; busy: string[] }
-export interface DesktopListing { enabled: boolean; runtimes: RuntimeInfo[]; desktops: DesktopInfo[] }
+export type DesktopKindId = 'agent' | 'openbot';
+export interface DesktopInfo { key: string; name: string; status: string; busy: string[]; kind?: DesktopKindId }
+export interface KindInfo { id: DesktopKindId; enabled: boolean; screens: number }
+export interface DesktopListing {
+  enabled: boolean;
+  runtimes: RuntimeInfo[];
+  desktops: DesktopInfo[];
+  kinds?: KindInfo[];
+  external_models?: boolean;
+}
+/** /api/agent-desktops/<key>/model-access: what OpenBot's custom provider needs. */
+export interface ModelAccess { base_url: string; model: string; api_key: string; models: string[] }
 
 export interface DesktopEvent {
   seq: number;
@@ -147,6 +157,24 @@ export const COPY = {
     cancelled: 'Остановлено',
     loginHint: 'Агент не вошёл в аккаунт: нажмите «Управлять» и выполните в терминале',
     invalidKey: 'Имя: латиница в нижнем регистре, цифры и дефис, до 32 символов.',
+    kindAgent: 'Агент (Grok / OpenCode)',
+    kindOpenbot: 'OpenBot',
+    screenOpenbot: 'OpenBot',
+    screenAgents: 'Экран агентов',
+    connectTitle: 'Подключение OpenBot',
+    connectLogin: 'Нажмите «Управлять» и в окне «OpenBot terminal» выполните',
+    connectApp: 'Откройте openbot.run/app или приложение OpenBot с тем же аккаунтом — этот сервер появится в списке.',
+    connectProvider: 'В OpenBot добавьте провайдера «Custom OpenAI-compatible»:',
+    connectPhone: 'Телефон: в том же терминале',
+    connectNote: 'Агенты OpenBot действуют без подтверждений Control Plane: их граница — этот изолированный десктоп. Kill switch отключает им модели.',
+    baseUrl: 'Base URL',
+    apiKey: 'API key',
+    model: 'Модель',
+    models: 'Доступные модели',
+    copy: 'Копировать',
+    copied: 'Скопировано',
+    show: 'Показать',
+    hide: 'Скрыть',
   },
   en: {
     eyebrow: 'Isolated Linux desktops',
@@ -181,5 +209,23 @@ export const COPY = {
     cancelled: 'Stopped',
     loginHint: 'The agent is not signed in: press "Take over" and run in the terminal',
     invalidKey: 'Name: lowercase latin letters, digits and dashes, up to 32 characters.',
+    kindAgent: 'Agent (Grok / OpenCode)',
+    kindOpenbot: 'OpenBot',
+    screenOpenbot: 'OpenBot',
+    screenAgents: 'Agents screen',
+    connectTitle: 'Connect OpenBot',
+    connectLogin: 'Press "Take over" and in the "OpenBot terminal" window run',
+    connectApp: 'Open openbot.run/app or the OpenBot app with the same account — this server shows up in its list.',
+    connectProvider: 'In OpenBot, add a "Custom OpenAI-compatible" provider:',
+    connectPhone: 'Phone: in the same terminal run',
+    connectNote: 'OpenBot agents act without Control Plane approvals: this isolated desktop is their boundary. The kill switch cuts their models off.',
+    baseUrl: 'Base URL',
+    apiKey: 'API key',
+    model: 'Model',
+    models: 'Available models',
+    copy: 'Copy',
+    copied: 'Copied',
+    show: 'Show',
+    hide: 'Hide',
   },
 } as const;

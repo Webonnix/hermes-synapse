@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Eye, MonitorPlay, MousePointer2, Play, RefreshCw, Send, Square, StopCircle } from 'lucide-react';
 import { DesktopViewer } from './DesktopViewer';
+import { OpenBotConnect } from './OpenBotConnect';
 import {
   COPY, DESKTOP_KEY_RE, buildTranscript, normalizeKey,
-  type DesktopEvent, type DesktopListing, type Lang, type TranscriptItem,
+  type DesktopEvent, type DesktopKindId, type DesktopListing, type Lang, type TranscriptItem,
 } from './desktopModel';
 import './agentDesktops.css';
 
@@ -48,6 +49,8 @@ export function AgentDesktopsTab({ language }: { language: string }) {
   const [error, setError] = useState('');
   const [selected, setSelected] = useState<string>(readSelected);
   const [newKey, setNewKey] = useState('');
+  const [newKind, setNewKind] = useState<DesktopKindId>('agent');
+  const [screen, setScreen] = useState(0);
   const [pending, setPending] = useState<string>('');
   const [viewOnly, setViewOnly] = useState(true);
   const [attempt, setAttempt] = useState(0);
@@ -76,6 +79,7 @@ export function AgentDesktopsTab({ language }: { language: string }) {
     try { localStorage.setItem(SELECTED_STORAGE_KEY, selected); } catch { /* private mode */ }
     lastSeq.current = 0;
     setEvents([]);
+    setScreen(0);
     if (!selected) return;
     let cancelled = false;
     const load = async () => {
@@ -100,6 +104,9 @@ export function AgentDesktopsTab({ language }: { language: string }) {
   const busy = current?.busy.includes(runtime) ?? false;
   const transcript = useMemo(() => buildTranscript(events), [events]);
   const runtimeInfo = listing?.runtimes.find(r => r.id === runtime);
+  const isOpenbot = current?.kind === 'openbot';
+  const screens = listing?.kinds?.find(k => k.id === (current?.kind ?? 'agent'))?.screens ?? 1;
+  const openbotEnabled = listing?.kinds?.some(k => k.id === 'openbot' && k.enabled) ?? false;
 
   const act = async (label: string, run: () => Promise<unknown>) => {
     setPending(label);
@@ -109,8 +116,9 @@ export function AgentDesktopsTab({ language }: { language: string }) {
     void refresh();
   };
 
-  const startDesktop = (key: string) => act(`start:${key}`, async () => {
-    await post(`/api/agent-desktops/${encodeURIComponent(key)}/start`);
+  // A new desktop says its kind; an existing one keeps the kind it was made as.
+  const startDesktop = (key: string, kind?: DesktopKindId) => act(`start:${key}`, async () => {
+    await post(`/api/agent-desktops/${encodeURIComponent(key)}/start`, kind ? { kind } : undefined);
     setSelected(key);
     setAttempt(a => a + 1);
   });
@@ -119,7 +127,7 @@ export function AgentDesktopsTab({ language }: { language: string }) {
     const key = normalizeKey(newKey);
     if (!DESKTOP_KEY_RE.test(key)) { setError(copy.invalidKey); return; }
     setNewKey('');
-    void startDesktop(key);
+    void startDesktop(key, newKind);
   };
 
   const sendTask = () => act('send', async () => {
@@ -156,6 +164,13 @@ export function AgentDesktopsTab({ language }: { language: string }) {
             <button className="ad-button is-primary" type="submit" disabled={!newKey.trim() || !!pending}>
               <Play size={14} /> {copy.create}
             </button>
+            {openbotEnabled && (
+              <select className="ad-input ad-kind" value={newKind} aria-label={copy.runtime}
+                onChange={e => setNewKind(e.target.value as DesktopKindId)}>
+                <option value="agent">{copy.kindAgent}</option>
+                <option value="openbot">{copy.kindOpenbot}</option>
+              </select>
+            )}
           </form>
           {listing && !listing.desktops.length && <p className="ad-muted">{copy.empty}</p>}
           <ul className="ad-desktops">
@@ -163,7 +178,9 @@ export function AgentDesktopsTab({ language }: { language: string }) {
               <li key={item.key} className={`ad-desktop ${item.key === selected ? 'is-selected' : ''}`}>
                 <button className="ad-desktop-main" onClick={() => setSelected(item.key)}>
                   <span className={`ad-dot ${item.status === 'running' ? 'is-on' : ''}`} />
-                  <span className="ad-desktop-name">{item.key}</span>
+                  <span className="ad-desktop-name">
+                    {item.key}{item.kind === 'openbot' && <span className="ad-tag ad-kind-tag">OpenBot</span>}
+                  </span>
                   <span className="ad-muted">
                     {item.busy.length ? copy.busy : item.status === 'running' ? copy.running : copy.stopped}
                   </span>
@@ -189,6 +206,16 @@ export function AgentDesktopsTab({ language }: { language: string }) {
           <div className="ad-toolbar">
             <strong className="ad-viewer-title">{selected || '—'}</strong>
             <div className="ad-toolbar-actions">
+              {screens > 1 && (
+                <div className="ad-screens" role="group">
+                  {[copy.screenOpenbot, copy.screenAgents].slice(0, screens).map((label, index) => (
+                    <button key={label} className={`ad-button ${screen === index ? 'is-active' : ''}`}
+                      aria-pressed={screen === index} disabled={!isRunning} onClick={() => setScreen(index)}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
               <button className={`ad-button ${viewOnly ? '' : 'is-active'}`} disabled={!isRunning}
                 onClick={() => setViewOnly(v => !v)}>
                 {viewOnly ? <><MousePointer2 size={14} /> {copy.takeOver}</> : <><Eye size={14} /> {copy.viewOnly}</>}
@@ -199,13 +226,14 @@ export function AgentDesktopsTab({ language }: { language: string }) {
             </div>
           </div>
           {selected && isRunning ? (
-            <DesktopViewer desktopKey={selected} viewOnly={viewOnly} attempt={attempt} copy={copy} />
+            <DesktopViewer desktopKey={selected} viewOnly={viewOnly} attempt={attempt} screen={screen} copy={copy} />
           ) : (
             <div className="ad-screen-wrap"><div className="ad-screen-overlay">{copy.notRunning}</div></div>
           )}
         </section>
 
         <section className="ad-card ad-agent">
+          {isOpenbot ? <OpenBotConnect desktopKey={selected} copy={copy} /> : <>
           <div className="ad-agent-form">
             <label className="ad-label">
               {copy.runtime}
@@ -244,6 +272,7 @@ export function AgentDesktopsTab({ language }: { language: string }) {
             {transcript.map(item => <TranscriptRow key={item.key} item={item} copy={copy} login={runtimeInfo?.login ?? ''} />)}
             <div ref={transcriptEnd} />
           </div>
+          </>}
         </section>
       </div>
     </div>

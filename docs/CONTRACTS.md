@@ -436,6 +436,22 @@
 - **Провайдер OpenCode — управляемый файл** `~/.config/hermes/opencode.json` через
   `OPENCODE_CONFIG`, переписывается при каждом создании; `~/.config/opencode/opencode.json`
   владельца не трогается. Токен — только в этом файле, не в env контейнера.
+- **Тип десктопа — `agent` или `openbot`** (`desktop.KINDS`), записан файлом `<root>/<key>/kind` и
+  переживает пересоздание; другой тип для того же ключа — отказ. Тип меняет образ, точку
+  монтирования дома, uid, лимиты, число экранов и время остановки — **никогда** изоляцию
+  (runtime, read-only, capabilities, сети, DNS, hosts, токен моста задаёт `_blocking_ensure`
+  для всех). `openbot` — отдельный флаг `OPENBOT_DESKTOPS_ENABLED` (лицензия Noncommercial);
+  ACP-ходы в нём отклоняются (422). Подробно и модель угроз — `docs/agent-desktops-openbot.md`.
+- **Работающий десктоп пересоздаётся через `stop(timeout=<тип>)`, не `remove(force)`**:
+  OpenBot закрывает базу до 60 с.
+- **Экраны:** мост отдаёт `/vnc?screen=N` по `AGENT_DESKTOP_VNC_PORTS`; бэкенд пропускает
+  только `N < screens` типа десктопа.
+- **Модели OmniRoute в `/agent-llm`** — `omniroute/<id>` из `/v1/models` роутера, только при
+  `AGENT_LLM_EXTERNAL_ENABLED`, по шаблонам `AGENT_LLM_EXTERNAL_MODELS`, с суточным лимитом $
+  и запросов на десктоп по `router_usage_log` (`agent-desktop:<key>`). Каталог не прочитан —
+  503, а не догадка. Ключ роутера в десктоп не попадает. Шлюз приватности не применяется.
+- **Kill switch отключает `/agent-llm` целиком** (503 `killed`), ошибка чтения состояния — тоже
+  отказ.
 - **Вход в CLI — руками владельца в терминале десктопа** («Управлять» →
   `grok login` / `opencode auth login`). Ошибка `auth_required` приходит в событии
   `turn_end.error_code`, текст фронтенд берёт по коду.

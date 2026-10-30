@@ -114,7 +114,7 @@ def _echo_server():
 
 def test_vnc_relays_bytes_to_the_loopback_server(bridge, monkeypatch):
     server = _echo_server()
-    monkeypatch.setattr(bridge, "VNC_PORT", server.getsockname()[1])
+    monkeypatch.setattr(bridge, "VNC_PORTS", [server.getsockname()[1]])
     with TestClient(bridge.app).websocket_connect("/vnc", headers=_auth()) as ws:
         ws.send_bytes(b"RFB 003.008\n")
         assert ws.receive_bytes() == b"\n800.300 BFR"
@@ -126,3 +126,18 @@ def test_vnc_requires_the_desktop_token(bridge):
         with TestClient(bridge.app).websocket_connect("/vnc") as ws:
             ws.receive_bytes()
     assert exc.value.code == 1008
+
+
+def test_vnc_screen_selects_its_own_port_and_unknown_screens_are_refused(bridge, monkeypatch):
+    first, second = _echo_server(), _echo_server()
+    monkeypatch.setattr(bridge, "VNC_PORTS", [first.getsockname()[1], second.getsockname()[1]])
+    with TestClient(bridge.app).websocket_connect("/vnc?screen=1", headers=_auth()) as ws:
+        ws.send_bytes(b"ab")
+        assert ws.receive_bytes() == b"ba"
+    for screen in ("2", "-1", "x"):
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with TestClient(bridge.app).websocket_connect(f"/vnc?screen={screen}", headers=_auth()) as ws:
+                ws.receive_bytes()
+        assert exc.value.code == 1008
+    first.close()
+    second.close()
