@@ -570,9 +570,26 @@ def repo_container_kwargs(opp_id: str) -> Dict[str, Any]:
     }
 
 
+def _launcher_base() -> str:
+    """The sandbox launcher's HTTP base when DOCKER_HOST points at it, else ""."""
+    host = os.getenv("DOCKER_HOST", "")
+    return "http://" + host.removeprefix("tcp://") if "sandbox-launcher" in host else ""
+
+
 def send_stdin(container: Any, data: bytes) -> None:
     """Write the stream to the container's stdin over an attach connection."""
     import socket as _socket
+
+    base = _launcher_base()
+    if base:
+        # The launcher owns the Docker socket and attaches on our behalf: a
+        # hijacked attach connection cannot pass through its HTTP broker.
+        import httpx
+
+        response = httpx.post(f"{base}/hermes/earner/{container.id}/stdin", content=data, timeout=180)
+        if response.status_code != 200:
+            raise SandboxUnavailable(f"launcher refused sandbox input ({response.status_code})")
+        return
 
     attached = container.attach_socket(params={"stdin": 1, "stream": 1})
     raw = getattr(attached, "_sock", attached)

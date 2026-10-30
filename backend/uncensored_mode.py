@@ -13,6 +13,7 @@ Agents, bots and the browser runner never ask for it, so the switch cannot reach
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
@@ -62,7 +63,11 @@ async def get_uncensored_mode():
 
 
 @router.put("/api/uncensored-mode")
-async def put_uncensored_mode(payload: UncensoredModePayload):
+async def put_uncensored_mode(payload: UncensoredModePayload, request: Request):
+    # Turning refusals off widens what the model will do, so it needs a recent sign-in.
+    if payload.enabled:
+        from backend.auth_http import require_recent_auth
+        await asyncio.to_thread(require_recent_auth, request)
     return {"enabled": set_enabled(payload.enabled)}
 
 

@@ -116,3 +116,69 @@ async def test_streamed_create_body_has_a_bounded_size(broker):
             yield b'x' * 4096
     assert (await client.post('/containers/create?name=' + NAME, content=chunks())).status_code == 413
     assert not requests
+
+
+def earner_body(mode="repo"):
+    """The exact create body docker-py sends for an Earner run."""
+    import docker
+    from docker.models.containers import _create_container_args
+    from backend.earner import sandbox as earner_sandbox
+
+    kwargs = (earner_sandbox.repo_container_kwargs("opp-1") if mode == "repo"
+              else earner_sandbox.container_kwargs("cGF5bG9hZA==", "opp-1"))
+    kwargs.pop("detach")
+    kwargs["version"] = "1.45"
+    api = docker.APIClient(base_url="tcp://127.0.0.1:9", version="1.45")
+    return api.create_container_config(**_create_container_args(kwargs))
+
+
+@pytest.fixture
+def earner_images(monkeypatch):
+    monkeypatch.setenv("EARNER_SANDBOX_IMAGE", "hermes-dev-runner:local")
+    monkeypatch.setenv("SANDBOX_EARNER_IMAGES", "hermes-dev-runner:local")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["repo", "unit"])
+async def test_earner_run_is_rebuilt_offline_without_mounts(broker, earner_images, mode):
+    client, requests = broker
+    response = await client.post("/v1.45/containers/create", json=earner_body(mode))
+    assert response.status_code == 201
+    payload = next(args["json"] for method, path, args in requests if path == "/containers/create")
+    host = payload["HostConfig"]
+    assert payload["Image"] == IMAGE["Id"] and payload["User"] == "10001:10001"
+    assert host["Runtime"] == "runsc" and host["NetworkMode"] == "none" and host["ReadonlyRootfs"]
+    assert host["CapDrop"] == ["ALL"] and "Mounts" not in host and "Binds" not in host
+    assert payload["Labels"][launcher.MARKER] == "1"
+    assert payload["OpenStdin"] is (mode == "repo")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field,value", [
+    ("NetworkMode", "bridge"), ("Runtime", "runc"), ("Privileged", True), ("Binds", ["/:/host:rw"]),
+    ("Memory", 64 * 1024**3), ("PidsLimit", 100000), ("CapAdd", ["SYS_ADMIN"]), ("ReadonlyRootfs", False),
+    ("Tmpfs", {"/tmp": "rw,exec,size=1g,mode=1777"}),
+])
+async def test_earner_run_refuses_reach_beyond_the_template(broker, earner_images, field, value):
+    client, requests = broker
+    payload = earner_body(); payload["HostConfig"][field] = value
+    assert (await client.post("/containers/create", json=payload)).status_code == 403
+    assert not any(path == "/containers/create" for _, path, _ in requests)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", [{"Image": "ubuntu:latest"}, {"User": "0"}, {"Entrypoint": ["/bin/sh", "-c", "x", "y"]},
+                                    {"Env": ["LD_PRELOAD=/tmp/x"]}, {"Cmd": ["rm -rf /"]}])
+async def test_earner_run_refuses_other_images_and_identities(broker, earner_images, change):
+    client, requests = broker
+    payload = earner_body(); payload.update(change)
+    assert (await client.post("/containers/create", json=payload)).status_code == 403
+    assert not any(path == "/containers/create" for _, path, _ in requests)
+
+
+@pytest.mark.asyncio
+async def test_logs_and_input_only_for_owned_sandboxes(broker):
+    client, _ = broker
+    for method, path in [("GET", "/containers/vexa-backend/logs?stdout=1"), ("POST", "/containers/vexa-backend/kill"),
+                         ("POST", "/hermes/earner/vexa-backend/stdin")]:
+        assert (await client.request(method, path)).status_code == 403

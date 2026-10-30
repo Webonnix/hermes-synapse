@@ -23,13 +23,20 @@ DATA_ROOT = Path("/data")
 VOLUME = os.getenv("SANDBOX_DATA_VOLUME", "hermes-data")
 RUNNER = os.getenv("DEV_RUNNER_CONTAINER_NAME", "hermes-dev-runner")
 BACKEND = os.getenv("BACKEND_CONTAINER_NAME", "vexa-backend")
+NETWORK_LABELS = frozenset(x.strip() for x in os.getenv("SANDBOX_NETWORK_LABELS", "dev-net,dev-egress-net").split(",") if x.strip())
+EARNER_LABEL = "hermes.earner.sandbox"
+EARNER_ENTRYPOINT = ["python", "-I", "-c"]
+EARNER_MAX_MEMORY = 2 * 1024**3
+EARNER_MAX_CPUS = 2_000_000_000
+EARNER_MAX_PIDS = 256
+EARNER_MAX_STDIN = 64 * 1024 * 1024
 _images: dict[str, dict] = {}
 _launch_lock = asyncio.Lock()
 
 
-async def docker(method: str, path: str, **kwargs) -> httpx.Response:
+async def docker(method: str, path: str, *, timeout: float | None = 70, **kwargs) -> httpx.Response:
     async with httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds="/var/run/docker.sock"),
-                                 base_url="http://docker", timeout=70) as client:
+                                 base_url="http://docker", timeout=timeout) as client:
         return await client.request(method, path, **kwargs)
 
 
@@ -71,6 +78,24 @@ async def image_for(kind: str) -> dict:
     return _images[kind]
 
 
+def earner_image_names() -> list[str]:
+    return [x.strip() for x in os.getenv("SANDBOX_EARNER_IMAGES", "").split(",") if x.strip()]
+
+
+async def earner_image(reference: str) -> dict:
+    for name in earner_image_names():
+        key = "earner:" + name
+        if key not in _images:
+            result = await docker("GET", f"/images/{name}/json")
+            if result.status_code != 200:
+                continue
+            _images[key] = result.json()
+        image = _images[key]
+        if reference in (name, image["Id"], *image.get("RepoTags", []), *image.get("RepoDigests", [])):
+            return image
+    raise HTTPException(403, "Image is not an approved Earner sandbox image")
+
+
 async def allowed_networks() -> set[str]:
     source = await inspect(RUNNER)
     allowed = set()
@@ -80,7 +105,7 @@ async def allowed_networks() -> set[str]:
             network = response.json()
             label = network.get("Labels", {}).get("com.docker.compose.network")
             # No inferred fallback to the backend or daemon-control network.
-            if label in ("dev-net", "dev-egress-net"):
+            if label in NETWORK_LABELS:
                 allowed.add(name)
     if not allowed:
         raise HTTPException(503, "Sandbox networks unavailable")
@@ -174,6 +199,113 @@ def install_openbot_bootstrap(key: str) -> None:
             os.close(bootstrap); os.close(home)
     finally:
         os.close(fd)
+
+
+_TMPFS = re.compile(r"rw,noexec,nosuid,nodev,size=([0-9]+)([mg]),mode=1777")
+_EARNER_HOST_KEYS = {"Runtime", "NetworkMode", "ReadonlyRootfs", "CapDrop", "SecurityOpt", "IpcMode", "Tmpfs",
+                     "Memory", "MemorySwap", "NanoCpus", "PidsLimit", "Ulimits", "LogConfig", "Privileged",
+                     "Binds", "Devices"}
+
+
+def earner_template(body: dict, image: dict) -> dict:
+    """Rebuild an Earner run from validated fields only. The code inside is
+    untrusted by design; what the backend cannot choose is the container's reach."""
+    host = body.get("HostConfig") or {}
+    if any(value for key, value in host.items() if key not in _EARNER_HOST_KEYS):
+        raise HTTPException(403, "Earner sandbox host option refused")
+    if host.get("Privileged") or host.get("Binds") or host.get("Devices"):
+        raise HTTPException(403, "Earner sandbox privilege or mount refused")
+    if (host.get("Runtime") != "runsc" or host.get("NetworkMode") != "none" or host.get("ReadonlyRootfs") is not True
+            or host.get("CapDrop") != ["ALL"] or host.get("SecurityOpt") != ["no-new-privileges:true"]
+            or host.get("IpcMode") not in (None, "none")):
+        raise HTTPException(403, "Earner sandbox must be offline gVisor with no capabilities")
+    tmpfs = host.get("Tmpfs") or {}
+    if set(tmpfs) != {"/tmp"} or not (match := _TMPFS.fullmatch(str(tmpfs["/tmp"]))):
+        raise HTTPException(403, "Earner sandbox tmpfs refused")
+    if int(match[1]) * (1024 if match[2] == "g" else 1) > 1024:
+        raise HTTPException(403, "Earner sandbox tmpfs too large")
+    memory, cpus, pids = int(host.get("Memory") or 0), int(host.get("NanoCpus") or 0), int(host.get("PidsLimit") or 0)
+    if not (0 < memory <= EARNER_MAX_MEMORY and host.get("MemorySwap") == memory
+            and 0 < cpus <= EARNER_MAX_CPUS and 0 < pids <= EARNER_MAX_PIDS):
+        raise HTTPException(403, "Earner sandbox limits refused")
+    ulimits = []
+    for item in host.get("Ulimits") or []:
+        if not isinstance(item, dict) or item.get("Name") not in ("nofile", "fsize"):
+            raise HTTPException(403, "Earner sandbox ulimit refused")
+        cap = 1024 if item["Name"] == "nofile" else 64 * 1024 * 1024
+        if not (0 < int(item.get("Soft", 0)) <= int(item.get("Hard", 0)) <= cap):
+            raise HTTPException(403, "Earner sandbox ulimit refused")
+        ulimits.append({"Name": item["Name"], "Soft": int(item["Soft"]), "Hard": int(item["Hard"])})
+    entrypoint, command = body.get("Entrypoint"), body.get("Cmd") or []
+    if (not isinstance(entrypoint, list) or len(entrypoint) != 4 or entrypoint[:3] != EARNER_ENTRYPOINT
+            or not isinstance(entrypoint[3], str) or len(entrypoint[3]) > 65536):
+        raise HTTPException(403, "Earner sandbox entrypoint refused")
+    if not isinstance(command, list) or len(command) > 1 or not all(isinstance(x, str) and x.isdigit() for x in command):
+        raise HTTPException(403, "Earner sandbox command refused")
+    if body.get("User") != "10001:10001" or body.get("WorkingDir") not in (None, "/tmp") or body.get("Tty"):
+        raise HTTPException(403, "Earner sandbox identity refused")
+    env = body.get("Env") or []
+    if not all(isinstance(x, str) and x.partition("=")[0] == "EARNER_PAYLOAD" and len(x) <= 256 * 1024 for x in env):
+        raise HTTPException(403, "Unexpected sandbox environment")
+    labels = body.get("Labels") or {}
+    opportunity = str(labels.get("hermes.earner.opportunity", ""))
+    if (labels.get(EARNER_LABEL) != "1" or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", opportunity)
+            or set(labels) - {EARNER_LABEL, "hermes.earner.opportunity", "hermes.earner.mode"}
+            or labels.get("hermes.earner.mode") not in (None, "repo")):
+        raise HTTPException(403, "Earner sandbox labels refused")
+    safe_labels = {MARKER: "1", EARNER_LABEL: "1", "hermes.earner.opportunity": opportunity}
+    if labels.get("hermes.earner.mode"):
+        safe_labels["hermes.earner.mode"] = "repo"
+    return {"Image": image["Id"], "Entrypoint": entrypoint, "Cmd": command, "User": "10001:10001",
+            "WorkingDir": "/tmp", "Env": env, "Labels": safe_labels, "Hostname": "earner-sandbox",
+            "OpenStdin": bool(body.get("OpenStdin")), "StdinOnce": bool(body.get("OpenStdin")),
+            "AttachStdin": False, "Tty": False, "NetworkDisabled": True,
+            "HostConfig": {"Runtime": "runsc", "NetworkMode": "none", "ReadonlyRootfs": True, "CapDrop": ["ALL"],
+                           "SecurityOpt": ["no-new-privileges:true"], "IpcMode": "none",
+                           "Tmpfs": {"/tmp": str(tmpfs["/tmp"])}, "Memory": memory, "MemorySwap": memory,
+                           "NanoCpus": cpus, "PidsLimit": pids, "Ulimits": ulimits,
+                           "LogConfig": {"Type": "json-file", "Config": {"max-size": "512k", "max-file": "1"}},
+                           "RestartPolicy": {"Name": "no"}}}
+
+
+async def launch_earner(body: dict) -> httpx.Response:
+    image = await earner_image(str(body.get("Image", "")))
+    safe = earner_template(body, image)
+    async with _launch_lock:
+        current = await docker("GET", "/containers/json", params={"all": "1"})
+        if current.status_code != 200 or not isinstance(current.json(), list):
+            raise HTTPException(503, "Cannot verify sandbox quota")
+        running = [c for c in current.json() if c.get("Labels", {}).get(EARNER_LABEL) == "1"]
+        if len(running) >= int(os.getenv("SANDBOX_EARNER_MAX_CONTAINERS", "2")):
+            raise HTTPException(429, "Earner sandbox capacity exhausted")
+        return await docker("POST", "/containers/create", json=safe)
+
+
+async def send_stdin(container_id: str, request: Request) -> Response:
+    """Stream a request body into an owned Earner sandbox's stdin over Docker's attach."""
+    reader, writer = await asyncio.open_unix_connection("/var/run/docker.sock")
+    try:
+        writer.write((f"POST /containers/{container_id}/attach?stdin=1&stream=1 HTTP/1.1\r\n"
+                      "Host: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n").encode())
+        await writer.drain()
+        status = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 30)
+        if b" 101 " not in status.split(b"\r\n", 1)[0] and b" 200 " not in status.split(b"\r\n", 1)[0]:
+            raise HTTPException(502, "Sandbox stdin attach refused")
+        sent = 0
+        async for chunk in request.stream():
+            sent += len(chunk)
+            if sent > EARNER_MAX_STDIN:
+                raise HTTPException(413, "Sandbox input too large")
+            writer.write(chunk)
+            await asyncio.wait_for(writer.drain(), 120)
+        if writer.can_write_eof():
+            writer.write_eof()
+        await asyncio.wait_for(writer.drain(), 120)
+        return JSONResponse({"bytes": sent})
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
 
 
 async def launch(name: str, body: dict) -> httpx.Response:
@@ -274,6 +406,10 @@ async def broker(request: Request, path: str):
             # Nested values are untrusted Docker SDK input too.
             if not isinstance(body, dict):
                 raise ValueError()
+            # docker-py spells unset options as null; absent and null mean the same.
+            body = {key: value for key, value in body.items() if value is not None}
+            if isinstance(body.get("HostConfig"), dict):
+                body["HostConfig"] = {key: value for key, value in body["HostConfig"].items() if value is not None}
             for field in ("HostConfig", "Labels", "NetworkingConfig"):
                 if field in body and not isinstance(body[field], dict):
                     raise ValueError()
@@ -288,7 +424,10 @@ async def broker(request: Request, path: str):
                 raise ValueError()
         except (ValueError, TypeError):
             raise HTTPException(422, "Invalid sandbox configuration")
-        response = await launch(request.query_params.get("name", ""), body)
+        if (body.get("Labels") or {}).get(EARNER_LABEL):
+            response = await launch_earner(body)
+        else:
+            response = await launch(request.query_params.get("name", ""), body)
     elif request.method == "GET" and path == "containers/json":
         response = await docker("GET", "/containers/json", params={"all": "1"})
         if response.status_code == 200:
@@ -304,12 +443,28 @@ async def broker(request: Request, path: str):
             except (ValueError, AttributeError, TypeError):
                 raise HTTPException(422, "Invalid filters")
             return JSONResponse(candidates)
-    elif match := re.fullmatch(r"containers/([A-Za-z0-9_.-]+)(?:/(json|start|stop))?", path):
+    elif request.method == "POST" and (match := re.fullmatch(r"hermes/earner/([A-Za-z0-9_.-]+)/stdin", path)):
+        container = await allowed_container(match[1], write=True)
+        if container.get("Config", {}).get("Labels", {}).get(EARNER_LABEL) != "1" or not container.get("Config", {}).get("OpenStdin"):
+            raise HTTPException(403, "Only an Earner repository sandbox accepts input")
+        return await send_stdin(container["Id"], request)
+    elif match := re.fullmatch(r"containers/([A-Za-z0-9_.-]+)(?:/(json|start|stop|wait|logs|kill))?", path):
         name, action = match.groups()
         container = await allowed_container(name, write=request.method != "GET")
         if request.method == "GET" and action == "json":
             return JSONResponse(container)
-        if (request.method, action) in (("POST", "start"), ("POST", "stop"), ("DELETE", None)):
+        if action in ("wait", "logs", "kill") and not owned(container):
+            # The backend and runner are readable for network metadata only.
+            raise HTTPException(403, "Container is outside launcher ownership")
+        if (request.method, action) == ("POST", "wait"):
+            response = await docker("POST", f"/containers/{container['Id']}/wait", timeout=None)
+        elif (request.method, action) == ("GET", "logs"):
+            params = {key: request.query_params[key] for key in ("stdout", "stderr", "tail", "timestamps")
+                      if key in request.query_params}
+            response = await docker("GET", f"/containers/{container['Id']}/logs", params=params)
+        elif (request.method, action) == ("POST", "kill"):
+            response = await docker("POST", f"/containers/{container['Id']}/kill")
+        elif (request.method, action) in (("POST", "start"), ("POST", "stop"), ("DELETE", None)):
             if request.method == "DELETE" and container.get("State", {}).get("Running"):
                 stopped = await docker("POST", f"/containers/{container['Id']}/stop", params={"t": "60"})
                 if stopped.status_code not in (204, 304):
@@ -324,6 +479,8 @@ async def broker(request: Request, path: str):
                 continue
             if match[1] in (image["Id"], *image.get("RepoTags", []), *image.get("RepoDigests", [])):
                 return JSONResponse(image)
+        with contextlib.suppress(HTTPException):
+            return JSONResponse(await earner_image(match[1]))
     elif match := re.fullmatch(r"networks/([A-Za-z0-9_.-]+)(?:/(connect))?", path):
         name, action = match.groups()
         if name not in await allowed_networks():

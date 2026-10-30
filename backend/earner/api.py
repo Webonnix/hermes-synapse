@@ -3,10 +3,10 @@
 The auth middleware in main.py already requires an operator session for every
 /api/ path; each route here additionally checks an ``earner.*`` permission.
 Confirming an approval needs ``earner.approve`` (owner only by default) and an
-explicit intent header. Auth is a Bearer token, never a cookie, so a foreign
-page cannot ride the operator's session (no CSRF surface); the header is a
-second, deliberate signal that a human pressed the confirm button on this
-screen. There is no service key: no agent tool or internal caller can reach
+explicit intent header. The session cookie is SameSite=Strict and every
+mutating request carries the CSRF token, so a foreign page cannot ride the
+operator's session; the header is a second, deliberate signal that a human
+pressed the confirm button on this screen. There is no service key: no agent tool or internal caller can reach
 ``confirm`` without an operator's session token.
 """
 
@@ -57,8 +57,8 @@ async def _call(func, *args, **kwargs):
 
 
 def _fingerprint(request: Request) -> str:
-    header = request.headers.get("Authorization") or ""
-    token = header.split(" ", 1)[1].strip() if header.startswith("Bearer ") else ""
+    from backend.auth_http import connection_token
+    token = connection_token(request)
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:12] if token else ""
 
 
