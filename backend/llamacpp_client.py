@@ -374,6 +374,9 @@ class LlamaCppClient:
                 template_kwargs[key] = value
                 continue
             payload[key] = value
+        # Strata defaults to projection ON for a request that leaves the field out, so say it every time:
+        # only a caller that asked for it (a web chat with the setting on) gets the uncensored model.
+        payload["experimental_speed_projection"] = payload.get("experimental_speed_projection") is True
         if template_kwargs.get("reasoning_effort"):
             effort = _EFFORT_ALIASES.get(str(template_kwargs["reasoning_effort"]).lower(),
                                          str(template_kwargs["reasoning_effort"]).lower())

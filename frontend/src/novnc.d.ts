@@ -14,5 +14,7 @@ declare module '@novnc/novnc' {
     background: string;
     disconnect(): void;
     focus(): void;
+    /** Sends text to the remote clipboard (ignored by noVNC while viewOnly). */
+    clipboardPasteFrom(text: string): void;
   }
 }

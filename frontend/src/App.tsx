@@ -74,6 +74,7 @@ import { HermesMark } from './components/HermesMark';
 import { VexaLogo } from './components/VexaLogo';
 const MetricsTab = lazy(() => import('./components/MetricsTab').then(module => ({ default: module.MetricsTab })));
 const ServerMetricsTab = lazy(() => import('./components/metrics/ServerMetricsTab').then(module => ({ default: module.ServerMetricsTab })));
+const EarnerTab = lazy(() => import('./components/earner/EarnerTab').then(module => ({ default: module.EarnerTab })));
 const AgentDesktopsTab = lazy(() => import('./components/desktops/AgentDesktopsTab').then(module => ({ default: module.AgentDesktopsTab })));
 import { FloatingWindow } from './components/FloatingWindow';
 import { BrowserLiveView } from './components/BrowserLiveView';
@@ -140,7 +141,7 @@ interface SpeechStream {
   frozen: boolean;
 }
 
-const tabs = ['vexa', 'processes', 'devruns', 'kanban', 'clients', 'agents', 'schedule', 'contentfactory', 'smm', 'settings', 'network', 'metrics', 'desktops'] as const;
+const tabs = ['vexa', 'processes', 'devruns', 'kanban', 'clients', 'agents', 'schedule', 'contentfactory', 'smm', 'settings', 'network', 'metrics', 'earner', 'desktops'] as const;
 type AppTab = typeof tabs[number];
 // «Входящие» used to be a top-level tab; it is SMM Factory → Диалоги now, so a
 // bookmarked #tab=inbox (or a saved tab from an older build) lands there.
@@ -151,7 +152,7 @@ export const normalizeTab = (value: string | null): AppTab => {
 
 export default function App() {
   const legacySettingsTabs = ['config', 'logs', 'activity', 'memory', 'subagents', 'obsidian', 'mcp'];
-  const [activeTab, setActiveTab] = useState<'vexa' | 'processes' | 'devruns' | 'kanban' | 'clients' | 'agents' | 'schedule' | 'contentfactory' | 'smm' | 'settings' | 'network' | 'metrics' | 'desktops'>(() => {
+  const [activeTab, setActiveTab] = useState<'vexa' | 'processes' | 'devruns' | 'kanban' | 'clients' | 'agents' | 'schedule' | 'contentfactory' | 'smm' | 'settings' | 'network' | 'metrics' | 'earner' | 'desktops'>(() => {
     const saved = localStorage.getItem('vexa_active_tab');
     const requested = new URLSearchParams(window.location.hash.slice(1)).get('tab') ?? saved;
     if (requested === 'inbox') localStorage.setItem('smm_factory_view', 'dialogs');
@@ -1702,7 +1703,7 @@ export default function App() {
                   .slice(0, 80);
                 new Notification('VEXA', {
                   body: preview || 'New Vexa response',
-                  icon: '/favicon.svg',
+                  icon: '/icon-192.png',
                   tag: 'vexa-reply',
                   silent: false,
                 });
@@ -1786,7 +1787,7 @@ export default function App() {
             ) {
               new Notification(`Dev-run ${runEvent.run_id}`, {
                 body: `${runEvent.event}: ${runEvent.summary}`.slice(0, 120),
-                icon: '/favicon.svg',
+                icon: '/icon-192.png',
                 tag: `dev-run-${runEvent.run_id}`,
               });
             }
@@ -2567,7 +2568,7 @@ export default function App() {
           
           <div className="hermes-auth-brand" style={{ marginBottom: '30px' }}>
             <HermesMark className="hermes-auth-mark" />
-            <h1 className="glow-text-cyan" style={{ fontSize: '2.5rem', fontWeight: 800, letterSpacing: 0, margin: 0 }}>HERMES</h1>
+            <h1 className="glow-text-cyan" style={{ fontSize: '2.5rem', fontWeight: 800, letterSpacing: 0, margin: 0 }}>VEXA</h1>
             <p style={{ color: '#36cffb', fontSize: '0.9rem', letterSpacing: 0, margin: '4px 0 0', textTransform: 'uppercase' }}>{copy("Secure Access Link")}</p>
           </div>
 
@@ -2836,6 +2837,15 @@ export default function App() {
           >
             <BarChart3 size={18} />
             <span>{t('navMetrics')}</span>
+          </button>
+
+          <button
+            style={navStyle('earner')}
+            onClick={() => { setActiveTab('earner'); setSidebarOpen(false); }}
+            title={t('navEarner')}
+          >
+            <Coins size={18} />
+            <span>{t('navEarner')}</span>
           </button>
 
           <button
@@ -3229,6 +3239,7 @@ export default function App() {
 
         {/* LLM run/cost metrics stay in the Vexa analytics panel; this tab is the GPU server. */}
         {activeTab === 'metrics' && <ServerMetricsTab language={language} />}
+        {activeTab === 'earner' && <EarnerTab />}
 
         {activeTab === 'desktops' && <AgentDesktopsTab language={language} />}
 

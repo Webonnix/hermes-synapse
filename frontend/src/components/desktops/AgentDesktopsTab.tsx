@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Eye, MonitorPlay, MousePointer2, Play, RefreshCw, Send, Square, StopCircle } from 'lucide-react';
-import { DesktopViewer } from './DesktopViewer';
+import { ClipboardCopy, ClipboardPaste, Eye, MonitorPlay, MousePointer2, Play, RefreshCw, Send, Square, StopCircle } from 'lucide-react';
+import { DesktopViewer, type DesktopViewerHandle } from './DesktopViewer';
 import { OpenBotConnect } from './OpenBotConnect';
 import {
   COPY, DESKTOP_KEY_RE, buildTranscript, normalizeKey,
@@ -51,6 +51,10 @@ export function AgentDesktopsTab({ language }: { language: string }) {
   const [newKey, setNewKey] = useState('');
   const [newKind, setNewKind] = useState<DesktopKindId>('agent');
   const [screen, setScreen] = useState(0);
+  const viewer = useRef<DesktopViewerHandle | null>(null);
+  const [desktopClipboard, setDesktopClipboard] = useState('');
+  const [clipboardNote, setClipboardNote] = useState('');
+  const [manualPaste, setManualPaste] = useState<string | null>(null);
   const [pending, setPending] = useState<string>('');
   const [viewOnly, setViewOnly] = useState(true);
   const [attempt, setAttempt] = useState(0);
@@ -80,6 +84,9 @@ export function AgentDesktopsTab({ language }: { language: string }) {
     lastSeq.current = 0;
     setEvents([]);
     setScreen(0);
+    setDesktopClipboard('');
+    setManualPaste(null);
+    setClipboardNote('');
     if (!selected) return;
     let cancelled = false;
     const load = async () => {
@@ -107,6 +114,29 @@ export function AgentDesktopsTab({ language }: { language: string }) {
   const isOpenbot = current?.kind === 'openbot';
   const screens = listing?.kinds?.find(k => k.id === (current?.kind ?? 'agent'))?.screens ?? 1;
   const openbotEnabled = listing?.kinds?.some(k => k.id === 'openbot' && k.enabled) ?? false;
+
+  const sendToDesktop = (text: string): boolean => {
+    const sent = viewer.current?.sendClipboard(text) ?? false;
+    setClipboardNote(sent ? copy.clipboardSent : copy.clipboardNotConnected);
+    return sent;
+  };
+
+  // Reading the owner's clipboard needs the browser's permission; where it is
+  // refused (or the page is not on HTTPS) a paste box does the same job.
+  const pasteFromMyClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) { sendToDesktop(text); return; }
+    } catch { /* no permission: fall back to the box */ }
+    setManualPaste('');
+  };
+
+  const copyFromDesktop = () => {
+    void navigator.clipboard?.writeText(desktopClipboard)
+      .then(() => setClipboardNote(copy.clipboardCopiedOut))
+      // Writing is refused (no permission, plain HTTP): show it to select by hand.
+      .catch(() => setClipboardNote(desktopClipboard));
+  };
 
   const act = async (label: string, run: () => Promise<unknown>) => {
     setPending(label);
@@ -220,20 +250,41 @@ export function AgentDesktopsTab({ language }: { language: string }) {
                 onClick={() => setViewOnly(v => !v)}>
                 {viewOnly ? <><MousePointer2 size={14} /> {copy.takeOver}</> : <><Eye size={14} /> {copy.viewOnly}</>}
               </button>
+              <button className="ad-button" disabled={!isRunning} title={copy.toDesktopTitle}
+                onClick={() => void pasteFromMyClipboard()}>
+                <ClipboardPaste size={14} /> {copy.toDesktop}
+              </button>
+              <button className="ad-button" disabled={!isRunning || !desktopClipboard} title={copy.fromDesktopTitle}
+                onClick={copyFromDesktop}>
+                <ClipboardCopy size={14} /> {copy.fromDesktop}
+              </button>
               <button className="ad-button" disabled={!isRunning} onClick={() => setAttempt(a => a + 1)}>
                 <RefreshCw size={14} /> {copy.reconnect}
               </button>
             </div>
           </div>
+          {manualPaste !== null && (
+            <form className="ad-paste" onSubmit={e => {
+              e.preventDefault();
+              if (manualPaste && sendToDesktop(manualPaste)) setManualPaste(null);
+            }}>
+              <textarea className="ad-input" rows={2} autoFocus value={manualPaste}
+                aria-label={copy.clipboardPlaceholder} placeholder={copy.clipboardPlaceholder}
+                onChange={e => setManualPaste(e.target.value)} />
+              <button className="ad-button is-primary" type="submit" disabled={!manualPaste}>{copy.clipboardSend}</button>
+            </form>
+          )}
+          {clipboardNote && <p className="ad-muted" role="status">{clipboardNote}</p>}
           {selected && isRunning ? (
-            <DesktopViewer desktopKey={selected} viewOnly={viewOnly} attempt={attempt} screen={screen} copy={copy} />
+            <DesktopViewer ref={viewer} desktopKey={selected} viewOnly={viewOnly} attempt={attempt} screen={screen}
+              copy={copy} onDesktopClipboard={setDesktopClipboard} />
           ) : (
             <div className="ad-screen-wrap"><div className="ad-screen-overlay">{copy.notRunning}</div></div>
           )}
         </section>
 
         <section className="ad-card ad-agent">
-          {isOpenbot ? <OpenBotConnect desktopKey={selected} copy={copy} /> : <>
+          {isOpenbot ? <OpenBotConnect desktopKey={selected} copy={copy} onSendToDesktop={sendToDesktop} /> : <>
           <div className="ad-agent-form">
             <label className="ad-label">
               {copy.runtime}

@@ -290,16 +290,17 @@ services:
     networks:
       - hermes-net
 
-  # AI Router / token-saver sidecar: OmniRoute (github.com/diegosouzapw/omniroute).
-  # Fronts external LLM providers
+  # AI Router / token-saver sidecar: OmniRoute (github.com/diegosouzapw/omniroute,
+  # a fork of 9Router with the same port, /app/data layout and dashboard API
+  # paths; it replaced 9router on 2026-10-18). Fronts external LLM providers
   # with an OpenAI-compatible endpoint, tiered fallback and tool-output token
   # compression. Internal-only: the backend reaches it at
   # http://omniroute:20128/v1 via a normal provider_bindings entry
   # (Admin -> Providers); the redaction gateway in llm_client.py applies to
   # every call through it exactly like any other external
-  # provider_type=openai_compatible binding. Its built-in MCP server
-  # (/api/mcp/stream) is connected by backend/omniroute_mcp.py.
-  # OMNIROUTE_STORAGE_ENCRYPTION_KEY encrypts its DB; losing it means
+  # provider_type=openai_compatible binding. The `9router` alias keeps
+  # bindings created before the switch (api_base http://9router:20128/v1)
+  # working. OMNIROUTE_STORAGE_ENCRYPTION_KEY encrypts its DB; losing it means
   # re-connecting every provider account. Deliberately not a backend
   # dependency, same reasoning as xtts above.
   omniroute:
@@ -318,9 +319,6 @@ services:
       - INITIAL_PASSWORD=${OMNIROUTE_INITIAL_PASSWORD:?Set OMNIROUTE_INITIAL_PASSWORD in .env}
       - BASE_URL=${ROUTER_PUBLIC_BASE_URL:-http://localhost:20128}
       - NEXT_PUBLIC_BASE_URL=${ROUTER_PUBLIC_BASE_URL:-http://localhost:20128}
-      # MCP tools call OmniRoute's own API; left to auto-detect they use BASE_URL,
-      # which may be a public hostname behind an auth proxy.
-      - OMNIROUTE_BASE_URL=http://127.0.0.1:20128
       - NODE_OPTIONS=--max-old-space-size=2048
     ports:
       - "${ROUTER_PUBLISH_HOST:-127.0.0.1}:20128:20128"
@@ -328,7 +326,9 @@ services:
       - omniroute_data:/app/data
     logging: *default-logging
     networks:
-      - hermes-net
+      hermes-net:
+        aliases:
+          - 9router
 
   frontend:
     build:

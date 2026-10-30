@@ -62,7 +62,6 @@ MAIN_AGENT_IDS = frozenset({MAIN_AGENT_ID, LEGACY_MAIN_AGENT_ID})
 # machine's internals.
 SERVER_ACTION_TOOLS: Set[str] = {
     "execute_command",
-    "get_system_stats",
     "diagnose_capabilities",
     "dev_read_file",
     "dev_list_dir",
@@ -119,6 +118,10 @@ OWNER_PRIVATE_TOOLS: Set[str] = {
     "get_subagent_memory",
     "call_subagent",
     "list_subagents",
+    # Read-only host telemetry (CPU/RAM/disk, R0). Sys Ops exists to report it,
+    # and without it the agent had no working tool at all; a stranger on a
+    # public channel still has no business reading the owner's machine.
+    "get_system_stats",
 }
 
 # ── What a token holder's agent may use ──────────────────────────────────────

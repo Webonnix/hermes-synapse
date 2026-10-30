@@ -6,6 +6,10 @@ one global configuration. They live here, keyed by session id, and are applied
 by ``VexaAgent.respond`` for the duration of one turn (see ``_CHAT_SETTINGS`` in
 agent.py) — never written back into the agent's global attributes.
 
+``uncensored`` asks the local model to run with its refusal direction projected out
+(Strata's experimental speed projection). On by default for web chats (session ids
+``chat_*``), off for every other session, so agents and bots never get it.
+
 ``ephemeral`` marks an incognito chat: it is hidden from the session list, the
 turn skips long-term memory extraction, and ``purge_ephemeral_sessions`` drops
 its messages at startup so nothing outlives the server process.
@@ -39,7 +43,19 @@ DEFAULTS: Dict[str, Any] = {
     "max_tokens": None,
     "think": None,
     "ephemeral": False,
+    "uncensored": False,
 }
+
+
+WEB_CHAT_PREFIX = "chat_"
+
+
+def _defaults_for(session_id: str) -> Dict[str, Any]:
+    """Web chats run uncensored unless they turn it off; bot, messenger and agent sessions never do."""
+    defaults = dict(DEFAULTS)
+    if str(session_id or "").startswith(WEB_CHAT_PREFIX):
+        defaults["uncensored"] = True
+    return defaults
 
 
 def _now() -> str:
@@ -69,11 +85,16 @@ def _init_schema() -> None:
             )
             """
         )
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(chat_session_settings)")}
+        if "uncensored" not in columns:
+            connection.execute(
+                "ALTER TABLE chat_session_settings ADD COLUMN uncensored INTEGER NOT NULL DEFAULT 0"
+            )
 
 
-def _row_to_settings(row: Optional[sqlite3.Row]) -> Dict[str, Any]:
+def _row_to_settings(row: Optional[sqlite3.Row], session_id: str = "") -> Dict[str, Any]:
     if row is None:
-        return dict(DEFAULTS)
+        return _defaults_for(session_id)
     return {
         "system_prompt": row["system_prompt"] or "",
         "temperature": row["temperature"],
@@ -81,6 +102,7 @@ def _row_to_settings(row: Optional[sqlite3.Row]) -> Dict[str, Any]:
         "max_tokens": row["max_tokens"],
         "think": row["think"] if row["think"] in THINK_MODES else None,
         "ephemeral": bool(row["ephemeral"]),
+        "uncensored": bool(row["uncensored"]),
     }
 
 
@@ -123,6 +145,7 @@ def validate(payload: Dict[str, Any]) -> Dict[str, Any]:
         "max_tokens": max_tokens,
         "think": think,
         "ephemeral": bool(payload.get("ephemeral", False)),
+        "uncensored": bool(payload.get("uncensored", False)),
     }
 
 
@@ -132,7 +155,7 @@ def get_settings(session_id: str) -> Dict[str, Any]:
         row = connection.execute(
             "SELECT * FROM chat_session_settings WHERE session_id = ?", (session_id,)
         ).fetchone()
-    return _row_to_settings(row)
+    return _row_to_settings(row, session_id)
 
 
 def save_settings(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -142,8 +165,8 @@ def save_settings(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         connection.execute(
             """
             INSERT INTO chat_session_settings
-                (session_id, system_prompt, temperature, top_p, max_tokens, think, ephemeral, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (session_id, system_prompt, temperature, top_p, max_tokens, think, ephemeral, uncensored, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
                 system_prompt = excluded.system_prompt,
                 temperature = excluded.temperature,
@@ -151,11 +174,13 @@ def save_settings(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
                 max_tokens = excluded.max_tokens,
                 think = excluded.think,
                 ephemeral = excluded.ephemeral,
+                uncensored = excluded.uncensored,
                 updated_at = excluded.updated_at
             """,
             (
                 session_id, settings["system_prompt"], settings["temperature"], settings["top_p"],
-                settings["max_tokens"], settings["think"], int(settings["ephemeral"]), _now(),
+                settings["max_tokens"], settings["think"], int(settings["ephemeral"]),
+                int(settings["uncensored"]), _now(),
             ),
         )
     return settings
@@ -164,7 +189,7 @@ def save_settings(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 def copy_settings(source_session_id: str, target_session_id: str) -> None:
     """Give a branch the same settings as the chat it was cut from."""
     settings = get_settings(source_session_id)
-    if settings != DEFAULTS:
+    if settings != _defaults_for(source_session_id):
         save_settings(target_session_id, settings)
 
 

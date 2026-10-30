@@ -290,11 +290,11 @@ describe('SimpleChatView model picker', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /qwen-mtp:latest/ }));
 
-    // Local models group under llama.cpp; router models under whoever owns them.
-    await screen.findByText('llama.cpp');
+    // Local models group under Strata; router models under whoever owns them.
+    await screen.findByText('Strata');
     const groups = [...document.querySelectorAll('.owui-model-group-label')]
       .map(el => el.textContent?.replace(/\d+$/, '') || '');
-    expect(groups).toEqual(['llama.cpp', 'ds', 'kimi']);
+    expect(groups).toEqual(['Strata', 'ds', 'kimi']);
     expect(screen.getByText('kimi-k3')).toBeInTheDocument();
     // Local rows carry the size/quant line straight from the server's /v1/models.
     expect(screen.getByText('8.0B · Q4_K_M · 5.2 GB')).toBeInTheDocument();

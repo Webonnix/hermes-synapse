@@ -179,8 +179,10 @@ server {
         if ($http_authorization != "Bearer ${LLM_PROXY_TOKEN}") {
             return 401;
         }
-        rewrite ^/llm/(.*)$ /$1 break;
-        proxy_pass $llm_upstream;
+        # Through the backend (backend/uncensored_mode.py): it adds the owner's uncensored-mode switch to every
+        # request, so Cline follows the Settings toggle without restarting the model.
+        rewrite ^/llm/(.*)$ /llm-open/$1 break;
+        proxy_pass $backend_upstream;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         # The model's window is 196608 tokens, roughly 1 MB of JSON — exactly
@@ -256,6 +258,14 @@ server {
     }
 
     location = /manifest.json {
+        add_header Cache-Control "no-cache" always;
+        try_files $uri =404;
+    }
+
+    # Icons live at stable URLs whose contents change on a rebrand; without
+    # Cache-Control the browser kept showing the old logo from heuristic cache
+    # after a deploy.
+    location ~ ^/(favicon\.(svg|ico)|vexa-icon\.svg|apple-touch-icon\.png|icon-(192|512)\.png)$ {
         add_header Cache-Control "no-cache" always;
         try_files $uri =404;
     }

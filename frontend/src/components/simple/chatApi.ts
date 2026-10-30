@@ -31,6 +31,8 @@ export interface ChatSettings {
   max_tokens: number | null;
   think: ThinkMode;
   ephemeral: boolean;
+  /** Local model without refusals (refusal-direction projection); this chat only. */
+  uncensored: boolean;
 }
 
 export const DEFAULT_CHAT_SETTINGS: ChatSettings = {
@@ -40,6 +42,7 @@ export const DEFAULT_CHAT_SETTINGS: ChatSettings = {
   max_tokens: null,
   think: null,
   ephemeral: false,
+  uncensored: true, // web chats default to it (backend/chat_settings.py)
 };
 
 /** True when a chat runs with anything other than the global configuration. */
@@ -48,7 +51,8 @@ export function hasCustomSettings(settings: ChatSettings): boolean {
     || settings.temperature !== null
     || settings.top_p !== null
     || settings.max_tokens !== null
-    || settings.think !== null;
+    || settings.think !== null
+    || !settings.uncensored;
 }
 
 export async function getChatSettings(sessionId: string): Promise<ChatSettings> {

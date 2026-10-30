@@ -8,7 +8,7 @@ import { modelMeta } from './chatModels';
  * active model, and a dropdown with a search field, Local/External filters and
  * the catalogue grouped by provider.
  *
- * "Local" is the llama.cpp server on this box; "External" is everything OmniRoute can route to.
+ * "Local" is the Strata server on this box; "External" is everything OmniRoute can route to.
  * The two are never merged into one flat list — which side a model sits on
  * decides whether the conversation leaves the machine, and that is the single
  * most important thing this control communicates.
@@ -36,7 +36,7 @@ const COPY = {
     external: 'Внешние',
     noResults: 'Ничего не найдено',
     noModels: 'Моделей нет',
-    connectHint: 'Запустите локальный сервер llama.cpp или укажите ключ OmniRoute в «Настройки → API-ключи».',
+    connectHint: 'Запустите локальный сервер Strata или укажите ключ OmniRoute в «Настройки → API-ключи».',
     setDefault: 'Сделать моделью по умолчанию',
     isDefault: 'Модель по умолчанию',
     refresh: 'Обновить список',
@@ -57,7 +57,7 @@ const COPY = {
     external: 'External',
     noResults: 'No results found',
     noModels: 'No models available',
-    connectHint: 'Start the local llama.cpp server, or add the OmniRoute key under Settings → API keys.',
+    connectHint: 'Start the local Strata server, or add the OmniRoute key under Settings → API keys.',
     setDefault: 'Set as default',
     isDefault: 'Default model',
     refresh: 'Refresh list',
@@ -76,20 +76,20 @@ type Filter = 'all' | ModelSource;
 // Widened from the literal types COPY carries, so either language's table fits.
 type Copy = { [K in keyof (typeof COPY)['ru']]: string };
 
-/** Group rows the way the dropdown lists them: local under "llama.cpp", external
+/** Group rows the way the dropdown lists them: local under "Strata", external
  * under whichever provider OmniRoute says owns the model. */
 function groupModels(models: ChatModel[]): [string, ChatModel[]][] {
   const groups = new Map<string, ChatModel[]>();
   models.forEach(model => {
-    const key = model.source === 'local' ? 'llama.cpp' : (model.owned_by || 'OmniRoute');
+    const key = model.source === 'local' ? 'Strata' : (model.owned_by || 'OmniRoute');
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(model);
   });
   // Local first, then providers alphabetically — the local group is the one a
   // user reaches for most, and it should not move as the router catalogue grows.
   return [...groups.entries()].sort((a, b) => {
-    if (a[0] === 'llama.cpp') return -1;
-    if (b[0] === 'llama.cpp') return 1;
+    if (a[0] === 'Strata') return -1;
+    if (b[0] === 'Strata') return 1;
     return a[0].localeCompare(b[0]);
   });
 }
@@ -257,7 +257,7 @@ export function ModelPicker({
             ) : grouped.map(([group, models]) => (
               <div key={group} className="owui-model-group">
                 <div className="owui-model-group-label">
-                  {group === 'llama.cpp' ? <Cpu size={11} /> : <Cloud size={11} />}
+                  {group === 'Strata' ? <Cpu size={11} /> : <Cloud size={11} />}
                   <span>{group}</span>
                   <span className="owui-model-group-count">{models.length}</span>
                 </div>

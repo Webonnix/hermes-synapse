@@ -488,6 +488,43 @@ def _activate_discovered_tools(
     return [*selected, *additions]
 
 
+def _apply_discovery_result(
+    selected: List[Dict[str, Any]], result_str: str, pool: List[Dict[str, Any]]
+) -> tuple:
+    """Activates a ``list_tools`` result and rewrites it to match what happened.
+
+    list_tools searches the whole registry, so for a sub-agent it used to report
+    "activated" for tools its principal filter had removed from ``pool``
+    (get_system_stats for Sys Ops). The model then called list_tools again and
+    again until max_tool_iterations. Here the result lists only tools the agent
+    can actually call, and when a call activates nothing new, list_tools is
+    taken away for the rest of the turn so the next step must be an answer.
+    Returns ``(selected, result_str)``.
+    """
+    widened = _activate_discovered_tools(selected, result_str, pool)
+    try:
+        payload = json.loads(result_str)
+    except (TypeError, ValueError):
+        return widened, result_str
+    if not isinstance(payload, dict):
+        return widened, result_str
+    usable = {tool.get("function", {}).get("name") for tool in pool}
+    payload["matched"] = [
+        item for item in payload.get("matched", [])
+        if isinstance(item, dict) and item.get("name") in usable
+    ]
+    if len(widened) > len(selected):
+        payload["message"] = "Эти инструменты активированы и доступны для следующего вызова."
+        return widened, json.dumps(payload, ensure_ascii=False)
+    payload["message"] = (
+        "Новых доступных инструментов для этой задачи нет: остальные закрыты политикой "
+        "для этого агента. list_tools больше не вызывай — ответь с тем, что есть, "
+        "или прямо объясни ограничение."
+    )
+    remaining = [tool for tool in widened if tool.get("function", {}).get("name") != "list_tools"]
+    return remaining, json.dumps(payload, ensure_ascii=False)
+
+
 def _extract_message_text(content: Any) -> str:
     """Normalize provider message content to plain text."""
     if content is None:
@@ -1441,8 +1478,17 @@ def _chat_system_addendum() -> str:
 
 
 def _chat_extra_payload() -> Optional[Dict[str, Any]]:
+    payload: Dict[str, Any] = {}
     top_p = _chat_setting("top_p")
-    return {"top_p": top_p} if top_p is not None else None
+    if top_p is not None:
+        payload["top_p"] = top_p
+    if _chat_setting("uncensored"):
+        from backend import uncensored_mode
+        # The owner's global switch (settings -> local model) decides; the chat's checkbox only opts a chat out.
+        # Only the local Strata engine knows this field (llm_client drops it for any other provider).
+        if uncensored_mode.enabled():
+            payload["experimental_speed_projection"] = True
+    return payload or None
 
 # What a reply keeps in messages.run_meta, so its stats survive a page reload.
 _PERSISTED_RUN_META_KEYS = (
@@ -2816,7 +2862,7 @@ class VexaAgent:
 
                         if tool_name == "list_tools":
                             # Discovery widens the schema for the rest of the turn.
-                            selected_tools = _activate_discovered_tools(
+                            selected_tools, result_str = _apply_discovery_result(
                                 selected_tools, result_str, TOOLS_SCHEMA
                             )
 
@@ -3585,7 +3631,7 @@ class VexaAgent:
                         if tool_name == "list_tools":
                             # Widened from the sub-agent's own principal-filtered
                             # pool, so discovery can never exceed its permissions.
-                            selected_subagent_tools = _activate_discovered_tools(
+                            selected_subagent_tools, result_str = _apply_discovery_result(
                                 selected_subagent_tools, result_str, subagent_tools
                             )
 

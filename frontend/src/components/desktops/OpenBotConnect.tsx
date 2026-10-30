@@ -10,7 +10,12 @@ type Copy = typeof COPY[Lang];
  * (backend/agent_runtimes/llm_proxy.py) as a custom provider. The key shown is
  * this desktop's own /agent-llm token — it opens nothing else.
  */
-export function OpenBotConnect({ desktopKey, copy }: { desktopKey: string; copy: Copy }) {
+export function OpenBotConnect({ desktopKey, copy, onSendToDesktop }: {
+  desktopKey: string;
+  copy: Copy;
+  /** Also puts the copied value on the desktop clipboard, where it is pasted. */
+  onSendToDesktop?: (value: string) => boolean;
+}) {
   const [access, setAccess] = useState<ModelAccess | null>(null);
   const [error, setError] = useState('');
   const [reveal, setReveal] = useState(false);
@@ -31,10 +36,12 @@ export function OpenBotConnect({ desktopKey, copy }: { desktopKey: string; copy:
   }, [desktopKey]);
 
   const copyValue = (label: string, value: string) => {
-    void navigator.clipboard?.writeText(value).then(() => {
-      setCopied(label);
-      window.setTimeout(() => setCopied(''), 1500);
-    }).catch(() => { /* clipboard blocked: the value is on screen */ });
+    // The form that needs the value is inside the desktop, so the value goes
+    // to its clipboard first; the owner's own clipboard is a convenience.
+    const sent = onSendToDesktop?.(value) ?? false;
+    setCopied(sent ? `${label}:desktop` : label);
+    window.setTimeout(() => setCopied(''), 2500);
+    void navigator.clipboard?.writeText(value).catch(() => { /* blocked: the value is on screen */ });
   };
 
   const field = (label: string, value: string, secret = false) => (
@@ -47,7 +54,7 @@ export function OpenBotConnect({ desktopKey, copy }: { desktopKey: string; copy:
           {reveal ? <EyeOff size={14} /> : <Eye size={14} />}
         </button>
       )}
-      <button className="ad-icon" title={copied === label ? copy.copied : copy.copy}
+      <button className="ad-icon" title={copied === `${label}:desktop` ? copy.copiedToDesktop : copied === label ? copy.copied : copy.copy}
         aria-label={`${copy.copy} ${label}`} onClick={() => copyValue(label, value)}>
         <Copy size={14} />
       </button>
@@ -77,6 +84,7 @@ export function OpenBotConnect({ desktopKey, copy }: { desktopKey: string; copy:
         </li>
         <li>{copy.connectPhone} <code>openbot mobile-connect</code></li>
       </ol>
+      {copied.endsWith(':desktop') && <p className="ad-muted" role="status">{copy.clipboardSent}</p>}
       <p className="ad-note"><ShieldAlert size={14} /> {copy.connectNote}</p>
     </div>
   );

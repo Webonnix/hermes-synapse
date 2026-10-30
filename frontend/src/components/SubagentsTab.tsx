@@ -159,7 +159,7 @@ function ModelSelect({ value, onChange, className, models, routerModels, routerM
       >
         {!value && <option value="">— выберите модель —</option>}
         {localModels.length > 0 && (
-          <optgroup label="llama.cpp (локальная)">
+          <optgroup label="Strata (локальная)">
             {localModels.map(m => (
               <option key={m.id} value={m.id}>{m.name || m.id}</option>
             ))}

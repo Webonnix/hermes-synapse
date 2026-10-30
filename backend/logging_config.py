@@ -4,7 +4,7 @@ from typing import Any
 
 
 _SECRET_PATTERNS = (
-    re.compile(r"(https?://api\.telegram\.org/bot)[^/\s\"']+", re.IGNORECASE),
+    re.compile(r"(https?://api\.telegram\.org/(?:file/)?bot)[^/\s\"']+", re.IGNORECASE),
     re.compile(r"(\bAuthorization\s*:\s*Bearer\s+)[^\s,;\"']+", re.IGNORECASE),
     re.compile(
         r"(\b(?:api[_-]?key|token|password|secret)\s*[=:]\s*)[^\s,;\"']+",
@@ -39,4 +39,7 @@ def configure_logging() -> None:
     for handler in root.handlers:
         if not any(isinstance(item, SecretRedactingFilter) for item in handler.filters):
             handler.addFilter(redactor)
+    # httpx logs every request URL at INFO, and Telegram puts the bot token in
+    # the URL path; the per-poll getUpdates lines are noise anyway.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 

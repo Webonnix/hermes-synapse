@@ -862,6 +862,12 @@ async def init_bot() -> Application:
         .concurrent_updates(8)
         .connection_pool_size(16)
         .pool_timeout(10.0)
+        # PTB's 5 s default write timeout is too short to upload a long
+        # voice reply (or a report document) over a slow uplink.
+        .connect_timeout(15.0)
+        .read_timeout(30.0)
+        .write_timeout(60.0)
+        .media_write_timeout(120.0)
         .build()
     )
     

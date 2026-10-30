@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import os
 import re
@@ -100,7 +101,25 @@ def _build_llm():
         base_url = os.getenv("LLAMACPP_BASE_URL", "http://hermes-llama:8080").rstrip("/")
         if not base_url.endswith("/v1"):
             base_url += "/v1"
-        return ChatOpenAI(model=model, base_url=base_url, api_key=os.getenv("LLAMACPP_API_KEY", "") or "not-needed")
+        # Strata's default is "projection ON" for a request that omits the field; this agent must stay on the stock model,
+        # so every request body gets an explicit false.
+        import httpx
+
+        async def _force_projection_off(request: "httpx.Request") -> None:
+            try:
+                body = json.loads(request.content or b"{}")
+            except ValueError:
+                return
+            if isinstance(body, dict):
+                body["experimental_speed_projection"] = False
+                raw = json.dumps(body).encode()
+                request._content = raw
+                request.headers["content-length"] = str(len(raw))
+                request.stream = httpx.ByteStream(raw)
+
+        http_client = httpx.AsyncClient(event_hooks={"request": [_force_projection_off]}, timeout=httpx.Timeout(120.0))
+        return ChatOpenAI(model=model, base_url=base_url, api_key=os.getenv("LLAMACPP_API_KEY", "") or "not-needed",
+                          http_client=http_client)
 
     if provider == "openrouter":
         # Not re-exported from the top-level `browser_use` package in this

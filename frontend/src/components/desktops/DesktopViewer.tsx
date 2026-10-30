@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import type RFB from '@novnc/novnc';
 
 type Status = 'connecting' | 'connected' | 'disconnected';
@@ -11,6 +11,14 @@ interface Props {
   /** Which of the desktop's screens (an OpenBot desktop has two). */
   screen?: number;
   copy: { connecting: string; disconnected: string };
+  /** Text the desktop put on its clipboard. Kept by the caller, never written
+   * to the owner's clipboard without a click: the agent controls that text. */
+  onDesktopClipboard?: (text: string) => void;
+}
+
+export interface DesktopViewerHandle {
+  /** Puts text on the desktop's clipboard; false when the screen is not connected. */
+  sendClipboard(text: string): boolean;
 }
 
 /**
@@ -22,10 +30,28 @@ interface Props {
  * noVNC is imported on first use: it is only needed while someone watches a
  * desktop, and it should not weigh on every other tab's bundle.
  */
-export function DesktopViewer({ desktopKey, viewOnly, attempt, screen = 0, copy }: Props) {
+export const DesktopViewer = forwardRef<DesktopViewerHandle, Props>(function DesktopViewer(
+  { desktopKey, viewOnly, attempt, screen = 0, copy, onDesktopClipboard }, ref,
+) {
   const screenRef = useRef<HTMLDivElement | null>(null);
   const rfbRef = useRef<RFB | null>(null);
   const [status, setStatus] = useState<Status>('connecting');
+  const onDesktopClipboardRef = useRef(onDesktopClipboard);
+  useEffect(() => { onDesktopClipboardRef.current = onDesktopClipboard; }, [onDesktopClipboard]);
+
+  useImperativeHandle(ref, () => ({
+    sendClipboard(text: string) {
+      const rfb = rfbRef.current;
+      if (!rfb || status !== 'connected') return false;
+      // noVNC drops clipboard text while view-only. Setting the clipboard is
+      // not input — nothing is clicked or typed — so lift it for this one call.
+      const wasViewOnly = rfb.viewOnly;
+      rfb.viewOnly = false;
+      rfb.clipboardPasteFrom(text);
+      rfb.viewOnly = wasViewOnly;
+      return true;
+    },
+  }), [status]);
 
   useEffect(() => {
     let disposed = false;
@@ -43,6 +69,10 @@ export function DesktopViewer({ desktopKey, viewOnly, attempt, screen = 0, copy 
       rfb.viewOnly = viewOnly;
       rfb.addEventListener('connect', () => { if (!disposed) setStatus('connected'); });
       rfb.addEventListener('disconnect', () => { if (!disposed) setStatus('disconnected'); });
+      rfb.addEventListener('clipboard', (event) => {
+        const text = (event as CustomEvent<{ text?: string }>).detail?.text;
+        if (!disposed && text) onDesktopClipboardRef.current?.(text);
+      });
       rfbRef.current = rfb;
     }).catch(() => { if (!disposed) setStatus('disconnected'); });
 
@@ -70,4 +100,4 @@ export function DesktopViewer({ desktopKey, viewOnly, attempt, screen = 0, copy 
       )}
     </div>
   );
-}
+});

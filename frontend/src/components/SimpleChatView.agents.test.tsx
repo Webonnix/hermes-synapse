@@ -25,7 +25,7 @@ function stubFetch(settings: Record<string, unknown> = {}) {
     const path = String(url);
     let body: unknown = {};
     if (path === '/api/subagents') body = agents;
-    else if (path.endsWith('/settings')) body = { system_prompt: '', temperature: null, top_p: null, max_tokens: null, think: null, ephemeral: false, ...settings };
+    else if (path.endsWith('/settings')) body = { system_prompt: '', temperature: null, top_p: null, max_tokens: null, think: null, ephemeral: false, uncensored: false, ...settings };
     else if (path.endsWith('/fork')) body = { status: 'success', new_session_id: 'chat_a_fork_1' };
     else if (path.startsWith('/api/chat/models')) body = { local: [], router: [], default: { id: '', source: 'local', name: '' } };
     return Promise.resolve({ ok: true, json: async () => body } as Response);
@@ -175,7 +175,7 @@ describe('branches, settings and export', () => {
     const put = calls.find(c => c.init?.method === 'PUT');
     expect(put?.url).toBe('/api/history/chat_a/settings');
     expect(JSON.parse(String(put?.init?.body))).toMatchObject({
-      system_prompt: 'Только по-английски', temperature: 0.2, top_p: null, max_tokens: null, think: null, ephemeral: false,
+      system_prompt: 'Только по-английски', temperature: 0.2, top_p: null, max_tokens: null, think: null, ephemeral: false, uncensored: false,
     });
   });
 

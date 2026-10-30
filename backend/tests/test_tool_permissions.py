@@ -6,10 +6,15 @@ from backend import tool_permissions as tp
 
 
 def test_owner_keeps_everything_and_subagents_lose_the_server():
-    for tool in ("execute_command", "dev_exec", "git_push", "get_system_stats", "create_subagent"):
+    for tool in ("execute_command", "dev_exec", "git_push", "create_subagent"):
         assert tp.is_tool_allowed(tp.OWNER, tool) is True
         assert tp.is_tool_allowed(tp.SUBAGENT, tool) is False
         assert tp.is_tool_allowed(tp.PUBLIC_CHANNEL, tool) is False
+
+
+def test_host_telemetry_is_readable_internally_but_not_publicly():
+    assert tp.is_tool_allowed(tp.SUBAGENT, "get_system_stats") is True
+    assert tp.is_tool_allowed(tp.PUBLIC_CHANNEL, "get_system_stats") is False
 
 
 def test_subagents_keep_their_working_tools():
@@ -180,3 +185,42 @@ def test_list_tools_is_a_no_risk_governed_tool():
     from backend.control_plane import classify_tool_risk
 
     assert classify_tool_risk("list_tools") == "R0"
+
+
+def test_discovery_of_only_forbidden_tools_ends_the_loop():
+    """Sys Ops (2026-10-18): list_tools found tools the sub-agent principal
+    filter removes (get_system_stats then), yet said "activated" — the model
+    called list_tools 50 times in a row. The rewritten result must list nothing it
+    cannot call and take list_tools away so the next step is an answer."""
+    import json as _json
+
+    from backend import tool_permissions
+    from backend.agent import _apply_discovery_result, _with_discovery_tool
+    from backend.tools import TOOLS_SCHEMA, list_tools
+
+    allowed = tool_permissions.filter_tool_names(
+        tool_permissions.SUBAGENT, {"list_tools", "get_subagent_memory"}
+    )
+    pool = [t for t in TOOLS_SCHEMA if t["function"]["name"] in allowed]
+    selected = _with_discovery_tool([], pool)
+    raw = list_tools("execute shell command on the server")
+    assert "execute_command" in raw  # the registry search itself is unchanged
+
+    remaining, rewritten = _apply_discovery_result(selected, raw, pool)
+    payload = _json.loads(rewritten)
+    assert payload["matched"] == []
+    assert "list_tools" not in [t["function"]["name"] for t in remaining]
+
+
+def test_discovery_result_keeps_list_tools_when_something_was_activated():
+    import json as _json
+
+    from backend.agent import _apply_discovery_result, _with_discovery_tool
+    from backend.tools import TOOLS_SCHEMA
+
+    selected = _with_discovery_tool([], TOOLS_SCHEMA)
+    result = _json.dumps({"status": "ok", "matched": [{"name": "create_obsidian_note", "description": "x"}]})
+    widened, rewritten = _apply_discovery_result(selected, result, TOOLS_SCHEMA)
+    names = [t["function"]["name"] for t in widened]
+    assert "create_obsidian_note" in names and "list_tools" in names
+    assert _json.loads(rewritten)["matched"][0]["name"] == "create_obsidian_note"

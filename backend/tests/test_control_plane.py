@@ -134,7 +134,7 @@ def test_a_subagent_principal_cannot_reach_the_host_even_via_the_control_plane(c
     execute = MagicMock()
     tools_module.execute_tool = execute
     with patch.dict(sys.modules, {"backend.tools": tools_module}):
-        for tool in ("execute_command", "dev_exec", "git_push", "get_system_stats"):
+        for tool in ("execute_command", "dev_exec", "git_push"):
             result = json.loads(control_plane.execute_governed_tool(tool, {}, "bot", principal=SUBAGENT))
             assert result["status"] == "forbidden"
         execute.assert_not_called()

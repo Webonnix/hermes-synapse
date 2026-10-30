@@ -1,9 +1,10 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentDesktopsTab } from './AgentDesktopsTab';
 import { buildTranscript, normalizeKey, DESKTOP_KEY_RE, type DesktopEvent } from './desktopModel';
 
-const rfbInstances: { url: string; options: unknown; viewOnly: boolean }[] = [];
+type FakeRfb = EventTarget & { url: string; options: unknown; viewOnly: boolean; pasted: { text: string; viewOnly: boolean }[] };
+const rfbInstances: FakeRfb[] = [];
 
 vi.mock('@novnc/novnc', () => ({
   default: class FakeRFB extends EventTarget {
@@ -19,10 +20,20 @@ vi.mock('@novnc/novnc', () => ({
       this.options = options;
       rfbInstances.push(this);
     }
+    pasted: { text: string; viewOnly: boolean }[] = [];
     disconnect() {}
     focus() {}
+    // Like noVNC: text sent while view-only is dropped.
+    clipboardPasteFrom(text: string) {
+      if (!this.viewOnly) this.pasted.push({ text, viewOnly: this.viewOnly });
+    }
   },
 }));
+
+const connect = async () => {
+  await waitFor(() => expect(rfbInstances).toHaveLength(1));
+  await act(async () => { rfbInstances[0].dispatchEvent(new Event('connect')); });
+};
 
 const ev = (seq: number, fields: Partial<DesktopEvent>): DesktopEvent => ({ seq, at: 0, type: 'message', ...fields });
 
@@ -170,5 +181,64 @@ describe('AgentDesktopsTab', () => {
     await waitFor(() => expect(rfbInstances).toHaveLength(1));
     fireEvent.click(screen.getByRole('button', { name: 'Agents screen' }));
     await waitFor(() => expect(rfbInstances.at(-1)!.url).toMatch(/vnc\?screen=1$/));
+  });
+
+  describe('clipboard', () => {
+    const openbotListing = {
+      'GET /api/agent-desktops': { enabled: true, runtimes, kinds: [
+        { id: 'agent', enabled: true, screens: 1 }, { id: 'openbot', enabled: true, screens: 2 }],
+        desktops: [{ key: 'bot', name: 'n', status: 'running', busy: [], kind: 'openbot' }] },
+      'GET /api/agent-desktops/bot/events': { events: [] },
+      'GET /api/agent-desktops/bot/model-access': {
+        base_url: 'http://hermes-backend:8000/agent-llm/v1', model: 'qwen-local', api_key: 'bot.secret', models: ['qwen-local'] },
+    };
+
+    it('copying a connect value also puts it on the desktop clipboard, even while view-only', async () => {
+      localStorage.setItem('hermes_agent_desktop_selected', 'bot');
+      vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText: vi.fn(async () => {}), readText: vi.fn() } });
+      mockApi(openbotListing);
+      render(<AgentDesktopsTab language="en" />);
+      await screen.findByText('http://hermes-backend:8000/agent-llm/v1');
+      await connect();
+      fireEvent.click(screen.getByRole('button', { name: 'Copy API key' }));
+      expect(rfbInstances[0].pasted.map(p => p.text)).toEqual(['bot.secret']);
+      expect(rfbInstances[0].viewOnly).toBe(true);  // view-only is back on afterwards
+      expect(await screen.findAllByText(/Text is on the desktop clipboard/)).not.toHaveLength(0);
+    });
+
+    it('sends my clipboard to the desktop, or offers a paste box when reading it is refused', async () => {
+      localStorage.setItem('hermes_agent_desktop_selected', 'bot');
+      const readText = vi.fn().mockResolvedValueOnce('hello desktop').mockRejectedValueOnce(new Error('denied'));
+      vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText: vi.fn(async () => {}), readText } });
+      mockApi(openbotListing);
+      render(<AgentDesktopsTab language="en" />);
+      await screen.findByText('http://hermes-backend:8000/agent-llm/v1');
+      await connect();
+      fireEvent.click(screen.getByRole('button', { name: /To desktop/ }));
+      await waitFor(() => expect(rfbInstances[0].pasted.map(p => p.text)).toEqual(['hello desktop']));
+      fireEvent.click(screen.getByRole('button', { name: /To desktop/ }));
+      const box = await screen.findByLabelText(/Paste text here/);
+      fireEvent.change(box, { target: { value: 'typed by hand' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+      expect(rfbInstances[0].pasted.map(p => p.text)).toEqual(['hello desktop', 'typed by hand']);
+    });
+
+    it('never writes the desktop clipboard to mine until I ask', async () => {
+      localStorage.setItem('hermes_agent_desktop_selected', 'bot');
+      const writeText = vi.fn(async () => {});
+      vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText, readText: vi.fn() } });
+      mockApi(openbotListing);
+      render(<AgentDesktopsTab language="en" />);
+      await screen.findByText('http://hermes-backend:8000/agent-llm/v1');
+      await connect();
+      const fromDesktop = screen.getByRole('button', { name: /From desktop/ });
+      expect(fromDesktop).toBeDisabled();
+      await act(async () => {
+        rfbInstances[0].dispatchEvent(new CustomEvent('clipboard', { detail: { text: 'rm -rf ~' } }));
+      });
+      expect(writeText).not.toHaveBeenCalled();
+      fireEvent.click(fromDesktop);
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith('rm -rf ~'));
+    });
   });
 });

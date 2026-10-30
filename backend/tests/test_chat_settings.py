@@ -41,7 +41,9 @@ def _messages(db_path, session_id, *contents):
 # --- validation and storage -------------------------------------------------
 
 def test_unsaved_chat_has_the_defaults(chat_db):
-    assert chat_settings.get_settings("chat_new") == chat_settings.DEFAULTS
+    assert chat_settings.get_settings("chat_new") == {**chat_settings.DEFAULTS, "uncensored": True}
+    assert chat_settings.get_settings("matrixbot:x:!room") == chat_settings.DEFAULTS
+    assert chat_settings.get_settings("7211042207") == chat_settings.DEFAULTS
 
 
 def test_settings_round_trip(chat_db):
@@ -52,8 +54,17 @@ def test_settings_round_trip(chat_db):
     assert saved["system_prompt"] == "Отвечай по-английски."
     assert chat_settings.get_settings("chat_a") == {
         "system_prompt": "Отвечай по-английски.", "temperature": 0.2, "top_p": 0.9,
-        "max_tokens": 512, "think": "off", "ephemeral": False,
+        "max_tokens": 512, "think": "off", "ephemeral": False, "uncensored": False,
     }
+
+
+def test_uncensored_is_on_for_web_chats_only_and_can_be_turned_off(chat_db):
+    assert chat_settings.get_settings("chat_u")["uncensored"] is True
+    assert chat_settings.get_settings("tg_123")["uncensored"] is False
+    chat_settings.save_settings("chat_u", {})
+    assert chat_settings.get_settings("chat_u")["uncensored"] is False
+    chat_settings.save_settings("tg_123", {"uncensored": True})
+    assert chat_settings.get_settings("tg_123")["uncensored"] is True
 
 
 @pytest.mark.parametrize("payload", [
@@ -185,7 +196,7 @@ def test_incognito_chats_are_purged(chat_db):
 def test_deleting_a_chat_drops_its_settings(chat_db):
     chat_settings.save_settings("chat_a", {"system_prompt": "x"})
     client.delete("/api/history/chat_a")
-    assert chat_settings.get_settings("chat_a") == chat_settings.DEFAULTS
+    assert chat_settings.get_settings("chat_a") == {**chat_settings.DEFAULTS, "uncensored": True}
 
 
 # --- arena ------------------------------------------------------------------
@@ -224,3 +235,27 @@ def test_arena_answers_each_contender_and_survives_a_failure(monkeypatch):
     # A plain completion: no tools offered, so nothing can act twice.
     assert all("tools" not in call for call in calls)
     assert calls[0]["messages"][-1] == {"role": "user", "content": "2+2?"}
+
+
+# --- global uncensored switch -------------------------------------------------
+
+def test_global_uncensored_switch_is_off_until_turned_on(chat_db):
+    from backend import uncensored_mode
+    assert uncensored_mode.enabled() is False
+    assert uncensored_mode.set_enabled(True) is True
+    assert uncensored_mode.enabled() is True
+    assert uncensored_mode.set_enabled(False) is False
+
+
+def test_chat_payload_needs_both_the_switch_and_the_chat_flag(chat_db):
+    from backend import uncensored_mode
+    token = agent_module._CHAT_SETTINGS.set({"uncensored": True})
+    try:
+        assert agent_module._chat_extra_payload() is None
+        uncensored_mode.set_enabled(True)
+        assert agent_module._chat_extra_payload() == {"experimental_speed_projection": True}
+        agent_module._CHAT_SETTINGS.reset(token)
+        token = agent_module._CHAT_SETTINGS.set({"uncensored": False})
+        assert agent_module._chat_extra_payload() is None
+    finally:
+        agent_module._CHAT_SETTINGS.reset(token)

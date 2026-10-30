@@ -406,6 +406,18 @@ async def lifespan(app: FastAPI):
         from backend import agent_learning
         crash_visibility.spawn(agent_learning.scheduler_loop(), "agent_learning.scheduler_loop")
 
+    # Autonomous Earner: schema always (so the section renders), the worker only
+    # while EARNER_ENABLED. The worker marks stages a previous process left
+    # mid-way as interrupted and never resumes them (backend/earner/worker.py).
+    try:
+        from backend.earner import store as earner_store
+        earner_store.init_schema()
+        if os.getenv("EARNER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
+            from backend.earner import worker as earner_worker
+            crash_visibility.spawn(earner_worker.worker_loop(), "earner.worker_loop")
+    except Exception:
+        logger.exception("Autonomous Earner disabled: startup failed")
+
     # Proactively probe every active messenger channel's stored credential so a
     # dead Matrix/Telegram/Discord/Slack/email token surfaces as a visible
     # "Ошибка" in the dashboard within minutes, not whenever someone happens to
@@ -756,6 +768,14 @@ except Exception:
     logger.exception("SMM Factory social webhooks not mounted")
 
 
+# Global uncensored-mode switch for the local model and the /llm-open door nginx's /llm/ uses (backend/uncensored_mode.py).
+try:
+    from backend.uncensored_mode import router as uncensored_mode_router
+    app.include_router(uncensored_mode_router)
+except Exception:
+    logger.exception("Uncensored-mode router not mounted")
+
+
 # INBOX: conversation archive, takeover, routing rules, conversation routing and
 # external voice providers (backend/inbox_api.py).
 try:
@@ -772,6 +792,15 @@ try:
     app.include_router(agent_learning_router)
 except Exception:
     logger.exception("Agent learning API not mounted")
+
+
+# AUTONOMOUS EARNER: opportunity research, proposals, approvals, sandbox checks
+# (backend/earner/api.py).
+try:
+    from backend.earner.api import router as earner_router
+    app.include_router(earner_router)
+except Exception:
+    logger.exception("Earner API not mounted")
 
 
 # TELEPHONY: lines, numbers, speech services, calls, provider webhooks and media
@@ -897,6 +926,8 @@ KNOWN_API_KEYS = [
     {"key_name": "OPENROUTER_API_KEY", "label": "OpenRouter", "description": "Облачный провайдер для основной модели, если выбран OpenRouter.", "category": "LLM"},
     {"key_name": "ROUTER_API_KEY", "label": "AI Router (OmniRoute)", "description": "Ключ из OmniRoute → Dashboard → API Keys. Используется в разделе «AI Router» только для проверки доступности и списка моделей (GET /v1/models) — квоты и usage смотрите в самом OmniRoute. Тот же ключ можно использовать и для провайдер-биндинга агентов через Админку → Providers.", "category": "LLM"},
     {"key_name": "OMNIROUTE_MCP_API_KEY", "label": "OmniRoute MCP", "description": "Отдельный ключ OmniRoute со scope mcp:connect (Dashboard → API Keys) для подключения его MCP-сервера: агенты получают инструменты роутинга, квот, стоимости и веб-поиска OmniRoute. Если не задан — используется ROUTER_API_KEY.", "category": "LLM"},
+    {"key_name": "EARNER_GITHUB_TOKEN", "label": "GitHub (Autonomous Earner)", "description": "Classic-токен GitHub со scope «public_repo» (fine-grained токены не могут писать в чужие публичные репозитории). Earner публикует им комментарий или открывает PR из вашего форка — только после вашего подтверждения конкретного текста и diff.", "category": "Инструменты"},
+    {"key_name": "EARNER_SUPERTEAM_API_KEY", "label": "Superteam Earn (Autonomous Earner)", "description": "Ключ агента Superteam Earn (sk_…, выдаётся при регистрации агента: POST https://superteam.fun/api/agents). Earner только читает листинги, открытые для ИИ-агентов.", "category": "Инструменты"},
     {"key_name": "NOWPAYMENTS_API_KEY", "label": "NOWPayments (API)", "description": "Выставление криптосчетов за подписки на ботов.", "category": "Биллинг"},
     {"key_name": "NOWPAYMENTS_IPN_SECRET", "label": "NOWPayments (IPN)", "description": "Секрет для проверки подписи callback-ов об оплате. Без него платежи не подтверждаются.", "category": "Биллинг"},
 ]
@@ -4268,6 +4299,7 @@ class ChatSettingsPayload(BaseModel):
     max_tokens: Optional[int] = None
     think: Optional[str] = None
     ephemeral: bool = False
+    uncensored: bool = False
 
 
 @app.get("/api/history/{session_id}/settings")

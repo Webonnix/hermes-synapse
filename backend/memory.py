@@ -228,6 +228,8 @@ class SQLiteGraphMemoryEngine(MemoryEngine):
                 "temperature": 0.1,
                 "max_tokens": 1000
             }
+            if "hermes-llama" in str(api_base):
+                payload["experimental_speed_projection"] = False  # Strata's default is ON
             with httpx.Client(timeout=15.0) as client:
                 resp = client.post(f"{api_base}/chat/completions", json=payload, headers=headers)
             if resp.status_code == 200:

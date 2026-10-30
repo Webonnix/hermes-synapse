@@ -93,6 +93,14 @@ PHONE_CALL = "phone.call"
 # web-derived text into an agent's context. Both are owner-only by default.
 AGENTS_LEARNING_VIEW = "agents.learning.view"
 AGENTS_LEARNING_MANAGE = "agents.learning.manage"
+# Autonomous Earner (backend/earner). Seeing the pipeline, steering it
+# (sources, limits, preparing confirmation screens) and confirming a stage are
+# separate: confirming spends model time, opens egress or runs generated code
+# in a sandbox, so it is its own grant — owner-only by default, and no agent
+# principal holds a dashboard session to exercise it.
+EARNER_VIEW = "earner.view"
+EARNER_MANAGE = "earner.manage"
+EARNER_APPROVE = "earner.approve"
 # Agent desktops (backend/agent_runtimes/): starting one runs CLI agents with
 # internet access, and watching one shows — and lets you drive — everything
 # the agent sees. Owner only by default.
@@ -116,6 +124,7 @@ ALL_PERMISSIONS: tuple = (
     INBOX_VIEW, INBOX_REPLY, INBOX_RULES_EDIT, VOICE_PROVIDERS_MANAGE,
     PHONE_MANAGE, PHONE_CALL,
     AGENTS_LEARNING_VIEW, AGENTS_LEARNING_MANAGE,
+    EARNER_VIEW, EARNER_MANAGE, EARNER_APPROVE,
     AGENT_DESKTOPS_MANAGE,
 )
 

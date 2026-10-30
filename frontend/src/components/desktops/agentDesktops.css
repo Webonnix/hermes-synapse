@@ -124,6 +124,10 @@
   background: var(--bg-elevated); color: var(--accent-cyan); font-size: 11px; font-weight: 600;
 }
 
+/* --- clipboard --- */
+.ad-paste { display: flex; gap: 8px; align-items: stretch; }
+.ad-paste .ad-input { flex: 1; resize: vertical; }
+
 /* --- kinds, screens, OpenBot connect --- */
 .ad-new { flex-wrap: wrap; }
 .ad-kind { flex-basis: 100%; }

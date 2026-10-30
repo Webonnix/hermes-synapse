@@ -816,7 +816,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
   const externalProvidersLocked = !!draftTier && !draftTier.allow_external_provider;
   const activeProviders = providers.filter(p => p.status === 'active');
   const providerLabel = (providerId: string) => {
-    if (providerId === 'local') return 'llama.cpp (локально)';
+    if (providerId === 'local') return 'Strata (локально)';
     return providers.find(p => p.id === providerId)?.name || providerId;
   };
   const toggleAllowedProvider = (providerId: string) => {
@@ -970,7 +970,7 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
                   disabled={externalProvidersLocked}
                   onChange={e => setDraft({ ...draft, model_provider: e.target.value })}
                 >
-                  <option value="local">llama.cpp ({t('local')})</option>
+                  <option value="local">Strata ({t('local')})</option>
                   {activeProviders.map(p => (
                     <option key={p.id} value={p.id}>{p.name} ({p.provider_type})</option>
                   ))}

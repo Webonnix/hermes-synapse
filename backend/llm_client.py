@@ -792,6 +792,8 @@ async def _call_llm_normalized(
         payload["tools"] = tools
 
     for key, value in (extra_payload or {}).items():
+        if key == "experimental_speed_projection":
+            continue  # understood by the local Strata engine only
         if key not in _PROTECTED_PAYLOAD_KEYS and value is not None:
             payload[key] = value
     for key in (_drop_params or set()) | remembered_refusals(api_base, model):

@@ -1,4 +1,4 @@
-import { AlertTriangle, CheckCircle2, Cpu, HardDrive, Loader2, RefreshCw, Server, Unplug, Zap } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Cpu, HardDrive, Loader2, RefreshCw, Server, ShieldOff, Unplug, Zap } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import type { LocalLlmStatus, SystemConfig } from '../types';
 
@@ -35,7 +35,7 @@ async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 /**
- * The local llama.cpp server. Unlike the Ollama panel it replaced there is no
+ * The local model server (Strata, OpenAI-compatible like llama.cpp). Unlike the Ollama panel it replaced there is no
  * pull/delete/unload: llama-server loads exactly one model at start-up and keeps
  * it resident, so the operational facts are whether it is up, what it serves,
  * and whether the agent is actually configured for that model.
@@ -45,15 +45,40 @@ export function LocalModelPanel({ onSelectModel, activeModel, onActivated }: Loc
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [activating, setActivating] = useState(false);
+  const [uncensored, setUncensored] = useState<boolean | null>(null);
+  const [uncensoredBusy, setUncensoredBusy] = useState(false);
+
+  useEffect(() => {
+    apiJson<{ enabled: boolean }>('/api/uncensored-mode')
+      .then((result) => setUncensored(result.enabled))
+      .catch(() => setUncensored(null));
+  }, []);
+
+  const toggleUncensored = async (next: boolean) => {
+    setUncensoredBusy(true);
+    setError('');
+    try {
+      const result = await apiJson<{ enabled: boolean }>('/api/uncensored-mode', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: next }),
+      });
+      setUncensored(result.enabled);
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : 'Could not change the uncensored mode.');
+    } finally {
+      setUncensoredBusy(false);
+    }
+  };
 
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
       const next = await apiJson<LocalLlmStatus>('/api/llm/status');
       setStatus(next);
-      setError(next.available ? '' : (next.error || 'The llama.cpp server is unavailable.'));
+      setError(next.available ? '' : (next.error || 'The Strata server is unavailable.'));
     } catch (refreshError) {
-      setError(refreshError instanceof Error ? refreshError.message : 'Could not reach the llama.cpp server.');
+      setError(refreshError instanceof Error ? refreshError.message : 'Could not reach the Strata server.');
     } finally {
       setLoading(false);
     }
@@ -97,7 +122,7 @@ export function LocalModelPanel({ onSelectModel, activeModel, onActivated }: Loc
         <div className="localllm-manager-title">
           <span><Server size={18} /></span>
           <div>
-            <h3 id="localllm-manager-title">llama.cpp server</h3>
+            <h3 id="localllm-manager-title">Strata server</h3>
             <p>{status?.base_url || 'Local model server'}</p>
           </div>
         </div>
@@ -105,7 +130,7 @@ export function LocalModelPanel({ onSelectModel, activeModel, onActivated }: Loc
           {loading ? <Loader2 size={14} className="spin-slow" /> : status?.available ? <CheckCircle2 size={14} /> : <Unplug size={14} />}
           <span>{healthLabel}</span>
         </div>
-        <button type="button" className="localllm-refresh" onClick={() => void refresh()} disabled={loading} aria-label="Refresh llama.cpp status">
+        <button type="button" className="localllm-refresh" onClick={() => void refresh()} disabled={loading} aria-label="Refresh Strata status">
           <RefreshCw size={15} />
         </button>
       </header>
@@ -136,6 +161,31 @@ export function LocalModelPanel({ onSelectModel, activeModel, onActivated }: Loc
           )}
         </div>
       </div>
+
+      {uncensored !== null && (
+        <div className={`localllm-uncensored ${uncensored ? 'is-on' : ''}`}>
+          <ShieldOff size={16} />
+          <div className="localllm-uncensored-text">
+            <strong id="localllm-uncensored-title">Без цензуры</strong>
+            <small>
+              Веб-чаты Hermes и Cline (/llm/) отвечают без отказов; в настройках чата его можно отключить отдельно.
+              Агенты, боты и браузерный агент всегда на обычной модели. Применяется сразу.
+            </small>
+          </div>
+          <span className="localllm-switch-state">{uncensored ? 'ВКЛ' : 'ВЫКЛ'}</span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={uncensored}
+            aria-labelledby="localllm-uncensored-title"
+            className={`localllm-switch ${uncensored ? 'is-on' : ''}`}
+            disabled={uncensoredBusy}
+            onClick={() => void toggleUncensored(!uncensored)}
+          >
+            <i />
+          </button>
+        </div>
+      )}
 
       {mismatch && (
         <div className="localllm-warning" role="status">

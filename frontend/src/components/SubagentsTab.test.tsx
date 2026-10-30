@@ -83,7 +83,7 @@ describe('SubagentsTab model picker', () => {
 
     await waitFor(() => expect(groupLabels()).toContain('OmniRoute · ag'));
     expect(groupLabels()).toEqual([
-      'llama.cpp (локальная)', 'OmniRoute · ag', 'OmniRoute · ds',
+      'Strata (локальная)', 'OmniRoute · ag', 'OmniRoute · ds',
     ]);
     expect(optionLabels()).toEqual([
       '', 'qwen-mtp:latest', 'qwen-quality:latest',

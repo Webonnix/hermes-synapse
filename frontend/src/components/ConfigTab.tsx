@@ -309,7 +309,7 @@ export function ConfigTab({
               }}
               style={styles.formSelect}
             >
-              <option value="llamacpp">llama.cpp — local server</option>
+              <option value="llamacpp">Strata — local server</option>
               <option value="openrouter">OpenRouter</option>
               <option value="openai_compatible">OpenAI-compatible endpoint</option>
             </select>
@@ -394,7 +394,7 @@ export function ConfigTab({
               />
             )}
           </div>
-          <span style={styles.formHelp}>{activeProvider === 'llamacpp' ? 'The llama.cpp server serves one model; its id comes from /v1/models.' : 'Models with function calling support are recommended.'}</span>
+          <span style={styles.formHelp}>{activeProvider === 'llamacpp' ? 'The Strata server serves one model; its id comes from /v1/models.' : 'Models with function calling support are recommended.'}</span>
         </div>
 
         <div style={styles.formGroup}>
@@ -490,7 +490,7 @@ export function ConfigTab({
                 <label style={styles.formGroup}>
                   <span style={styles.formLabel}>Context window (server)</span>
                   <input type="number" value={numberValue('local_num_ctx', 32768)} readOnly disabled style={compactInputStyle} className="form-input" />
-                  <span style={styles.formHelp}>Fixed when the llama.cpp server starts (LLAMA_CTX_SIZE); read back from the server.</span>
+                  <span style={styles.formHelp}>Fixed when Strata starts (CONTEXT in its container settings); read back from the server.</span>
                 </label>
                 <label style={styles.formGroup}>
                   <span style={styles.formLabel}>Thinking output</span>

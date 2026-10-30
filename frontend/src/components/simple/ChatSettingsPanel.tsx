@@ -21,6 +21,8 @@ const COPY = {
     thinkDefault: 'Как в настройках',
     thinkOn: 'Включены',
     thinkOff: 'Выключены',
+    uncensored: 'Без цензуры (локальная модель)',
+    uncensoredHint: 'Убирает направление отказа в локальной Qwen: только в этом чате, агенты и боты не затрагиваются. Работает только с локальной моделью; ответственность за текст на вас.',
     reset: 'Сбросить',
     save: 'Сохранить',
     cancel: 'Отмена',
@@ -39,6 +41,8 @@ const COPY = {
     thinkDefault: 'As configured',
     thinkOn: 'On',
     thinkOff: 'Off',
+    uncensored: 'Uncensored (local model)',
+    uncensoredHint: "Projects out the local Qwen's refusal direction: this chat only, agents and bots are unaffected. Local model only; you are responsible for what it writes.",
     reset: 'Reset',
     save: 'Save',
     cancel: 'Cancel',
@@ -68,6 +72,7 @@ export function ChatSettingsPanel({ language, sessionId, settings, onClose, onSa
   const [topP, setTopP] = useState(settings.top_p?.toString() ?? '');
   const [maxTokens, setMaxTokens] = useState(settings.max_tokens?.toString() ?? '');
   const [think, setThink] = useState<ThinkMode>(settings.think);
+  const [uncensored, setUncensored] = useState(settings.uncensored);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -83,6 +88,7 @@ export function ChatSettingsPanel({ language, sessionId, settings, onClose, onSa
     setTopP('');
     setMaxTokens('');
     setThink(null);
+    setUncensored(true);
   };
 
   const save = async () => {
@@ -96,6 +102,7 @@ export function ChatSettingsPanel({ language, sessionId, settings, onClose, onSa
         top_p: toNumber(topP),
         max_tokens: toNumber(maxTokens),
         think,
+        uncensored,
         // Never flip a chat in or out of incognito from here.
         ephemeral: settings.ephemeral,
       });
@@ -152,6 +159,13 @@ export function ChatSettingsPanel({ language, sessionId, settings, onClose, onSa
               </select>
             </label>
           </div>
+          <label className="owui-field">
+            <span>
+              <input type="checkbox" checked={uncensored} onChange={(e) => setUncensored(e.target.checked)} />
+              {' '}{copy.uncensored}
+            </span>
+            <small>{copy.uncensoredHint}</small>
+          </label>
           {error && <div className="owui-error" role="alert">{error}</div>}
         </div>
         <div className="owui-drawer-foot">
