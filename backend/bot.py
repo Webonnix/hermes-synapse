@@ -10,6 +10,7 @@ from typing import Optional, List
 from telegram import BotCommand, Update
 from telegram.ext import (
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -453,6 +454,46 @@ async def reject_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @admin_only
+async def approval_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Approve / Reject pressed on an approval card (backend/approval_notify.py)."""
+    query = update.callback_query
+    if not query or not _is_allowed_chat(update):
+        return
+    from backend.approval_notify import CALLBACK_PATTERN
+    match = re.fullmatch(CALLBACK_PATTERN, query.data or "")
+    if not match:
+        await query.answer()
+        return
+    action, task_id = match.groups()
+    from backend.control_plane import approve_task, get_task, reject_task
+    from backend.approval_dispatch import execute_if_ready
+    pending = await asyncio.to_thread(get_task, task_id)
+    if not pending or pending.get("status") != "awaiting_approval":
+        await query.answer("Уже решено")
+        await query.edit_message_reply_markup(reply_markup=None)
+        return
+    if action == "reject":
+        await asyncio.to_thread(reject_task, task_id, "Rejected from Telegram", "owner:telegram")
+        await query.answer("Отклонено")
+        await query.edit_message_text(f"{query.message.text}\n\n❌ Отклонено")
+        return
+    if pending.get("risk_class") == "R4":
+        await query.answer("R4 — только в веб-панели после повторного входа", show_alert=True)
+        return
+    try:
+        task = await asyncio.to_thread(approve_task, task_id, "owner:telegram")
+    except (KeyError, ValueError) as exc:
+        await query.answer(str(exc)[:180], show_alert=True)
+        return
+    await query.answer("Одобрено")
+    execution = await execute_if_ready(task)
+    task = await asyncio.to_thread(get_task, task_id) or task
+    outcome = f"✅ Одобрено · {task['status']}" if execution is not None else \
+        f"✅ Подтверждение {task['approval_count']}/{task['approvals_required']}"
+    await query.edit_message_text(f"{query.message.text}\n\n{outcome}")
+
+
+@admin_only
 async def halt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed_chat(update):
         return
@@ -888,6 +929,8 @@ async def init_bot() -> Application:
     telegram_app.add_handler(CommandHandler("approvals", approvals_command))
     telegram_app.add_handler(CommandHandler("approve", approve_command))
     telegram_app.add_handler(CommandHandler("reject", reject_command))
+    from backend.approval_notify import CALLBACK_PATTERN, bind as bind_approval_cards
+    telegram_app.add_handler(CallbackQueryHandler(approval_button, pattern=CALLBACK_PATTERN))
     telegram_app.add_handler(CommandHandler("halt", halt_command))
     telegram_app.add_handler(CommandHandler("resume", resume_command))
     
@@ -919,6 +962,7 @@ async def init_bot() -> Application:
     except Exception:
         logger.warning("Could not publish Telegram command menu", exc_info=True)
     await telegram_app.start()
+    bind_approval_cards(asyncio.get_running_loop())
     await telegram_app.updater.start_polling()
     logger.info("Telegram Bot active and polling.")
     return telegram_app

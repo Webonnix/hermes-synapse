@@ -344,7 +344,11 @@ def create_tool_task(tool_name: str, arguments: Dict[str, Any], chat_id: str) ->
                    metadata={"tool": tool_name, "waived_approvals": supervised_approvals - approvals_required,
                              **({"approval_rule": rule["id"]} if rule else {})})
         row = conn.execute("SELECT * FROM workflow_tasks WHERE id = ?", (task_id,)).fetchone()
-    return _task_from_row(row)
+    task = _task_from_row(row)
+    # After commit: the owner's Telegram gets a card with Approve / Reject.
+    from backend import approval_notify
+    approval_notify.notify_pending(task)
+    return task
 
 
 def create_review_task(
