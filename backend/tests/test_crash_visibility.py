@@ -144,3 +144,72 @@ def test_a_failing_hook_never_becomes_a_new_silent_failure(caplog, monkeypatch):
     monkeypatch.setattr(crash_visibility.logger, "critical", explode)
     # Must not propagate.
     crash_visibility._loop_exception_handler(None, {"message": "x", "exception": ValueError("y")})
+
+
+@pytest.mark.asyncio
+async def test_supervised_worker_is_restarted_after_dying(monkeypatch):
+    monkeypatch.setattr(crash_visibility, "alert_owner", lambda key, text: alerts.append(text))
+    alerts, runs = [], []
+
+    async def fast_sleep(_):
+        return None
+    monkeypatch.setattr(crash_visibility.asyncio, "sleep", fast_sleep)
+
+    async def worker():
+        runs.append(1)
+        if len(runs) < 3:
+            raise RuntimeError("boom")
+        await asyncio.Event().wait()  # third run stays up
+
+    task = crash_visibility.spawn_supervised(worker, "flaky")
+    for _ in range(20):
+        await asyncio.get_running_loop().run_in_executor(None, lambda: None)
+        if len(runs) >= 3:
+            break
+    assert len(runs) == 3 and len(alerts) == 2 and not task.done()
+    task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_supervised_worker_gives_up_after_too_many_deaths(monkeypatch):
+    alerts = []
+    monkeypatch.setattr(crash_visibility, "alert_owner", lambda key, text: alerts.append(key))
+
+    async def fast_sleep(_):
+        return None
+    monkeypatch.setattr(crash_visibility.asyncio, "sleep", fast_sleep)
+
+    async def worker():
+        raise RuntimeError("always")
+
+    task = crash_visibility.spawn_supervised(worker, "doomed", max_restarts=2)
+    await asyncio.wait_for(task, 2)
+    assert alerts[-1] == "gave-up:doomed"
+
+
+@pytest.mark.asyncio
+async def test_a_hung_startup_step_is_skipped(monkeypatch):
+    monkeypatch.setattr(crash_visibility, "alert_owner", lambda key, text: None)
+    assert await crash_visibility.bounded_start(asyncio.sleep(10), "slow", timeout=0.05) is None
+    assert await crash_visibility.bounded_start(asyncio.sleep(0, result="ok"), "fast", timeout=1) == "ok"
+
+
+def test_watchdog_exits_when_the_loop_stops_turning():
+    import threading
+    exited = threading.Event()
+    loop = asyncio.new_event_loop()  # never run: nothing it is given ever executes
+    try:
+        crash_visibility.start_loop_watchdog(loop, 0.3, exit_process=lambda code: exited.set())
+        assert exited.wait(3)
+    finally:
+        loop.close()
+
+
+@pytest.mark.asyncio
+async def test_watchdog_stays_quiet_while_the_loop_turns():
+    import threading
+    exited = threading.Event()
+    crash_visibility.start_loop_watchdog(asyncio.get_running_loop(), 0.3, exit_process=lambda code: exited.set())
+    for _ in range(12):
+        await asyncio.sleep(0.1)
+    assert not exited.is_set()

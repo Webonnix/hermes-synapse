@@ -19,6 +19,10 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    # A leak or a runaway job gets the backend OOM-killed and restarted instead
+    # of starving the GPU host (it uses ~0.5 GB in normal work).
+    mem_limit: 12g
+    memswap_limit: 12g
     ports:
       - "127.0.0.1:8000:8000"
     env_file:

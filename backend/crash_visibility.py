@@ -221,3 +221,127 @@ def spawn(
     the process lifetime is effectively never.
     """
     return supervise(asyncio.create_task(coro), name, oneshot=oneshot)
+
+
+# ── Self-healing: supervised restarts, owner alerts, event-loop watchdog ─────
+# The backend runs its workers inside the API process (see the module
+# docstring). Instead of splitting processes, a worker that dies is restarted
+# here with backoff and the owner hears about it; a loop that stops turning
+# altogether ends the process so Docker's restart policy brings it back.
+
+_ALERT_INTERVAL = 600
+_last_alert: dict = {}
+
+
+def alert_owner(key: str, text: str) -> None:
+    """Best-effort Telegram note to the owner, at most once per key per 10 min."""
+    import time
+
+    now = time.monotonic()
+    if now - _last_alert.get(key, -_ALERT_INTERVAL) < _ALERT_INTERVAL:
+        return
+    _last_alert[key] = now
+    try:
+        import backend.bot as bot
+
+        chat = (os.getenv("TELEGRAM_CHAT_ID") or "").split(",")[0].strip()
+        app = getattr(bot, "telegram_app", None)
+        if not chat or not app or not app.bot:
+            return
+
+        async def send() -> None:
+            try:
+                await app.bot.send_message(chat_id=int(chat), text=text)
+            except Exception as exc:
+                logger.warning("Owner alert not delivered: %s", type(exc).__name__)
+
+        asyncio.get_running_loop().create_task(send())
+    except Exception:
+        logger.debug("Owner alert skipped", exc_info=True)
+
+
+async def _supervised(factory, name: str, max_restarts: int) -> None:
+    import time
+    from collections import deque
+
+    crashes: deque = deque()
+    while True:
+        try:
+            await factory()
+            reason = "вышел из цикла"
+            logger.warning("Background worker %r returned; restarting it.", name)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {str(exc)[:200]}"
+            logger.critical("Background worker %r died: %s", name, exc, exc_info=exc)
+        now = time.monotonic()
+        crashes.append(now)
+        while crashes and now - crashes[0] > 3600:
+            crashes.popleft()
+        if len(crashes) > max_restarts:
+            logger.critical("Background worker %r keeps dying; giving up until the next restart.", name)
+            alert_owner(f"gave-up:{name}", f"⚠️ Hermes: фоновая задача {name} падает снова и снова "
+                        f"({reason}); остановлена до перезапуска бэкенда.")
+            return
+        delay = min(300, 5 * 2 ** (len(crashes) - 1))
+        alert_owner(f"restart:{name}", f"⚠️ Hermes: фоновая задача {name} упала ({reason}); перезапуск через {delay} с.")
+        await asyncio.sleep(delay)
+
+
+def spawn_supervised(factory, name: str, *, max_restarts: int = 5) -> "asyncio.Task":
+    """Run ``factory()`` (a coroutine function) as a long-lived worker that is
+    restarted with backoff when it raises or returns, and reported to the owner.
+    More than ``max_restarts`` deaths within an hour stop it for good."""
+    return spawn(_supervised(factory, name, max_restarts), name)
+
+
+async def bounded_start(coro: "Coroutine[Any, Any, Any]", name: str, timeout: float = 45.0) -> Any:
+    """Await a startup step without letting one hung channel block the rest."""
+    try:
+        return await asyncio.wait_for(coro, timeout)
+    except asyncio.TimeoutError:
+        logger.critical("Startup step %s did not finish in %ss; continuing without it.", name, timeout)
+        alert_owner(f"start:{name}", f"⚠️ Hermes: при запуске «{name}» не ответил за {int(timeout)} с и пропущен.")
+    except Exception as exc:
+        logger.critical("Startup step %s failed: %s", name, exc, exc_info=exc)
+    return None
+
+
+def start_loop_watchdog(loop: asyncio.AbstractEventLoop, stall_seconds: Optional[float] = None,
+                        *, exit_process=os._exit) -> Optional[threading.Thread]:
+    """A thread that ends the process when the event loop stops turning for
+    ``stall_seconds`` (HERMES_LOOP_STALL_SECONDS, default 180; 0 disables).
+    A blocked loop answers nothing, not even the health check, and Docker does
+    not restart an unhealthy container — but it does restart one that exited."""
+    import time
+
+    if stall_seconds is None:
+        stall_seconds = float(os.getenv("HERMES_LOOP_STALL_SECONDS", "180") or 0)
+    if stall_seconds <= 0:
+        return None
+    state = {"beat": time.monotonic()}
+
+    def beat() -> None:
+        state["beat"] = time.monotonic()
+
+    def watch() -> None:
+        while not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(beat)
+            except RuntimeError:
+                return  # loop closed: orderly shutdown
+            time.sleep(min(10.0, stall_seconds / 3))
+            stalled = time.monotonic() - state["beat"]
+            if stalled > stall_seconds:
+                logger.critical("Event loop stalled for %.0fs; exiting so Docker restarts the backend.", stalled)
+                try:
+                    faulthandler.dump_traceback(file=_fault_log_handle or sys.stderr, all_threads=True)
+                except Exception:
+                    pass
+                exit_process(70)
+                return
+
+    thread = threading.Thread(target=watch, name="loop-watchdog", daemon=True)
+    thread.start()
+    return thread

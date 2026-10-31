@@ -204,6 +204,9 @@ async def lifespan(app: FastAPI):
     # recorded reason instead of a log that just stops.
     from backend import crash_visibility
     crash_visibility.install()
+    # A loop that stops turning answers nothing, not even /health: exit instead,
+    # and Docker's restart policy brings the backend back (HERMES_LOOP_STALL_SECONDS).
+    crash_visibility.start_loop_watchdog(asyncio.get_running_loop())
 
     # Startup: Initialize DB, Qdrant/RAG and run the Telegram bot
     from backend.database import init_db
@@ -236,7 +239,7 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("Could not reconcile phone calls")
     from backend.phone_asterisk import controller as phone_controller
-    await phone_controller.start()
+    await crash_visibility.bounded_start(phone_controller.start(), "телефония")
 
     try:
         await _ensure_local_model_available(repair=True)
@@ -286,14 +289,14 @@ async def lifespan(app: FastAPI):
     dev_runs_worker_task = None
     if os.getenv("DEV_RUNS_WORKER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
         from backend import dev_runs
-        dev_runs_worker_task = crash_visibility.spawn(dev_runs.worker_loop(), "dev_runs.worker_loop")
+        dev_runs_worker_task = crash_visibility.spawn_supervised(dev_runs.worker_loop, "dev_runs.worker_loop")
 
     # Host metrics history for the «Метрики» charts: the host agent keeps only the
     # latest snapshot, this loop accumulates it (see backend/host_metrics.py).
     host_metrics_task = None
     if os.getenv("HOST_METRICS_HISTORY_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
         from backend import host_metrics
-        host_metrics_task = crash_visibility.spawn(host_metrics.sampler_loop(), "host_metrics.sampler_loop")
+        host_metrics_task = crash_visibility.spawn_supervised(host_metrics.sampler_loop, "host_metrics.sampler_loop")
 
     # Content Factory: additive schema, its agent roster, and the pipeline
     # worker that resumes interrupted runs. Every step is guarded — a failure
@@ -308,38 +311,39 @@ async def lifespan(app: FastAPI):
             logger.info("Content Factory: seeded agents %s", ", ".join(seeded))
         if os.getenv("CONTENT_FACTORY_WORKER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
             from backend.content_factory import execution as cf_execution
-            content_factory_worker_task = crash_visibility.spawn(cf_execution.worker_loop(), "content_factory.worker_loop")
+            content_factory_worker_task = crash_visibility.spawn_supervised(cf_execution.worker_loop, "content_factory.worker_loop")
     except Exception:
         logger.exception("Content Factory startup failed — the module is unavailable this run")
 
-    bot_app = await init_bot()
+    # Every channel starts under a time limit: one hung bot must not hold up the rest.
+    bot_app = await crash_visibility.bounded_start(init_bot(), "Telegram-бот", 60)
 
     from backend import agent_bot
-    await agent_bot.manager.start_all_active()
+    await crash_visibility.bounded_start(agent_bot.manager.start_all_active(), "каналы: agent_bot")
 
     from backend import agent_matrix_bot
-    await agent_matrix_bot.manager.start_all_active()
+    await crash_visibility.bounded_start(agent_matrix_bot.manager.start_all_active(), "каналы: agent_matrix_bot")
 
     from backend import agent_discord_bot
-    await agent_discord_bot.manager.start_all_active()
+    await crash_visibility.bounded_start(agent_discord_bot.manager.start_all_active(), "каналы: agent_discord_bot")
 
     from backend import agent_slack_bot
-    await agent_slack_bot.manager.start_all_active()
+    await crash_visibility.bounded_start(agent_slack_bot.manager.start_all_active(), "каналы: agent_slack_bot")
 
     from backend import agent_email_channel
-    await agent_email_channel.manager.start_all_active()
+    await crash_visibility.bounded_start(agent_email_channel.manager.start_all_active(), "каналы: agent_email_channel")
 
     # SMM Factory social channels. VK polls like the messengers above; the Meta
     # ones only register what is active — their messages arrive at
     # backend/social_webhooks.py, so there is nothing to start.
     from backend import agent_vk_bot
-    await agent_vk_bot.manager.start_all_active()
+    await crash_visibility.bounded_start(agent_vk_bot.manager.start_all_active(), "каналы: agent_vk_bot")
 
     from backend import agent_meta_channel
-    await agent_meta_channel.manager.start_all_active()
+    await crash_visibility.bounded_start(agent_meta_channel.manager.start_all_active(), "каналы: agent_meta_channel")
 
     from backend import agent_whatsapp_channel
-    await agent_whatsapp_channel.manager.start_all_active()
+    await crash_visibility.bounded_start(agent_whatsapp_channel.manager.start_all_active(), "каналы: agent_whatsapp_channel")
 
     # Background Obsidian vault sync (non-blocking)
     async def _obsidian_startup_sync():
@@ -356,7 +360,7 @@ async def lifespan(app: FastAPI):
     crash_visibility.spawn(_obsidian_startup_sync(), "_obsidian_startup_sync", oneshot=True)
     
     from backend.mcp_client import init_mcp_servers, shutdown_mcp_servers
-    await init_mcp_servers()
+    await crash_visibility.bounded_start(init_mcp_servers(), "MCP-серверы", 60)
 
     # Start BCM Session Scheduler in background (non-blocking)
     async def _bcm_session_scheduler_task():
@@ -370,7 +374,7 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.error(f"Error in BCM session scheduler task: {e}")
             await asyncio.sleep(60)
-    crash_visibility.spawn(_bcm_session_scheduler_task(), "_bcm_session_scheduler_task")
+    crash_visibility.spawn_supervised(_bcm_session_scheduler_task, "_bcm_session_scheduler_task")
 
     # Sweep lapsed subscriptions hourly so the admin view and the token statuses
     # agree. Enforcement doesn't depend on this — bot_access.check_access catches
@@ -384,7 +388,7 @@ async def lifespan(app: FastAPI):
             except Exception:
                 logger.exception("Subscription expiry sweep failed")
             await asyncio.sleep(3600)
-    crash_visibility.spawn(_subscription_expiry_task(), "_subscription_expiry_task")
+    crash_visibility.spawn_supervised(_subscription_expiry_task, "_subscription_expiry_task")
 
     # Recurring client invoices + overdue ageing. Idempotent per (услуга,
     # период), so an hourly sweep is safe and a missed run (backend restart)
@@ -392,7 +396,7 @@ async def lifespan(app: FastAPI):
     client_billing_task = None
     if os.getenv("CLIENT_BILLING_SCHEDULER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
         from backend import client_billing
-        client_billing_task = crash_visibility.spawn(client_billing.scheduler_loop(), "client_billing.scheduler_loop")
+        client_billing_task = crash_visibility.spawn_supervised(client_billing.scheduler_loop, "client_billing.scheduler_loop")
 
     # SMM Factory: send scheduled posts when their slot arrives. Only auto
     # posts move — a manual one has no way out of here, so a timer must not
@@ -401,14 +405,14 @@ async def lifespan(app: FastAPI):
     smm_scheduler_task = None
     if os.getenv("SMM_SCHEDULER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
         from backend import smm_posts
-        smm_scheduler_task = crash_visibility.spawn(smm_posts.scheduler_loop(), "smm_posts.scheduler_loop")
+        smm_scheduler_task = crash_visibility.spawn_supervised(smm_posts.scheduler_loop, "smm_posts.scheduler_loop")
 
     # Agent self-development: each agent's learning track runs on its cadence,
     # inside the quiet window (AGENT_LEARNING_WINDOW), one run at a time — it
     # uses the same model as live chat. See backend/agent_learning.py.
     if os.getenv("AGENT_LEARNING_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
         from backend import agent_learning
-        crash_visibility.spawn(agent_learning.scheduler_loop(), "agent_learning.scheduler_loop")
+        crash_visibility.spawn_supervised(agent_learning.scheduler_loop, "agent_learning.scheduler_loop")
 
     # Autonomous Earner: schema always (so the section renders), the worker only
     # while EARNER_ENABLED. The worker marks stages a previous process left
@@ -418,7 +422,7 @@ async def lifespan(app: FastAPI):
         earner_store.init_schema()
         if os.getenv("EARNER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
             from backend.earner import worker as earner_worker
-            crash_visibility.spawn(earner_worker.worker_loop(), "earner.worker_loop")
+            crash_visibility.spawn_supervised(earner_worker.worker_loop, "earner.worker_loop")
     except Exception:
         logger.exception("Autonomous Earner disabled: startup failed")
 
@@ -435,7 +439,7 @@ async def lifespan(app: FastAPI):
                 await health_check_all_active()
             except Exception:
                 logger.exception("Messenger channel health check sweep failed")
-    crash_visibility.spawn(_channel_health_check_task(), "_channel_health_check_task")
+    crash_visibility.spawn_supervised(_channel_health_check_task, "_channel_health_check_task")
 
     # CRM: one Telegram message a day listing overdue and due-today tasks —
     # the "reminder" half of the Задачи/Календарь section. A 30-minute poll
@@ -469,7 +473,7 @@ async def lifespan(app: FastAPI):
                     await asyncio.to_thread(set_setting, "crm_reminder_last_sent", today)
                 except Exception:
                     logger.exception("CRM daily reminder failed")
-        crash_visibility.spawn(_crm_reminder_task(), "_crm_reminder_task")
+        crash_visibility.spawn_supervised(_crm_reminder_task, "_crm_reminder_task")
 
     yield
     if smm_scheduler_task is not None:
