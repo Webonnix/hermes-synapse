@@ -3105,6 +3105,7 @@ export default function App() {
             models={models}
             fetchAgents={fetchSubagents}
             t={t}
+            onOpenDesktops={() => setActiveTab('desktops')}
           />
         )}
 

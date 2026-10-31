@@ -1,0 +1,38 @@
+/* Agent card (AgentsAdminTab): one agent, its settings split into tabs. */
+.agent-card-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.agent-card-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding-bottom: 8px;
+}
+.agent-card-tabs button {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.84rem;
+  padding: 6px 12px;
+}
+.agent-card-tabs button:hover { color: var(--text-main, #fff); }
+.agent-card-tabs button.is-active {
+  background: rgba(53, 212, 154, 0.1);
+  border-color: rgba(53, 212, 154, 0.35);
+  color: var(--text-main, #fff);
+}
+.agent-card-link {
+  background: none;
+  border: 0;
+  color: var(--accent-cyan, #36cffb);
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-decoration: underline;
+}

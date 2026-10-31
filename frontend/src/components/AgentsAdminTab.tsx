@@ -11,6 +11,7 @@ import type {
   RouterSessionStatus, RouterCombosResponse, RouterConnection, RouterConnectionsResponse, RouterModel, RouterTier, RouterOverview,
 } from '../types';
 import { styles } from '../styles';
+import './agentCard.css';
 
 const emptyProviderForm = {
   name: '', provider_type: 'openai_compatible', api_base: '', api_key: '',
@@ -108,7 +109,17 @@ interface AgentsAdminTabProps {
   models: { id: string; name: string }[];
   fetchAgents: () => void;
   t: (key: string) => string;
+  /** Opens the Desktops screen, where an agent's desktop is started and watched. */
+  onOpenDesktops?: () => void;
 }
+
+type CardTab = 'profile' | 'model' | 'budget' | 'channels' | 'learning' | 'desktop';
+const CARD_TABS: { id: CardTab; label: string; savedOnly?: boolean }[] = [
+  { id: 'profile', label: 'Профиль' }, { id: 'model', label: 'Модель' }, { id: 'budget', label: 'Бюджет' },
+  { id: 'channels', label: 'Каналы', savedOnly: true }, { id: 'learning', label: 'Обучение', savedOnly: true },
+  { id: 'desktop', label: 'Десктоп', savedOnly: true },
+];
+type AgentDesktop = { key: string; status: string; busy: string[]; kind?: string };
 
 const emptyAgent: AgentModel = {
   id: '',
@@ -133,8 +144,11 @@ const emptyAgent: AgentModel = {
   budget_fallback_to_local: false,
 };
 
-export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTabProps) {
+export function AgentsAdminTab({ agents, models, fetchAgents, t, onOpenDesktops }: AgentsAdminTabProps) {
   const [section, setSection] = useState<AdminSection>('agents');
+  // One agent, one card: the long edit form is split into these tabs.
+  const [cardTab, setCardTab] = useState<CardTab>('profile');
+  const [agentDesktop, setAgentDesktop] = useState<AgentDesktop | null | undefined>(undefined);
 
   const [draft, setDraft] = useState<AgentModel>(emptyAgent);
   const [paramsText, setParamsText] = useState('{}');
@@ -199,6 +213,20 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
   const [routerModelsLoaded, setRouterModelsLoaded] = useState(false);
 
   const selected = useMemo(() => agents.find(agent => agent.id === draft.id), [agents, draft.id]);
+  const visibleTab: CardTab = !selected && CARD_TABS.find(tab => tab.id === cardTab)?.savedOnly ? 'profile' : cardTab;
+
+  useEffect(() => {
+    setAgentDesktop(undefined);
+    if (!selected || section !== 'agents') return;
+    let cancelled = false;
+    fetch('/api/agent-desktops')
+      .then(response => (response.ok ? response.json() : null))
+      .then((data: { desktops?: AgentDesktop[] } | null) => {
+        if (!cancelled) setAgentDesktop(data?.desktops?.find(item => item.key === selected.id) ?? null);
+      })
+      .catch(() => { if (!cancelled) setAgentDesktop(null); });
+    return () => { cancelled = true; };
+  }, [selected, section]);
 
   const fetchProviders = () => {
     fetch('/api/providers', { headers: authHeaders() })
@@ -944,17 +972,61 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
             </div>
           </div>
 
-          <form className="glass-panel" onSubmit={saveAgent} style={{ padding: 20, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <form className="glass-panel agent-card" onSubmit={saveAgent}
+            onInvalidCapture={event => {
+              // A required field on a hidden tab: show that tab so the browser can point at it.
+              const tab = (event.target as HTMLElement).closest('[data-card-tab]')?.getAttribute('data-card-tab');
+              if (tab) setCardTab(tab as CardTab);
+            }}
+            style={{ padding: 20, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 14 }}>
             <div>
-              <h3 style={{ fontSize: '1.1rem', marginBottom: 4 }}>{selected ? t('editAgent') : t('createAgent')}</h3>
-              <p style={{ color: 'var(--text-dim)', fontSize: '0.82rem' }}>ID: {draft.id || 'new-agent'}</p>
+              <h3 style={{ fontSize: '1.1rem', marginBottom: 4 }}>{selected ? (draft.name || selected.name) : t('createAgent')}</h3>
+              <p style={{ color: 'var(--text-dim)', fontSize: '0.82rem' }}>ID: {draft.id || 'new-agent'}{selected?.role ? ` · ${selected.role}` : ''}</p>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            {selected && (
+              <div className="agent-card-summary" aria-label="Сводка агента">
+                <span className={`admin-status-chip ${selected.is_enabled ? 'is-active' : 'is-revoked'}`}><i className="dot" />{selected.is_enabled ? t('enabled') : t('disabled')}</span>
+                <span className="admin-status-chip">{selected.model || '—'}</span>
+                {selected.tier_id && <span className="admin-status-chip">{tiers.find(tr => tr.id === selected.tier_id)?.name || selected.tier_id}</span>}
+                {typeof budgetStatus?.used_usd === 'number' && <span className={`admin-status-chip${budgetStatus.exceeded ? ' is-revoked' : ''}`}>
+                  ${budgetStatus.used_usd.toFixed(2)}{budgetStatus.budget_usd_limit != null ? ` / $${budgetStatus.budget_usd_limit.toFixed(2)}` : ''}
+                </span>}
+                <span className="admin-status-chip">Telegram: {telegramBindings.length || 'нет'}</span>
+                <span className="admin-status-chip">Десктоп: {agentDesktop === undefined ? '…' : agentDesktop ? agentDesktop.status : 'нет'}</span>
+              </div>
+            )}
+
+            <div className="agent-card-tabs" role="tablist" aria-label="Разделы агента">
+              {CARD_TABS.filter(tab => selected || !tab.savedOnly).map(tab => (
+                <button key={tab.id} type="button" role="tab" aria-selected={visibleTab === tab.id}
+                  className={visibleTab === tab.id ? 'is-active' : ''} onClick={() => setCardTab(tab.id)}>{tab.label}</button>
+              ))}
+            </div>
+
+            <div data-card-tab="profile" hidden={visibleTab !== 'profile'} style={{ display: visibleTab === 'profile' ? 'grid' : 'none', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
               {field('ID', <input className="form-input" required value={draft.id} onChange={e => setDraft({ ...draft, id: e.target.value.replace(/[^a-zA-Z0-9_-]/g, '') })} />, true)}
               {field('Name', <input className="form-input" required value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} />, true)}
               {field(t('role'), <input className="form-input" value={draft.role || ''} onChange={e => setDraft({ ...draft, role: e.target.value })} />)}
               {field(t('status'), <input className="form-input" value={draft.status || 'idle'} onChange={e => setDraft({ ...draft, status: e.target.value })} />)}
+              {field(t('project'), (
+                <select
+                  className="form-input"
+                  value={draft.project_id || ''}
+                  onChange={e => setDraft({ ...draft, project_id: e.target.value || null })}
+                >
+                  <option value="">{t('unassignedProject')}</option>
+                  {projects.map(projectOpt => (
+                    <option key={projectOpt.id} value={projectOpt.id} disabled={!projectOpt.is_active}>
+                      {projectOpt.name}{!projectOpt.is_active ? ' — inactive' : ''}
+                    </option>
+                  ))}
+                </select>
+              ))}
+            </div>
+
+            <div data-card-tab="model" hidden={visibleTab !== 'model'} style={{ display: visibleTab === 'model' ? 'flex' : 'none', flexDirection: 'column', gap: 14 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
               {field(t('modelType'), (
                 <select className="form-input" value={draft.model_type || 'external'} onChange={e => setDraft({ ...draft, model_type: e.target.value })}>
                   <option value="external">{t('external')}</option>
@@ -999,20 +1071,6 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
                   {tiers.map(tierOpt => (
                     <option key={tierOpt.id} value={tierOpt.id} disabled={!tierOpt.is_active}>
                       {tierOpt.name}{!tierOpt.is_active ? ' — inactive' : ''}
-                    </option>
-                  ))}
-                </select>
-              ))}
-              {field(t('project'), (
-                <select
-                  className="form-input"
-                  value={draft.project_id || ''}
-                  onChange={e => setDraft({ ...draft, project_id: e.target.value || null })}
-                >
-                  <option value="">{t('unassignedProject')}</option>
-                  {projects.map(projectOpt => (
-                    <option key={projectOpt.id} value={projectOpt.id} disabled={!projectOpt.is_active}>
-                      {projectOpt.name}{!projectOpt.is_active ? ' — inactive' : ''}
                     </option>
                   ))}
                 </select>
@@ -1214,6 +1272,9 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
               </details>
             </div>
 
+            </div>
+
+            <div data-card-tab="profile" hidden={visibleTab !== 'profile'} style={{ display: visibleTab === 'profile' ? 'flex' : 'none', flexDirection: 'column', gap: 14 }}>
             {field(t('skills'), <input className="form-input" value={draft.skills || ''} onChange={e => setDraft({ ...draft, skills: e.target.value })} placeholder="web_search,python_sandbox" />)}
             {field(t('instructions'), <textarea className="form-input" rows={8} required value={draft.system_prompt} onChange={e => setDraft({ ...draft, system_prompt: e.target.value })} />, true)}
 
@@ -1222,6 +1283,9 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
               {t('enabled')}
             </label>
 
+            </div>
+
+            <div data-card-tab="budget" hidden={visibleTab !== 'budget'}>
             <div className="admin-form-section">
               <h4>Budget (external API spend)</h4>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
@@ -1278,6 +1342,10 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
               )}
             </div>
 
+            </div>
+
+            <div data-card-tab="channels" hidden={visibleTab !== 'channels'}>
+            <p className="admin-form-section-hint">Кто может писать этому агенту в мессенджерах — в разделе <button type="button" className="agent-card-link" onClick={() => setSection('access')}>Доступ к ботам</button>.</p>
             {selected && (
               <div className="admin-form-section">
                 <h4>Telegram bot</h4>
@@ -1325,7 +1393,19 @@ export function AgentsAdminTab({ agents, models, fetchAgents, t }: AgentsAdminTa
               </div>
             )}
 
+            </div>
+
+            <div data-card-tab="learning" hidden={visibleTab !== 'learning'}>
             {selected && <AgentLearningPanel agentId={selected.id} />}
+            </div>
+
+            <div data-card-tab="desktop" hidden={visibleTab !== 'desktop'} className="admin-form-section">
+              <h4>Рабочий стол агента</h4>
+              {agentDesktop === undefined && <p className="admin-form-section-hint">Проверяю…</p>}
+              {agentDesktop === null && <p className="admin-form-section-hint">У агента «{draft.id}» нет своего изолированного рабочего стола. Его можно создать на экране «Десктопы» с ключом «{draft.id}».</p>}
+              {agentDesktop && <p className="admin-form-section-hint">Состояние: <strong>{agentDesktop.status}</strong>{agentDesktop.busy.length ? ` · занят: ${agentDesktop.busy.join(', ')}` : ''}{agentDesktop.kind ? ` · тип: ${agentDesktop.kind}` : ''}</p>}
+              {onOpenDesktops && <button type="button" className="btn-primary" onClick={onOpenDesktops} style={{ alignSelf: 'flex-start' }}>Открыть «Десктопы»</button>}
+            </div>
 
             {error && <div style={{ color: 'var(--danger)', fontSize: '0.85rem' }}>{error}</div>}
 

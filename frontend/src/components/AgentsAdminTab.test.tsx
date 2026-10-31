@@ -636,9 +636,29 @@ describe('AgentsAdminTab — the new-agent form', () => {
     render(<AgentsAdminTab agents={[stale as never]} models={localModels} fetchAgents={() => {}} t={t} />);
 
     fireEvent.click(await screen.findByTitle(t('editAgent')));
+    fireEvent.click(screen.getByRole('tab', { name: 'Модель' }));
     // Kept selectable — snapping the agent onto a different model on save would
     // be worse — but named for what it is.
     expect(await screen.findByRole('option', { name: 'qwen3:8b' })).toBeInTheDocument();
     expect(document.querySelector('optgroup[label="настроено сейчас (нет на локальном сервере)"]')).toBeTruthy();
+  });
+
+  it('splits one agent into card tabs and keeps channels for saved agents only', async () => {
+    stubFetch({});
+    const agent = { id: 'writer', name: 'Writer', system_prompt: 'x', model: 'qwen3:8b',
+      agent_type: 'agent', role: 'Copywriter', status: 'idle', is_enabled: true,
+      model_provider: 'local', model_type: 'local', skills: '', temperature: 0.7,
+      model_params: {}, allowed_provider_ids: [], budget_fallback_to_local: false };
+    const openDesktops = vi.fn();
+    render(<AgentsAdminTab agents={[agent as never]} models={localModels} fetchAgents={() => {}} t={t} onOpenDesktops={openDesktops} />);
+    expect(screen.queryByRole('tab', { name: 'Каналы' })).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByTitle(t('editAgent')));
+    expect(screen.getByLabelText('Сводка агента')).toHaveTextContent('Десктоп');
+    for (const name of ['Профиль', 'Модель', 'Бюджет', 'Каналы', 'Обучение', 'Десктоп']) {
+      expect(screen.getByRole('tab', { name })).toBeInTheDocument();
+    }
+    fireEvent.click(screen.getByRole('tab', { name: 'Десктоп' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Открыть «Десктопы»' }));
+    expect(openDesktops).toHaveBeenCalledOnce();
   });
 });
