@@ -1,0 +1,13 @@
+[
+  {"text": "Позвони Анне Сергеевне Ковалёвой, её номер +7 916 123-45-67.", "must": ["Анне Сергеевне Ковалёвой", "+7 916 123-45-67"]},
+  {"text": "Отправь договор на ivan.petrov@zenith-trade.ru до пятницы.", "must": ["ivan.petrov@zenith-trade.ru"]},
+  {"text": "Паспорт клиента: 4510 123456, выдан ОВД Тверского района.", "must": ["4510 123456"]},
+  {"text": "Michael O'Connor lives at 14 Baker Street, London.", "must": ["Michael O'Connor", "14 Baker Street"]},
+  {"text": "Директор — Сидоров Пётр Ильич, офис: ул. Тверская, д. 12, кв. 5.", "must": ["Сидоров Пётр Ильич", "ул. Тверская, д. 12, кв. 5"]},
+  {"text": "Please send the invoice to Rachel Cohen, rachel.cohen@gmail.com, +972 52-123-4567.", "must": ["Rachel Cohen", "rachel.cohen@gmail.com", "+972 52-123-4567"]},
+  {"text": "Какая погода завтра в Москве и сколько стоит биткоин?", "must": [], "clean": true},
+  {"text": "Напиши функцию сортировки списка на Python с комментариями.", "must": [], "clean": true},
+  {"text": "Перенеси созвон с командой маркетинга на 15:00 четверга.", "must": [], "clean": true},
+  {"text": "Elon Musk said Tesla will open a new plant near Berlin.", "must": [], "clean": true},
+  {"text": "Заказ №1234567890 на сумму 15 000 руб. доставят 31.10.", "must": [], "clean": true}
+]

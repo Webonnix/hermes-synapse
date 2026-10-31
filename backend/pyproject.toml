@@ -35,6 +35,8 @@ dependencies = [
     "piper-tts>=1.6.0",
     "psutil>=5.9.0",
     "cryptography>=41.0.0",
+    # Privacy gateway: Russian person-name recognition on CPU; models ship inside the wheel.
+    "natasha>=1.6.0",
 ]
 
 [dependency-groups]

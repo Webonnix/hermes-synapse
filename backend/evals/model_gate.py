@@ -5,7 +5,8 @@
 The privacy gateway's local secret pass and tool selection depend on the model,
 its prompt and its sampling, so a new model (or a new build of the same one)
 must pass before it serves traffic: a swap once turned that pass into "[]" for
-everything. (Names and addresses are not this pass's job yet; see privacy stage 1.)
+everything. The personal-data check runs the whole gateway (patterns, Russian
+name model and the local model) on golden messages.
 Calls go through llm_gate at background priority. Exit 1 when a threshold fails.
 """
 from __future__ import annotations
@@ -17,7 +18,8 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).parent
-THRESHOLDS = {"secret_recall": 0.85, "secret_clean_precision": 0.9, "tool_accuracy": 0.8}
+THRESHOLDS = {"secret_recall": 0.85, "secret_clean_precision": 0.9, "pii_recall": 0.9,
+              "pii_clean_precision": 0.9, "tool_accuracy": 0.8}
 
 
 async def secret_scores() -> dict:
@@ -40,6 +42,31 @@ async def secret_scores() -> dict:
             clean_ok += not spans
     return {"secret_recall": found / expected if expected else 1.0,
             "secret_clean_precision": clean_ok / clean if clean else 1.0, "secret_misses": misses}
+
+
+async def pii_scores() -> dict:
+    from backend.privacy.gateway import redact_text
+    from backend.privacy.vault import PlaceholderVault
+
+    cases = json.loads((HERE / "golden_pii.json").read_text(encoding="utf-8"))
+    expected = hidden = clean = clean_ok = 0
+    misses, noisy = [], []
+    for case in cases:
+        redacted = await redact_text(case["text"], PlaceholderVault())
+        for item in case["must"]:
+            expected += 1
+            if item in redacted:
+                misses.append(item)
+            else:
+                hidden += 1
+        if case.get("clean"):
+            clean += 1
+            if redacted == case["text"]:
+                clean_ok += 1
+            else:
+                noisy.append(redacted)
+    return {"pii_recall": hidden / expected if expected else 1.0,
+            "pii_clean_precision": clean_ok / clean if clean else 1.0, "pii_misses": misses, "pii_noise": noisy}
 
 
 async def tool_scores() -> dict:
@@ -70,7 +97,7 @@ async def main() -> int:
     from backend.agent import agent_instance
 
     started = time.monotonic()
-    report = {"model": agent_instance.configured_model, **await secret_scores(), **await tool_scores()}
+    report = {"model": agent_instance.configured_model, **await secret_scores(), **await pii_scores(), **await tool_scores()}
     report["seconds"] = round(time.monotonic() - started, 1)
     report["failed"] = [name for name, floor in THRESHOLDS.items() if report[name] < floor]
     if "--json" in sys.argv:
@@ -80,6 +107,10 @@ async def main() -> int:
             print(f"{name}: {report[name]:.2f} (порог {floor})")
         for item in report["secret_misses"]:
             print("  секрет пропущен:", item)
+        for item in report["pii_misses"]:
+            print("  персональные данные не скрыты:", item)
+        for item in report["pii_noise"]:
+            print("  лишняя маска:", item)
         for item in report["tool_errors"]:
             print("  инструмент:", item)
         print("ПРОВАЛ: " + ", ".join(report["failed"]) if report["failed"] else "ОК: модель проходит гейт")

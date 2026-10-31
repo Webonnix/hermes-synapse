@@ -1,6 +1,6 @@
 """Placeholder table for one external call.
 
-Placeholders are deterministic: [SECRET_<first 8 hex of HMAC(value)>], keyed
+Placeholders are deterministic: [<KIND>_<first 8 hex of HMAC(value)>], keyed
 by PRIVACY_KEY (see keys.py). The same secret gets the same placeholder in
 every message, every call and every turn, so a re-sent history is
 byte-identical and the provider's prompt cache stays warm. On the rare
@@ -15,8 +15,11 @@ from typing import Dict, Iterable, Optional, Set
 
 from backend.privacy import keys
 
-# 6 hex: placeholders minted before stage 1a, still found in cached mappings.
-PLACEHOLDER_RE = re.compile(r"\[SECRET_[0-9a-f]{6,16}\]")
+# The kind tells the external model what stood there (a person, an e-mail…)
+# without the value. SECRET is the stage-0 kind; 6 hex: placeholders minted
+# before stage 1a, still found in cached mappings.
+KINDS = ("SECRET", "PERSON", "EMAIL", "PHONE", "ADDRESS", "ID")
+PLACEHOLDER_RE = re.compile(r"\[(?:" + "|".join(KINDS) + r")_[0-9a-f]{6,16}\]")
 _DIGEST_LENGTHS = (8, 12, 16)
 
 
@@ -32,11 +35,11 @@ class PlaceholderVault:
     def __len__(self) -> int:
         return len(self._by_placeholder)
 
-    def placeholder_for(self, value: str) -> str:
-        """The placeholder for `value`, minting one on first sight."""
+    def placeholder_for(self, value: str, kind: str = "SECRET") -> str:
+        """The placeholder for `value`, minting one of `kind` on first sight."""
         placeholder = self._by_value.get(value)
         if placeholder is None:
-            placeholder = self._new_placeholder(value)
+            placeholder = self._new_placeholder(value, kind if kind in KINDS else "SECRET")
             self._by_placeholder[placeholder] = value
             self._by_value[value] = placeholder
         self._touched.add(placeholder)
@@ -71,10 +74,10 @@ class PlaceholderVault:
     def values(self) -> Iterable[str]:
         return self._by_value.keys()
 
-    def _new_placeholder(self, value: str) -> str:
+    def _new_placeholder(self, value: str, kind: str) -> str:
         digest = keys.placeholder_digest(value)
         for length in _DIGEST_LENGTHS:
-            candidate = f"[SECRET_{digest[:length]}]"
+            candidate = f"[{kind}_{digest[:length]}]"
             if self._by_placeholder.get(candidate, value) == value:
                 return candidate
         raise RuntimeError("privacy: 64-bit placeholder collision")  # practically unreachable

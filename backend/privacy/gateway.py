@@ -14,6 +14,7 @@ message costs one local check (chunked if long) however many parts it has.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import logging
@@ -21,7 +22,7 @@ from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Tuple
 
 from backend.privacy import config, keys
-from backend.privacy.detectors import local_llm
+from backend.privacy.detectors import local_llm, pii
 from backend.privacy.detectors.regex import regex_redact
 from backend.privacy.vault import PLACEHOLDER_RE, PlaceholderVault
 
@@ -76,14 +77,25 @@ async def _redact_leaves(leaves: List[str], vault: PlaceholderVault, *,
                          full_scan: bool = True, status: _Pass | None = None) -> List[str]:
     status = status or _Pass()
     redacted = [regex_redact(leaf, vault) for leaf in leaves]
+    try:
+        # Personal data (stage 1): e-mails, phones, IDs, addresses, Russian names.
+        # CPU work (the name model loads once, ~2 s), so off the event loop.
+        redacted = await asyncio.to_thread(lambda: [pii.pii_redact(leaf, vault) for leaf in redacted])
+    except Exception as exc:
+        if config.fail_mode() == config.FAIL_CLOSED:
+            raise PrivacyCheckFailed(
+                f"Personal-data check unavailable ({type(exc).__name__}); request not sent to the external provider."
+            ) from exc
+        status.complete = False
+        logger.warning("privacy: personal-data pass failed: %s", type(exc).__name__)
     spans = await _local_spans(_LEAF_SEPARATOR.join(leaf for leaf in redacted if leaf), full_scan, status)
     # Longest first, so "pass word123" is not pre-empted by its own "word123".
     for span in sorted(spans, key=len, reverse=True):
-        if PLACEHOLDER_RE.search(span) or "[SECRET_" in span:
+        if PLACEHOLDER_RE.search(span) or "[" in span:
             continue
         if not any(_occurs_outside_placeholders(leaf, span) for leaf in redacted):
             continue
-        placeholder = vault.placeholder_for(span)
+        placeholder = vault.placeholder_for(span, pii.classify_span(span))
         redacted = [_replace_outside_placeholders(leaf, span, placeholder) for leaf in redacted]
     return redacted
 
